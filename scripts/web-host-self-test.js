@@ -142,7 +142,7 @@ try {
     const fullRestore = await request(port, "/api/host/backup/restore", "POST", { name: fullName, password: "self-test-only" });
     check(fullRestore.data.ok && fullRestore.data.manifest.type === "full", "isolated non-Docker full restore works");
     check((await request(port, "/health")).status === 200, "bridge resumes after full restore");
-  } else check(fullInspect.status === 400, "full migration inspect rejects unsupported platforms");
+  } else check(!fullInspect.data.ok && /Apple 芯片 Mac/.test(fullInspect.data.error || ""), "full migration inspect rejects unsupported platforms");
 
   // Large isolated payload leaves enough time to cancel during the copy stage.
   fs.writeFileSync(path.join(state, "data", "large.bin"), Buffer.alloc(64 * 1024 * 1024, 65), { mode: 0o600 });
