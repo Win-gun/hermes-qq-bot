@@ -137,10 +137,12 @@ try {
   check(full.data.ok && full.data.manifest.type === "full" && full.data.manifest.requiresPassword, "isolated full backup is encrypted");
   const fullName = path.basename(full.data.path);
   const fullInspect = await request(port, "/api/host/backup/inspect", "POST", { name: fullName, password: "self-test-only" });
-  check(fullInspect.data.ok && fullInspect.data.header.encrypted, "encrypted full backup inspects with password");
-  const fullRestore = await request(port, "/api/host/backup/restore", "POST", { name: fullName, password: "self-test-only" });
-  check(fullRestore.data.ok && fullRestore.data.manifest.type === "full", "isolated non-Docker full restore works");
-  check((await request(port, "/health")).status === 200, "bridge resumes after full restore");
+  if (process.platform === "darwin" && process.arch === "arm64") {
+    check(fullInspect.data.ok && fullInspect.data.header.encrypted, "encrypted full backup inspects with password");
+    const fullRestore = await request(port, "/api/host/backup/restore", "POST", { name: fullName, password: "self-test-only" });
+    check(fullRestore.data.ok && fullRestore.data.manifest.type === "full", "isolated non-Docker full restore works");
+    check((await request(port, "/health")).status === 200, "bridge resumes after full restore");
+  } else check(fullInspect.status === 400, "full migration inspect rejects unsupported platforms");
 
   // Large isolated payload leaves enough time to cancel during the copy stage.
   fs.writeFileSync(path.join(state, "data", "large.bin"), Buffer.alloc(64 * 1024 * 1024, 65), { mode: 0o600 });
