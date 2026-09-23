@@ -77,13 +77,16 @@ try {
   let wrongPasswordRejected = false;
   try { await inspectBackup({ path: full.path, password: "wrong" }); } catch { wrongPasswordRejected = true; }
   check(wrongPasswordRejected, "wrong password must be rejected");
-  const fullInfo = await inspectBackup({ path: full.path, password: "correct horse battery staple" });
-  check(fullInfo.manifest.type === "full" && fullInfo.header.encrypted, "full backup must be encrypted");
-  check(fullInfo.manifest.components.includes("diagnostic-logs") && fullInfo.manifest.files.some((item) => item.path === "diagnostic-logs/bridge.log"), "encrypted full backup must include optional logs");
-  await restoreBackup({ path: full.path, password: "correct horse battery staple", stateRoot: fullRestore, hermesHome: path.join(fullRestore, "hermes") });
-  const restoredFullConfig = JSON.parse(fs.readFileSync(path.join(fullRestore, "config.json"), "utf8"));
-  check(restoredFullConfig.ai.directApiKey === config.ai.directApiKey, "full restore must retain secrets inside encrypted package");
-  check(fs.readFileSync(path.join(fullRestore, "hermes", ".env"), "utf8").includes("DEEPSEEK_API_KEY"), "full restore must include app Hermes credentials");
+  if (process.platform === "darwin" && process.arch === "arm64") {
+    // Full migration is intentionally rejected by the product on other platforms.
+    const fullInfo = await inspectBackup({ path: full.path, password: "correct horse battery staple" });
+    check(fullInfo.manifest.type === "full" && fullInfo.header.encrypted, "full backup must be encrypted");
+    check(fullInfo.manifest.components.includes("diagnostic-logs") && fullInfo.manifest.files.some((item) => item.path === "diagnostic-logs/bridge.log"), "encrypted full backup must include optional logs");
+    await restoreBackup({ path: full.path, password: "correct horse battery staple", stateRoot: fullRestore, hermesHome: path.join(fullRestore, "hermes") });
+    const restoredFullConfig = JSON.parse(fs.readFileSync(path.join(fullRestore, "config.json"), "utf8"));
+    check(restoredFullConfig.ai.directApiKey === config.ai.directApiKey, "full restore must retain secrets inside encrypted package");
+    check(fs.readFileSync(path.join(fullRestore, "hermes", ".env"), "utf8").includes("DEEPSEEK_API_KEY"), "full restore must include app Hermes credentials");
+  }
 
   const beforeCancelled = fs.readdirSync(backups).length;
   const controller = new AbortController();
