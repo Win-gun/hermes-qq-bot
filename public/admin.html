@@ -1,0 +1,3272 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hermes QQ Bot 控制台</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0f17;
+      --panel: #121826;
+      --panel-2: #172033;
+      --card: #151c2b;
+      --line: #293247;
+      --line-soft: rgba(148, 163, 184, .18);
+      --text: #eef4ff;
+      --muted: #93a4bd;
+      --muted-2: #66758d;
+      --accent: #7c9cff;
+      --accent-2: #6ee7ff;
+      --good: #5ee08c;
+      --warn: #ffd166;
+      --bad: #ff6b81;
+      --shadow: 0 18px 50px rgba(0, 0, 0, .28);
+      --radius: 18px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(124, 156, 255, .18), transparent 34rem),
+        radial-gradient(circle at top right, rgba(110, 231, 255, .10), transparent 30rem),
+        var(--bg);
+      color: var(--text);
+    }
+    button, input, textarea, select { font: inherit; }
+    button {
+      border: 0;
+      border-radius: 12px;
+      padding: 10px 13px;
+      background: linear-gradient(135deg, #3f63ff, #6c82ff);
+      color: white;
+      cursor: pointer;
+      transition: transform .12s ease, filter .12s ease, opacity .12s ease;
+    }
+    button:hover { filter: brightness(1.08); transform: translateY(-1px); }
+    button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+    button.secondary { background: #273149; color: #d9e4ff; }
+    button.ghost { background: transparent; border: 1px solid var(--line); color: var(--muted); }
+    button.danger { background: linear-gradient(135deg, #b93550, #e14d66); }
+    button.good { background: linear-gradient(135deg, #168a52, #22c56f); }
+    a { color: inherit; text-decoration: none; }
+    label { display: block; margin: 0 0 7px; color: var(--muted); font-size: 12px; }
+    input, textarea, select {
+      width: 100%;
+      color: var(--text);
+      background: #0d1320;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 11px;
+      outline: none;
+    }
+    input:focus, textarea:focus, select:focus { border-color: rgba(124, 156, 255, .9); box-shadow: 0 0 0 3px rgba(124, 156, 255, .12); }
+    textarea { min-height: 110px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.55; }
+    input[type="checkbox"] { width: auto; transform: translateY(1px); }
+    input[type="range"] { padding: 0; accent-color: var(--accent); }
+    pre {
+      white-space: pre-wrap;
+      background: #0d1320;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 13px;
+      max-height: 360px;
+      overflow: auto;
+      color: #d8e4fb;
+    }
+    .shell {
+      display: grid;
+      grid-template-columns: 260px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+    .sidebar {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 22px 18px;
+      background: rgba(9, 13, 21, .72);
+      backdrop-filter: blur(16px);
+      border-right: 1px solid var(--line-soft);
+      overflow: auto;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .logo {
+      width: 42px;
+      height: 42px;
+      border-radius: 14px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, rgba(124, 156, 255, .95), rgba(110, 231, 255, .65));
+      box-shadow: 0 12px 30px rgba(89, 121, 255, .24);
+      font-size: 22px;
+    }
+    .brand h1 { margin: 0; font-size: 18px; letter-spacing: .2px; }
+    .brand .sub { margin-top: 2px; color: var(--muted); font-size: 12px; }
+    .nav { display: grid; gap: 7px; margin: 18px 0; }
+    .nav button {
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid transparent;
+      padding: 10px 12px;
+    }
+    .nav button.active, .nav button:hover {
+      background: rgba(124, 156, 255, .12);
+      border-color: rgba(124, 156, 255, .24);
+      color: var(--text);
+      transform: none;
+    }
+    .side-card {
+      margin-top: 14px;
+      padding: 13px;
+      background: rgba(21, 28, 43, .82);
+      border: 1px solid var(--line-soft);
+      border-radius: 16px;
+    }
+    .side-card .title { color: var(--muted); font-size: 12px; margin-bottom: 7px; }
+    .main {
+      min-width: 0;
+      padding: 24px;
+    }
+    .topbar {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+    .topbar h2 { margin: 0 0 5px; font-size: 25px; }
+    .topbar p { margin: 0; color: var(--muted); }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+    .page { display: none; }
+    .page.active { display: block; }
+    .grid { display: grid; gap: 14px; }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .card {
+      background: rgba(18, 24, 38, .88);
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius);
+      padding: 17px;
+      box-shadow: var(--shadow);
+    }
+    .card.flat { box-shadow: none; background: rgba(21, 28, 43, .72); }
+    .card h3 {
+      margin: 0 0 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 16px;
+    }
+    .section-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .section-title h3 { margin: 0; }
+    .stat {
+      min-height: 126px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .stat .label { color: var(--muted); font-size: 13px; }
+    .stat .value { margin: 9px 0 5px; font-size: 25px; font-weight: 700; word-break: break-word; }
+    .stat .hint { color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .dot {
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      border-radius: 99px;
+      margin-right: 7px;
+      background: var(--muted-2);
+      box-shadow: 0 0 0 4px rgba(148, 163, 184, .08);
+    }
+    .dot.good { background: var(--good); box-shadow: 0 0 0 4px rgba(94, 224, 140, .12); }
+    .dot.warn { background: var(--warn); box-shadow: 0 0 0 4px rgba(255, 209, 102, .12); }
+    .dot.bad { background: var(--bad); box-shadow: 0 0 0 4px rgba(255, 107, 129, .12); }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 9px;
+      border-radius: 999px;
+      background: #0d1320;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.2;
+    }
+    .pill.good { color: #b8ffd3; border-color: rgba(94, 224, 140, .32); background: rgba(94, 224, 140, .09); }
+    .pill.warn { color: #ffe8a3; border-color: rgba(255, 209, 102, .34); background: rgba(255, 209, 102, .09); }
+    .pill.bad { color: #ffd0d8; border-color: rgba(255, 107, 129, .36); background: rgba(255, 107, 129, .09); }
+    .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .muted { color: var(--muted); }
+    .small { font-size: 12px; }
+    .hint { color: var(--muted); font-size: 12px; line-height: 1.55; }
+    .alert, .success, .warning {
+      border-radius: 15px;
+      padding: 13px 14px;
+      margin: 10px 0;
+      line-height: 1.55;
+    }
+    .alert { border: 1px solid rgba(255, 107, 129, .40); background: rgba(255, 107, 129, .10); color: #ffd2d9; }
+    .success { border: 1px solid rgba(94, 224, 140, .34); background: rgba(94, 224, 140, .08); color: #caffdc; }
+    .warning { border: 1px solid rgba(255, 209, 102, .36); background: rgba(255, 209, 102, .08); color: #ffecb0; }
+    .hidden { display: none !important; }
+    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .field { min-width: 0; }
+    .field.full { grid-column: 1 / -1; }
+    .switch-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 11px 12px;
+      border: 1px solid var(--line-soft);
+      background: rgba(13, 19, 32, .7);
+      border-radius: 14px;
+      margin-bottom: 10px;
+    }
+    .switch-row strong { display: block; font-size: 14px; }
+    .switch-row span { color: var(--muted); font-size: 12px; }
+    .slider-line {
+      display: grid;
+      grid-template-columns: 130px minmax(0, 1fr) 70px;
+      gap: 10px;
+      align-items: center;
+      margin: 12px 0;
+    }
+    .quick-list { display: grid; gap: 10px; }
+    .quick-action {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 13px;
+      border: 1px solid var(--line-soft);
+      background: rgba(13, 19, 32, .62);
+      border-radius: 15px;
+    }
+    .quick-action strong { display: block; margin-bottom: 3px; }
+    .quick-action span { color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .backup-progress { margin-top: 16px; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel-2); }
+    .backup-progress-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+    .backup-progress progress { display: block; width: 100%; height: 10px; accent-color: var(--accent); }
+    .backup-progress .hint { margin-top: 7px; }
+    .qr {
+      width: 210px;
+      height: 210px;
+      background: white;
+      border-radius: 16px;
+      padding: 9px;
+    }
+    .protocol-fields[hidden], .protocol-only[hidden] { display: none !important; }
+    .account-actions { align-items: stretch; }
+    .account-actions > a, .account-actions > button { display: inline-flex; align-items: center; justify-content: center; }
+    .login-assist { display: grid; gap: 10px; }
+    .memory-layout {
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      gap: 14px;
+    }
+    .list {
+      max-height: 520px;
+      overflow: auto;
+      display: grid;
+      gap: 8px;
+    }
+    .list-item {
+      padding: 11px 12px;
+      border-radius: 14px;
+      border: 1px solid var(--line-soft);
+      background: rgba(13, 19, 32, .62);
+      cursor: pointer;
+    }
+    .list-item:hover, .list-item.active { border-color: rgba(124, 156, 255, .45); background: rgba(124, 156, 255, .11); }
+    .list-item strong { display: block; margin-bottom: 5px; }
+    .log-tabs { display: flex; gap: 8px; margin-bottom: 10px; }
+    .toast-wrap {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      display: grid;
+      gap: 10px;
+      z-index: 20;
+    }
+    .toast {
+      width: min(420px, calc(100vw - 36px));
+      padding: 13px 14px;
+      border-radius: 15px;
+      background: rgba(18, 24, 38, .96);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      color: var(--text);
+    }
+    .toast.bad { border-color: rgba(255, 107, 129, .45); }
+    .toast.good { border-color: rgba(94, 224, 140, .38); }
+    .kbd {
+      border: 1px solid var(--line);
+      border-bottom-width: 2px;
+      background: #0d1320;
+      border-radius: 8px;
+      padding: 2px 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    details {
+      border: 1px solid var(--line-soft);
+      border-radius: 15px;
+      background: rgba(13, 19, 32, .45);
+      padding: 11px 12px;
+      margin-top: 12px;
+    }
+    summary { cursor: pointer; color: #dce7ff; }
+    @media (max-width: 1160px) {
+      .shell { grid-template-columns: 1fr; }
+      .sidebar { position: relative; height: auto; }
+      .nav { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .memory-layout { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 760px) {
+      .main { padding: 16px; }
+      .topbar { display: grid; }
+      .toolbar { justify-content: stretch; }
+      .toolbar button { flex: 1; }
+      .grid.two, .grid.three, .grid.four, .form-grid { grid-template-columns: 1fr; }
+      .field.full { grid-column: auto; }
+      .slider-line { grid-template-columns: 1fr; }
+      .nav { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo">🤖</div>
+        <div>
+          <h1>Hermes 控制台</h1>
+          <div class="sub">本机 QQ Bot 管理</div>
+        </div>
+      </div>
+
+      <div class="side-card">
+        <div class="title">当前状态</div>
+        <div id="sideStatus" class="row"><span class="pill">加载中</span></div>
+      </div>
+
+      <nav class="nav" id="nav">
+        <button data-page="overview" class="active">总览</button>
+        <button data-page="accounts">主备账号</button>
+        <button data-page="quick">常用操作</button>
+        <button data-page="model">模型 / API</button>
+        <button data-page="behavior">活跃度</button>
+        <button data-page="tools">联网 / 识图</button>
+        <button data-page="prompt">提示词</button>
+        <button data-page="memory">记忆</button>
+        <button data-page="archive">聊天存档</button>
+        <button data-page="tasks">任务 / Agent</button>
+        <button data-page="reviewer">回复审查</button>
+        <button data-page="backup">备份与迁移</button>
+        <button data-page="logs">日志</button>
+      </nav>
+
+      <div class="side-card">
+        <div class="title">保存状态</div>
+        <div id="saveState">加载中</div>
+        <div class="hint" id="lastRefresh">尚未刷新</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <div>
+          <h2 id="pageTitle">总览</h2>
+          <p id="pageSubtitle">查看连接、登录、模型、联网、识图和记忆状态。</p>
+        </div>
+        <div class="toolbar">
+          <button id="refreshBtn">刷新</button>
+          <button id="saveBtn" class="good">保存配置</button>
+          <button id="autoRefreshBtn" class="secondary">自动刷新：开</button>
+        </div>
+      </div>
+
+      <section id="page-overview" class="page active">
+        <div class="grid four">
+          <div class="card stat">
+            <div>
+              <div class="label">QQ 登录</div>
+              <div class="value" id="statLogin">加载中</div>
+            </div>
+            <div class="hint" id="statLoginHint">等待状态接口返回。</div>
+          </div>
+          <div class="card stat">
+            <div>
+              <div class="label">OneBot 连接</div>
+              <div class="value" id="statOnebot">加载中</div>
+            </div>
+            <div class="hint" id="statOnebotHint">桥接端口 6199。</div>
+          </div>
+          <div class="card stat">
+            <div>
+              <div class="label">对话模型</div>
+              <div class="value" id="statModel">加载中</div>
+            </div>
+            <div class="hint" id="statModelHint">provider / model。</div>
+          </div>
+          <div class="card stat">
+            <div>
+              <div class="label">记忆库</div>
+              <div class="value" id="statMemory">加载中</div>
+            </div>
+            <div class="hint" id="statMemoryHint">群与成员记忆。</div>
+          </div>
+        </div>
+
+        <div class="grid two" style="margin-top:14px">
+          <div class="card">
+            <h3>需要你关注的事 <span id="attentionPill" class="pill">检查中</span></h3>
+            <div id="attentionBox" class="success">正在加载状态……</div>
+            <div id="loginAssist" class="hidden login-assist">
+              <div class="row">
+                <img id="loginQr" class="qr hidden" alt="QQ 登录二维码" />
+                <div>
+                  <p class="muted" id="loginAssistInfo">账号登录需要处理。</p>
+                  <div class="row account-actions">
+                    <a id="overviewProtocolWebuiLink" class="pill hidden" target="_blank" rel="noreferrer">打开协议端 WebUI</a>
+                    <a id="overviewNoVncLink" class="pill hidden" target="_blank" rel="noreferrer">打开 noVNC 桌面</a>
+                    <button id="overviewProbePrimaryBtn">检测主号</button>
+                    <button id="overviewRestartProtocolBtn" class="danger">重启主号协议端</button>
+                    <button id="overviewRefreshQrBtn" class="hidden">刷新二维码</button>
+                    <button id="overviewRebuildNapcatBtn" class="danger hidden">稳定重建 NapCat</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>能力开关</h3>
+            <div class="row" id="capabilityPills"></div>
+            <div class="quick-list" style="margin-top:14px">
+              <div class="quick-action">
+                <div><strong>监听范围</strong><span id="scopeText">加载中</span></div>
+                <button class="secondary" data-jump="tools">查看</button>
+              </div>
+              <div class="quick-action">
+                <div><strong>当前活跃模式</strong><span id="behaviorText">加载中</span></div>
+                <button class="secondary" data-jump="behavior">调整</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <h3>最近事件</h3>
+          <pre id="recentLog">加载中...</pre>
+        </div>
+      </section>
+
+      <section id="page-accounts" class="page">
+        <div class="grid two">
+          <div class="card">
+            <div class="section-title">
+              <h3>主、备账号状态</h3>
+              <div class="row">
+                <button id="peerPingTopBtn">双向验活</button>
+                <button id="refreshAccountsTopBtn" class="secondary">刷新状态</button>
+              </div>
+            </div>
+            <div class="hint">每个账号都可以单独管理协议端、登录入口和连接状态。绿色“当前接管”表示桥接现在用这个账号收发消息。</div>
+            <div id="accountCards" class="grid two" style="margin-top:12px"></div>
+          </div>
+
+          <div class="card">
+            <h3>账号配置</h3>
+            <div class="form-grid">
+              <div class="field">
+                <label>主账号 QQ</label>
+                <input id="accounts.primary.qq" placeholder="请输入主账号 QQ" />
+              </div>
+              <div class="field">
+                <label>主账号协议端</label>
+                <select id="accounts.primary.protocol">
+                  <option value="snowluma">SnowLuma</option>
+                  <option value="napcat">NapCat</option>
+                </select>
+              </div>
+              <div class="field protocol-fields" data-protocol-account="primary" data-protocol-kind="napcat">
+                <label>主账号 NapCat 容器</label>
+                <input id="accounts.primary.napcatContainer" placeholder="napcat" />
+              </div>
+              <div class="field protocol-fields" data-protocol-account="primary" data-protocol-kind="napcat">
+                <label>主账号 OneBot 路径</label>
+                <input id="accounts.primary.onebotPath" placeholder="/onebot" />
+              </div>
+              <div class="field">
+                <label>主账号协议端容器</label>
+                <input id="accounts.primary.protocolContainer" placeholder="snowluma-primary" />
+              </div>
+              <div class="field">
+                <label>主账号 WebUI 端口</label>
+                <input id="accounts.primary.webuiPort" type="number" placeholder="6103" />
+              </div>
+              <div class="field protocol-fields" data-protocol-account="primary" data-protocol-kind="snowluma">
+                <label>主账号 noVNC 端口</label>
+                <input id="accounts.primary.noVncPort" type="number" placeholder="6104" />
+              </div>
+              <div class="field protocol-fields" data-protocol-account="primary" data-protocol-kind="snowluma">
+                <label>主账号 VNC 端口</label>
+                <input id="accounts.primary.vncPort" type="number" placeholder="5902" />
+              </div>
+              <div class="field">
+                <label>主账号 OneBot WS</label>
+                <input id="accounts.primary.onebotWsUrl" placeholder="ws://127.0.0.1:6303" />
+              </div>
+              <div class="field protocol-fields" data-protocol-account="primary" data-protocol-kind="snowluma">
+                <label>主账号 SnowLuma 镜像</label>
+                <input id="accounts.primary.snowlumaImage" placeholder="motricseven7/snowluma:latest" />
+              </div>
+              <div class="field">
+                <label>备用 A QQ</label>
+                <input id="accounts.standbys.0.qq" placeholder="登录后可自动识别，也可手填" />
+              </div>
+              <div class="field">
+                <label>备用 A 协议端</label>
+                <select id="accounts.standbys.0.protocol">
+                  <option value="snowluma">SnowLuma</option>
+                  <option value="napcat">NapCat</option>
+                </select>
+              </div>
+              <div class="field protocol-fields" data-protocol-account="standby-a" data-protocol-kind="napcat">
+                <label>备用 A NapCat 容器</label>
+                <input id="accounts.standbys.0.napcatContainer" placeholder="napcat-standby-a" />
+              </div>
+              <div class="field">
+                <label>备用 A 协议端容器</label>
+                <input id="accounts.standbys.0.protocolContainer" placeholder="snowluma-standby-a" />
+              </div>
+              <div class="field">
+                <label>备用 A WebUI 端口</label>
+                <input id="accounts.standbys.0.webuiPort" type="number" placeholder="6101" />
+              </div>
+              <div class="field protocol-fields" data-protocol-account="standby-a" data-protocol-kind="snowluma">
+                <label>备用 A noVNC 端口</label>
+                <input id="accounts.standbys.0.noVncPort" type="number" placeholder="6102" />
+              </div>
+              <div class="field protocol-fields" data-protocol-account="standby-a" data-protocol-kind="snowluma">
+                <label>备用 A VNC 端口</label>
+                <input id="accounts.standbys.0.vncPort" type="number" placeholder="5901" />
+              </div>
+              <div class="field">
+                <label>备用 A OneBot WS</label>
+                <input id="accounts.standbys.0.onebotWsUrl" placeholder="ws://127.0.0.1:6301" />
+              </div>
+              <div class="field protocol-fields" data-protocol-account="standby-a" data-protocol-kind="snowluma">
+                <label>备用 A SnowLuma 镜像</label>
+                <input id="accounts.standbys.0.snowlumaImage" placeholder="motricseven7/snowluma:latest" />
+              </div>
+              <div class="field protocol-fields" data-protocol-account="standby-a" data-protocol-kind="napcat">
+                <label>备用 A OneBot 路径</label>
+                <input id="accounts.standbys.0.onebotPath" placeholder="/onebot" />
+              </div>
+              <div class="field">
+                <label>备用 A 模式</label>
+                <select id="accounts.standbys.0.behaviorMode">
+                  <option value="normal">正常 normal</option>
+                  <option value="restrained">克制 restrained</option>
+                  <option value="lively">活跃 lively</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>备用 A 启用</label>
+                <select id="accounts.standbys.0.enabled">
+                  <option value="true">启用</option>
+                  <option value="false">停用</option>
+                </select>
+              </div>
+            </div>
+            <div class="switch-row">
+              <div><strong>主备切换</strong><span>主号异常时允许备用账号接管，主号恢复后自动切回。</span></div>
+              <input id="accounts.failover.enabled" type="checkbox" />
+            </div>
+            <div class="switch-row">
+              <div><strong>主号恢复后切回</strong><span>备用账号接管期间，主号健康后自动切回主号。</span></div>
+              <input id="accounts.failover.switchBackWhenPrimaryHealthy" type="checkbox" />
+            </div>
+            <div class="field">
+              <label>切换等待 ms</label>
+              <input id="accounts.failover.switchAfterMs" type="number" />
+            </div>
+            <div class="row" style="margin-top:12px">
+              <button id="saveAccountsBtn">保存账号配置</button>
+              <button id="refreshAccountsBtn" class="secondary">刷新状态</button>
+              <button id="peerPingBtn" class="secondary">双向验活</button>
+            </div>
+            <div class="warning" style="margin-top:12px">“备用 A 启用”只控制是否参与自动接管。SnowLuma 的账号登录在 WebUI 或 noVNC 中完成；修改协议类型、容器、端口或 WS 地址后，请保存配置并重启对应协议端。</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-quick" class="page">
+        <div class="grid two">
+          <div class="card">
+            <h3>常用操作</h3>
+            <div class="quick-list">
+              <div class="quick-action">
+                <div><strong>测试模型</strong><span>发一次短请求，不会发送到 QQ。</span></div>
+                <button id="testAiBtn">测试</button>
+              </div>
+              <div class="quick-action">
+                <div><strong>测试搜索</strong><span>用当前搜索配置查“24小时内重要科技新闻”。</span></div>
+                <button id="testSearchBtn">测试</button>
+              </div>
+              <div class="quick-action">
+                <div><strong>当前协议端 WebUI</strong><span id="activeProtocolText">查看当前接管账号的登录、OneBot 和协议端状态。</span></div>
+                <a id="activeProtocolLink" class="pill" target="_blank" rel="noreferrer">打开</a>
+              </div>
+              <div class="quick-action" id="activeNoVncAction">
+                <div><strong>当前账号 noVNC</strong><span>直接打开 QQ 桌面，用于扫码、确认登录和处理弹窗。</span></div>
+                <a id="activeNoVncLink" class="pill" target="_blank" rel="noreferrer">打开</a>
+              </div>
+              <div class="quick-action">
+                <div><strong>重启桥接服务</strong><span>用于配置异常、连接异常时恢复。</span></div>
+                <button id="restartBridgeBtn" class="danger">重启</button>
+              </div>
+              <div class="quick-action">
+                <div><strong>重启当前协议端</strong><span id="restartActiveProtocolHint">用于登录态、Hook 或 OneBot 链路异常。</span></div>
+                <button id="restartActiveProtocolBtn" class="danger">重启</button>
+              </div>
+            </div>
+            <details id="legacyNapcatTools" class="hidden">
+              <summary>NapCat 兼容工具</summary>
+              <p class="hint">仅在仍配置 NapCat 账号时使用，不影响 SnowLuma 主备账号。</p>
+              <div class="row">
+                <button id="legacyRefreshQrBtn">刷新主号二维码</button>
+                <button id="legacyRebuildNapcatBtn" class="danger">稳定重建 NapCat</button>
+              </div>
+            </details>
+          </div>
+
+          <div class="card">
+            <h3>发送测试消息</h3>
+            <div class="form-grid">
+              <div class="field">
+                <label>群 ID</label>
+                <input id="send.groupId" placeholder="例如 364433603" />
+              </div>
+              <div class="field">
+                <label>快速填入</label>
+                <select id="send.groupSelect"></select>
+              </div>
+              <div class="field full">
+                <label>消息内容</label>
+                <textarea id="send.message" placeholder="只用于手动测试发送，不走 AI 生成。"></textarea>
+              </div>
+            </div>
+            <div class="row">
+              <button id="sendBtn">发送测试消息</button>
+              <button id="clearOpsBtn" class="secondary">清空结果</button>
+            </div>
+            <pre id="opsResult">操作结果会显示在这里。</pre>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-model" class="page">
+        <div class="grid two">
+          <div class="card">
+            <h3>已保存的 API 配置</h3>
+            <div class="field">
+              <label>配置档案</label>
+              <select id="aiProfileSelect"></select>
+            </div>
+            <div id="aiProfileActiveState" class="hint" style="margin-top:10px">加载中...</div>
+            <div class="row" style="margin-top:14px">
+              <button id="activateAiProfileBtn">设为当前配置</button>
+              <button id="newAiProfileBtn" class="secondary">新建</button>
+              <button id="duplicateAiProfileBtn" class="secondary">复制</button>
+              <button id="deleteAiProfileBtn" class="danger">删除</button>
+            </div>
+            <div class="warning" style="margin-top:14px">
+              API Key 只保存环境变量名，不保存明文。切换配置会热更新下一次对话调用；正在生成的回复不受影响。
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>编辑配置档案</h3>
+            <div class="form-grid">
+              <div class="field">
+                <label>配置名称</label>
+                <input id="ai.profileName" maxlength="60" placeholder="例如：DeepSeek 日常" />
+              </div>
+              <div class="field">
+                <label>套用预设</label>
+                <select id="modelPreset">
+                  <option value="">选择后填入参数</option>
+                  <option value="openai">OpenAI API</option>
+                  <option value="faro">Faro API（OpenAI 兼容）</option>
+                  <option value="mimo">Xiaomi MiMo</option>
+                  <option value="deepseek">DeepSeek API</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>命令</label>
+                <input id="ai.command" />
+              </div>
+              <div class="field">
+                <label>超时 ms</label>
+                <input id="ai.timeoutMs" type="number" />
+              </div>
+              <div class="field">
+                <label>Provider</label>
+                <input id="ai.provider" placeholder="openai-api / custom / xiaomi / deepseek" />
+              </div>
+              <div class="field">
+                <label>Model</label>
+                <input id="ai.model" placeholder="gpt-5.4-mini / mimo-v2.5 / deepseek-v4-flash" />
+              </div>
+              <div class="field">
+                <label>Base URL</label>
+                <input id="ai.baseUrl" placeholder="https://.../v1" />
+              </div>
+              <div class="field">
+                <label>API Key 环境变量名</label>
+                <input id="ai.apiKeyEnv" placeholder="不要填真实 key，填环境变量名" />
+              </div>
+              <div class="field">
+                <label>Reasoning / 思考强度</label>
+                <select id="ai.reasoningEffort">
+                  <option value="none">none（最快，日常默认）</option>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                </select>
+              </div>
+              <div class="field full">
+                <label>Hermes args（高级；每行一个参数）</label>
+                <textarea id="ai.args"></textarea>
+              </div>
+            </div>
+            <div class="row">
+              <button id="saveModelBtn">保存配置档案</button>
+              <button id="testAiBtn2" class="secondary">测试模型</button>
+            </div>
+            <div class="hint" style="margin-top:12px">Faro 使用 OpenAI 兼容模式，需要填写 Faro 提供的 Base URL、模型名，并确保服务环境中存在 <span class="kbd">FARO_API_KEY</span>。</div>
+            <pre id="aiTest">还没有测试。</pre>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-behavior" class="page">
+        <div class="grid two">
+          <div class="card">
+            <h3>活跃度预设</h3>
+            <div class="row">
+              <button id="presetRestrained" class="secondary">克制版</button>
+              <button id="presetNormal" class="secondary">正常版</button>
+              <button id="presetLively">活跃版</button>
+            </div>
+            <div class="hint" style="margin-top:10px">预设只会填入表单，点“保存配置”后才生效。正常版等于之前的克制版；新的克制版更安静；活跃版更积极参与讨论。</div>
+            <div class="form-grid" style="margin-top:12px">
+              <div class="field">
+                <label>默认模式</label>
+                <select id="behaviorModes.default">
+                  <option value="normal">正常 normal</option>
+                  <option value="restrained">克制 restrained</option>
+                  <option value="lively">活跃 lively</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>主动接话冷却 ms</label>
+                <input id="trigger.activeCooldownMs" type="number" />
+              </div>
+              <div class="field">
+                <label>定时检查间隔 ms</label>
+                <input id="proactive.intervalMs" type="number" />
+              </div>
+              <div class="field">
+                <label>定时插话冷却 ms</label>
+                <input id="proactive.cooldownMs" type="number" />
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>概率调节</h3>
+            <div class="switch-row">
+              <div><strong>定时主动插话</strong><span>群里长时间没话时，是否允许它主动找话题。</span></div>
+              <input id="proactive.enabled" type="checkbox" />
+            </div>
+            <div class="slider-line">
+              <label>普通聊天接话</label>
+              <input id="trigger.activeProbability.slider" type="range" min="0" max="1" step="0.01" />
+              <input id="trigger.activeProbability" type="number" step="0.01" min="0" max="1" />
+            </div>
+            <div class="slider-line">
+              <label>定时插话概率</label>
+              <input id="proactive.probability.slider" type="range" min="0" max="1" step="0.01" />
+              <input id="proactive.probability" type="number" step="0.01" min="0" max="1" />
+            </div>
+            <div class="hint">建议：克制版普通接话 0.02–0.06；正常版 0.10–0.15；活跃版 0.20–0.35。与 bot 相关、@、私聊仍会优先回复。</div>
+          </div>
+
+          <div class="card">
+            <h3>真人感社交判断</h3>
+            <div class="switch-row">
+              <div><strong>启用社交判断</strong><span>模糊接话和讨论参与先判断是否值得开口；明确 @、私聊和命令不受影响。</span></div>
+              <input id="socialPlanner.enabled" type="checkbox" />
+            </div>
+            <div class="switch-row">
+              <div><strong>影子模式</strong><span>只记录判断，不改变现有发言行为，适合观察和回退。</span></div>
+              <input id="socialPlanner.shadowMode" type="checkbox" />
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label>最低回复置信度</label>
+                <input id="socialPlanner.minConfidence" type="number" min="0" max="1" step="0.01" />
+              </div>
+              <div class="field">
+                <label>判断超时 ms</label>
+                <input id="socialPlanner.timeoutMs" type="number" min="2000" max="120000" />
+              </div>
+            </div>
+            <div class="hint">当前档位可覆盖最低置信度：活跃 0.45、正常 0.58、克制 0.72。</div>
+            <pre id="socialPlannerRecent" style="margin-top:10px">暂无社交判断记录</pre>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-tools" class="page">
+        <div class="grid two">
+          <div class="card">
+            <h3>联网搜索</h3>
+            <div class="switch-row">
+              <div><strong>启用联网搜索</strong><span>受控搜索模式，触发前 bot 会先说一句。</span></div>
+              <input id="webSearch.enabled" type="checkbox" />
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label>Provider</label>
+                <input id="webSearch.provider" />
+              </div>
+              <div class="field">
+                <label>最大结果数</label>
+                <input id="webSearch.maxResults" type="number" />
+              </div>
+              <div class="field">
+                <label>超时 ms</label>
+                <input id="webSearch.timeoutMs" type="number" />
+              </div>
+              <div class="field">
+                <label>Provider Order（逗号或换行）</label>
+                <input id="webSearch.providerOrder" />
+              </div>
+              <div class="field full">
+                <label>代理 URLs（每行一个）</label>
+                <textarea id="webSearch.proxy.urls"></textarea>
+              </div>
+            </div>
+            <div class="row">
+              <button id="saveSearchBtn">保存搜索配置</button>
+              <button id="testSearchBtn2" class="secondary">测试搜索</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>图片识别 / Vision</h3>
+            <div class="switch-row">
+              <div><strong>启用图片识别</strong><span>被 @ / 私聊 / 明确问图时识别 QQ 图片。</span></div>
+              <input id="vision.enabled" type="checkbox" />
+            </div>
+            <div class="switch-row">
+              <div><strong>仅明确需要时识图</strong><span>避免每张闲图都消耗模型调用。</span></div>
+              <input id="vision.onlyWhenMentionedOrAsked" type="checkbox" />
+            </div>
+            <div class="switch-row">
+              <div><strong>AI 判断是否识图</strong><span>先让对话模型判断是否需要看图，再调用 Vision。</span></div>
+              <input id="vision.aiJudge.enabled" type="checkbox" />
+            </div>
+            <div class="switch-row">
+              <div><strong>识别引用图片</strong><span>引用历史图片后问它，也会尝试拉取原图识别。</span></div>
+              <input id="vision.includeQuotedImages" type="checkbox" />
+            </div>
+            <div class="switch-row">
+              <div><strong>识别图片表情包</strong><span>支持 mface / bface / marketface 等图片类表情。</span></div>
+              <input id="vision.includeImageEmojis" type="checkbox" />
+            </div>
+            <div class="switch-row">
+              <div><strong>对话后积极识图</strong><span>bot 刚说完后，临近图片/表情包更倾向先识别。</span></div>
+              <input id="vision.aggressiveFollowup" type="checkbox" />
+            </div>
+            <div class="switch-row">
+              <div><strong>参与对话时辅助识图</strong><span>bot 正在参与这一段聊天时，图片/表情包会更积极先识别，用来补上下文。</span></div>
+              <input id="vision.contextAssist" type="checkbox" />
+            </div>
+            <div class="switch-row">
+              <div><strong>拿不准先识别</strong><span>识图只补上下文，不代表一定回复。</span></div>
+              <input id="vision.describeWhenUncertain" type="checkbox" />
+            </div>
+            <div class="form-grid">
+              <div class="field"><label>Provider</label><input id="vision.provider" /></div>
+              <div class="field"><label>Model</label><input id="vision.model" /></div>
+              <div class="field"><label>Toolsets</label><input id="vision.toolsets" /></div>
+              <div class="field"><label>引用消息最多拉取数</label><input id="vision.maxQuotedMessages" type="number" /></div>
+              <div class="field"><label>对话后识图窗口 ms</label><input id="vision.followupWindowMs" type="number" /></div>
+              <div class="field"><label>bot 后最多间隔消息数</label><input id="vision.followupMaxMessagesAfterBot" type="number" /></div>
+              <div class="field"><label>辅助识图窗口 ms</label><input id="vision.contextAssistWindowMs" type="number" /></div>
+              <div class="field"><label>辅助识图最近消息数</label><input id="vision.contextAssistRecentMessages" type="number" /></div>
+              <div class="field"><label>辅助识图 bot 后消息数</label><input id="vision.contextAssistMaxMessagesAfterBot" type="number" /></div>
+              <div class="field"><label>短图文阈值</label><input id="vision.contextAssistShortTextMaxLength" type="number" /></div>
+              <div class="field"><label>AI 判断置信度阈值</label><input id="vision.aiJudge.minConfidence" type="number" step="0.05" /></div>
+              <div class="field"><label>不确定上限</label><input id="vision.aiJudge.uncertainMaxConfidence" type="number" step="0.05" /></div>
+              <div class="field"><label>AI 判断超时 ms</label><input id="vision.aiJudge.timeoutMs" type="number" /></div>
+              <div class="field"><label>判断失败回退</label><input id="vision.aiJudge.fallback" placeholder="rule 或 skip" /></div>
+              <div class="field"><label>每条最多识别图片数</label><input id="vision.maxImagesPerMessage" type="number" /></div>
+              <div class="field"><label>下载上限 bytes</label><input id="vision.maxImageBytes" type="number" /></div>
+              <div class="field"><label>压缩阈值 bytes</label><input id="vision.maxHermesImageBytes" type="number" /></div>
+              <div class="field"><label>缩放最长边 px</label><input id="vision.resizeMaxPixels" type="number" /></div>
+              <div class="field"><label>JPEG 质量</label><input id="vision.jpegQuality" type="number" /></div>
+              <div class="field"><label>下载超时 ms</label><input id="vision.downloadTimeoutMs" type="number" /></div>
+              <div class="field"><label>识图超时 ms</label><input id="vision.timeoutMs" type="number" /></div>
+              <div class="field full"><label>识图提示词</label><textarea id="vision.prompt"></textarea></div>
+            </div>
+            <button id="saveVisionBtn">保存识图配置</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-prompt" class="page">
+        <div class="grid two">
+          <div class="card">
+            <h3>系统提示词</h3>
+            <textarea id="prompt.system" style="min-height:420px"></textarea>
+            <div class="row">
+              <button id="savePromptBtn">保存提示词</button>
+              <button id="copyPromptBtn" class="secondary">复制</button>
+            </div>
+          </div>
+          <div class="card">
+            <h3>提示词建议</h3>
+            <div class="quick-list">
+              <div class="quick-action"><div><strong>自然群友</strong><span>短句、别解释、别硬玩梗，不知道就承认。</span></div><button class="secondary promptTip" data-tip="像真实群友一样说话：短句、自然、有反应，但不要每句话都装梗。不会的事就承认，不要编造能力。">插入</button></div>
+              <div class="quick-action"><div><strong>少刷屏</strong><span>无关聊天少插嘴，明确跟它说话时积极回。</span></div><button class="secondary promptTip" data-tip="与 bot 无关的多人闲聊少插嘴；如果明显是在接 bot 的话、@ bot、问 bot、或引用 bot，则积极回复。">插入</button></div>
+              <div class="quick-action"><div><strong>识图诚实</strong><span>有识别结果再聊图片；没有结果就别装看见。</span></div><button class="secondary promptTip" data-tip="只有当上下文里出现图片识别结果时，才可以描述图片细节；如果没有识别结果，不要假装看到了图片。">插入</button></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-memory" class="page">
+        <div class="memory-layout">
+          <div class="card">
+            <h3>记忆群列表 <span id="memoryCount" class="pill">0</span></h3>
+            <input id="memorySearch" placeholder="搜索群 ID / 摘要 / 设置" />
+            <div id="groupList" class="list" style="margin-top:12px"></div>
+            <div class="row" style="margin-top:12px">
+              <button id="exportMemoryBtn" class="secondary">导出 memory.json</button>
+            </div>
+          </div>
+          <div class="card">
+            <h3>记忆详情 <span id="selectedGroupPill" class="pill">未选择</span></h3>
+            <div id="memorySummaryBox" class="row" style="margin-bottom:10px"></div>
+            <input id="memoryDetailSearch" placeholder="在当前群记忆中搜索成员、梗、偏好" />
+            <pre id="memoryView">选择一个群查看记忆。</pre>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-archive" class="page">
+        <div class="grid two">
+          <div class="card">
+            <h3>聊天存档状态 <span id="archiveStatusPill" class="pill">加载中</span></h3>
+            <div class="switch-row">
+              <div><strong>启用本地聊天存档</strong><span>群聊按群、私聊按用户写入 JSONL；关闭后不再写新记录。</span></div>
+              <input id="chatArchive.enabled" type="checkbox" />
+            </div>
+            <div class="switch-row">
+              <div><strong>默认开启新会话存档</strong><span>单个会话仍可用 /bot archive on/off 覆盖。</span></div>
+              <input id="chatArchive.defaultOn" type="checkbox" />
+            </div>
+            <div class="switch-row">
+              <div><strong>保存图片路径和识图描述</strong><span>复用 data/images 缓存；不会在页面直接展示大图。</span></div>
+              <input id="chatArchive.saveImages" type="checkbox" />
+            </div>
+            <div class="switch-row">
+              <div><strong>连续消息合并</strong><span>同一人拆成多条说时，等待 1.5–6 秒后统一理解。</span></div>
+              <input id="messageDebounce.enabled" type="checkbox" />
+            </div>
+            <div class="switch-row">
+              <div><strong>生成时动态更新上下文</strong><span>相关补充到达时取消旧草稿并基于最新语境重生成。</span></div>
+              <input id="responseQueue.liveContext.enabled" type="checkbox" />
+            </div>
+            <div class="form-grid">
+              <div class="field"><label>存档目录</label><input id="chatArchive.baseDir" /></div>
+              <div class="field"><label>最大检索片段数</label><input id="chatArchive.maxRetrieveItems" type="number" /></div>
+              <div class="field"><label>阶段摘要间隔消息数</label><input id="chatArchive.summary.everyMessages" type="number" /></div>
+              <div class="field"><label>合并基础等待 ms</label><input id="messageDebounce.baseWaitMs" type="number" /></div>
+              <div class="field"><label>合并最短等待 ms</label><input id="messageDebounce.minWaitMs" type="number" /></div>
+              <div class="field"><label>合并最长等待 ms</label><input id="messageDebounce.maxWaitMs" type="number" /></div>
+              <div class="field"><label>同人续发延长 ms</label><input id="messageDebounce.sameUserExtendMs" type="number" /></div>
+              <div class="field"><label>最多合并条数</label><input id="messageDebounce.maxBufferedMessages" type="number" /></div>
+              <div class="field"><label>合并最大字符数</label><input id="messageDebounce.maxBufferedChars" type="number" /></div>
+              <div class="field"><label>相关消息窗口 ms</label><input id="responseQueue.liveContext.windowMs" type="number" /></div>
+              <div class="field"><label>重生成聚合等待 ms</label><input id="responseQueue.liveContext.settleMs" type="number" /></div>
+              <div class="field"><label>最多重生成次数</label><input id="responseQueue.liveContext.maxRegenerations" type="number" min="0" max="5" /></div>
+              <div class="field"><label>最多合并消息数</label><input id="responseQueue.liveContext.maxMergedMessages" type="number" min="1" max="30" /></div>
+            </div>
+            <div class="row">
+              <button id="saveArchiveBtn">保存存档配置</button>
+              <button id="refreshArchiveBtn" class="secondary">刷新存档状态</button>
+              <button id="clearArchiveBtn" class="danger">清空全部存档</button>
+            </div>
+            <pre id="archiveStatusView">加载中...</pre>
+          </div>
+          <div class="card">
+            <h3>会话列表 <span id="archiveCount" class="pill">0</span></h3>
+            <input id="archiveSearch" placeholder="搜索 group:群号 / private:QQ / 路径" />
+            <div id="archiveList" class="list" style="margin-top:12px"></div>
+            <p class="hint">导出为 JSONL，包含原始消息、bot 回复、搜索摘要、图片描述元数据。</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-tasks" class="page">
+        <div class="grid two">
+          <div class="card">
+            <h3>任务模式配置 <span id="taskModePill" class="pill">加载中</span></h3>
+            <div class="switch-row">
+              <div><strong>启用正式任务模式</strong><span>复杂请求先判断是否值得任务化；普通闲聊不受影响。</span></div>
+              <input id="taskMode.enabled" type="checkbox" />
+            </div>
+            <div class="switch-row">
+              <div><strong>影子模式</strong><span>只记录意图判断，不创建任务或发送确认。初次上线建议保持开启。</span></div>
+              <input id="taskMode.shadowMode" type="checkbox" />
+            </div>
+            <div class="form-grid">
+              <div class="field"><label>主人 QQ（每行一个）</label><textarea id="taskMode.ownerUserIds"></textarea></div>
+              <div class="field"><label>白名单群（每行一个）</label><textarea id="taskMode.allowedGroupIds" placeholder="留空时只有主人可任务化"></textarea></div>
+              <div class="field"><label>全局最大并发</label><input id="taskMode.maxConcurrentGlobal" type="number" min="1" max="8" /></div>
+              <div class="field"><label>每会话最大并发</label><input id="taskMode.maxConcurrentPerConversation" type="number" min="1" max="3" /></div>
+              <div class="field"><label>进度心跳 ms</label><input id="taskMode.progressHeartbeatMs" type="number" min="60000" /></div>
+              <div class="field"><label>意图最低置信度</label><input id="taskMode.intentJudge.minConfidence" type="number" min="0" max="1" step="0.01" /></div>
+              <div class="field"><label>最大执行时长 ms</label><input id="taskMode.maxRuntimeMs" type="number" min="30000" /></div>
+              <div class="field"><label>最大工具轮次</label><input id="taskMode.maxTurns" type="number" min="1" max="90" /></div>
+            </div>
+            <div class="row">
+              <button id="saveTaskBtn">保存任务配置</button>
+              <button id="refreshTasksBtn" class="secondary">刷新任务</button>
+            </div>
+            <p class="hint">本地文件、电脑控制和登录态浏览器仍需主人按任务逐次授权。群友任务只使用隔离联网与文本工具。</p>
+          </div>
+          <div class="card">
+            <h3>任务队列 <span id="taskCount" class="pill">0</span></h3>
+            <pre id="taskRuntimeSummary">加载中...</pre>
+            <div id="taskList" class="list" style="margin-top:12px"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-reviewer" class="page">
+        <div class="grid two">
+          <div class="card">
+            <h3>回复审查 <span id="reviewerPill" class="pill">加载中</span></h3>
+            <div class="warning">运行时审查已停用：不会再发起第二次模型调用。以下配置和历史指标仅为兼容保留。</div>
+            <div class="switch-row">
+              <div><strong>启用自适应审查</strong><span>任务、搜索、记忆、日期数字和状态声明优先复核。</span></div>
+              <input id="reviewer.enabled" type="checkbox" disabled />
+            </div>
+            <div class="switch-row">
+              <div><strong>影子模式</strong><span>记录审查结论但不改动最终回复，便于先观察人格影响。</span></div>
+              <input id="reviewer.shadowMode" type="checkbox" disabled />
+            </div>
+            <div class="form-grid">
+              <div class="field"><label>模式</label><select id="reviewer.mode" disabled><option value="adaptive">自适应</option><option value="all">全部审查</option><option value="off">关闭</option></select></div>
+              <div class="field"><label>思考强度</label><input id="reviewer.reasoningEffort" placeholder="low" disabled /></div>
+              <div class="field"><label>Provider（留空继承）</label><input id="reviewer.provider" disabled /></div>
+              <div class="field"><label>Model（留空继承）</label><input id="reviewer.model" disabled /></div>
+              <div class="field"><label>超时 ms</label><input id="reviewer.timeoutMs" type="number" min="2000" disabled /></div>
+              <div class="field"><label>长回复阈值</label><input id="reviewer.minLength" type="number" min="40" disabled /></div>
+            </div>
+            <div class="row"><button id="saveReviewerBtn" disabled>兼容配置不可启用</button><button id="refreshReviewerBtn" class="secondary">刷新历史指标</button></div>
+            <pre id="reviewerMetrics">加载中...</pre>
+          </div>
+          <div class="card">
+            <h3>记忆完整性 <span id="memoryIntegrityPill" class="pill">加载中</span></h3>
+            <div class="switch-row">
+              <div><strong>证据化标准记忆</strong><span>按 QQ 号绑定来源消息；冲突保留并优先明确纠正。</span></div>
+              <input id="memory.integrity.enabled" type="checkbox" />
+            </div>
+            <div class="switch-row">
+              <div><strong>稳定事实要求证据</strong><span>单次 AI 猜测只作为 tentative，不直接当成确定事实。</span></div>
+              <input id="memory.integrity.requireEvidence" type="checkbox" />
+            </div>
+            <div class="form-grid">
+              <div class="field"><label>稳定置信度</label><input id="memory.integrity.minStableConfidence" type="number" min="0" max="1" step="0.01" /></div>
+              <div class="field"><label>Prompt 最低置信度</label><input id="memory.integrity.promptMinConfidence" type="number" min="0" max="1" step="0.01" /></div>
+              <div class="field"><label>每人最大标准条目</label><input id="memory.integrity.maxEntriesPerUser" type="number" min="20" /></div>
+              <div class="field"><label>每人最大冲突记录</label><input id="memory.integrity.maxConflictsPerUser" type="number" min="5" /></div>
+            </div>
+            <div class="row">
+              <button id="saveIntegrityBtn">保存完整性配置</button>
+              <button id="memoryDryRunBtn" class="secondary">重整 dry-run</button>
+              <button id="memoryApplyBtn" class="danger">备份并正式重整</button>
+            </div>
+            <pre id="memoryIntegrityView">加载中...</pre>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-backup" class="page">
+        <div id="backupBrowserNotice" class="warning hidden">当前运行的是旧版桥接服务，尚无备份宿主。请使用本地 WebUI 启动器或桌面应用打开控制台。</div>
+        <div class="grid three" style="margin-top:14px">
+          <div class="card stat"><div><div class="label">运行方式</div><div class="value" id="desktopAppState">检测中</div></div><div class="hint" id="desktopAppHint">读取本机运行环境。</div></div>
+          <div class="card stat"><div><div class="label">用户数据</div><div class="value" id="desktopDataState">—</div></div><div class="hint" id="desktopDataPath">配置、记忆、聊天与任务。</div></div>
+          <div class="card stat"><div><div class="label">最近备份</div><div class="value" id="desktopBackupState">—</div></div><div class="hint" id="desktopBackupPath">默认保存到“文稿”。</div></div>
+        </div>
+        <div class="grid two" style="margin-top:14px">
+          <div class="card">
+            <h3>创建备份</h3>
+            <div class="quick-list">
+              <div class="quick-action"><div><strong>普通数据备份</strong><span>配置、提示词、记忆、聊天、图片和任务产物；自动排除密钥、QQ 登录态、日志和缓存，可在线创建。</span></div><button id="createSafeBackupBtn">立即备份</button></div>
+              <div class="quick-action"><div><strong>完整迁移备份</strong><span>额外包含应用专用 Hermes 凭据和主备 SnowLuma 登录卷。创建时会短暂停止机器人，必须设置密码。</span></div><button id="createFullBackupBtn" class="danger">加密备份</button></div>
+            </div>
+            <div class="field" style="margin-top:14px"><label>完整备份密码（不会保存或写入日志）</label><input id="backupPassword" type="password" autocomplete="new-password" placeholder="仅完整备份和恢复时填写" /></div>
+            <div class="switch-row"><div><strong>附带诊断日志</strong><div class="hint">仅用于加密的完整迁移备份；日志可能包含聊天内容或敏感信息，默认不包含，恢复时也不会覆盖目标电脑的日志。</div></div><input id="backupIncludeLogs" type="checkbox" /></div>
+            <div class="row"><button id="chooseBackupDestinationBtn" class="secondary">选择保存目录</button><span id="backupDestinationLabel" class="hint">使用默认备份目录</span></div>
+            <div id="backupProgressPanel" class="backup-progress hidden" role="status" aria-live="polite">
+              <div class="backup-progress-head"><strong id="backupProgressTitle">准备备份</strong><button id="cancelBackupBtn" class="secondary" type="button">取消备份</button></div>
+              <progress id="backupProgressBar" max="100" value="0" aria-label="备份进度"></progress>
+              <div id="backupProgressDetail" class="hint">正在准备…</div>
+            </div>
+          </div>
+          <div class="card">
+            <h3>恢复迁移包</h3>
+            <p class="muted">恢复前会自动创建回滚包，并先在隔离目录中校验版本、密码和 SHA-256。导入采用整体替换，不自动合并记忆。</p>
+            <div class="row"><button id="chooseBackupFileBtn" class="secondary">选择 .hermesqqbackup</button><span id="restoreFileLabel" class="hint">尚未选择</span></div>
+            <input id="webBackupFileInput" type="file" accept=".hermesqqbackup" class="hidden" />
+            <div class="row" style="margin-top:10px"><button id="inspectBackupBtn" class="secondary">检查内容</button><button id="restoreBackupBtn" class="danger">验证并恢复</button></div>
+            <pre id="backupInspectView">选择迁移包后可先检查内容。</pre>
+          </div>
+          <div class="card">
+            <h3>从旧项目迁移</h3>
+            <p class="muted">复制现有 config.json、data/ 和协议端宿主目录，重写旧绝对路径。旧项目、容器和卷不会被删除。</p>
+            <div id="webLegacyPathField" class="field hidden"><label>旧项目在本机的绝对路径</label><input id="webLegacyProjectPath" type="text" placeholder="例如 /Users/你的用户名/Documents/旧项目" /></div>
+            <div class="row"><button id="selectLegacyProjectBtn" class="secondary">选择旧项目</button><button id="migrateLegacyProjectBtn" disabled>开始迁移</button></div>
+            <div id="legacyProjectInfo" class="hint" style="margin-top:10px">尚未选择。</div>
+          </div>
+          <div class="card">
+            <div class="section-title"><h3>本机备份</h3><button id="refreshBackupsBtn" class="secondary">刷新</button></div>
+            <div id="localBackupList" class="list"></div>
+          </div>
+        </div>
+        <div class="card" style="margin-top:14px">
+          <div class="section-title"><h3>桌面运行与启动</h3><div class="row"><button id="desktopStartBtn" class="good">启动机器人</button><button id="desktopStopBtn" class="danger">停止</button><button id="desktopRestartBtn" class="secondary">重启</button></div></div>
+          <div class="switch-row"><div><strong>登录后自动启动</strong><span>当前入口动态安装登录启动项；App 与 WebUI 不会同时启用，避免重复接管 QQ。</span></div><input id="desktopAutoStart" type="checkbox" /></div>
+          <pre id="desktopStatusView">加载中...</pre>
+        </div>
+      </section>
+
+      <section id="page-logs" class="page">
+        <div class="card">
+          <h3>运行日志</h3>
+          <div class="log-tabs">
+            <button id="showMainLog" class="secondary">普通日志</button>
+            <button id="showErrorLog" class="secondary">错误日志</button>
+            <button id="copyLogBtn" class="secondary">复制当前日志</button>
+          </div>
+          <pre id="logView">加载中...</pre>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast-wrap" id="toastWrap"></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const pageMeta = {
+      overview: ["总览", "查看连接、登录、模型、联网、识图和记忆状态。"],
+      accounts: ["主备账号", "分别查看主、备账号的协议端、真实收发、登录入口和接管状态。"],
+      quick: ["常用操作", "测试模型与搜索、管理当前协议端、重启桥接和发送测试消息。"],
+      model: ["模型 / API", "调整 Hermes 调用参数、provider、model 和 API key 环境变量名。"],
+      behavior: ["活跃度", "切换克制/正常/活跃，调整接话和主动插话频率。"],
+      tools: ["联网 / 识图", "管理搜索、代理、Vision 模型与图片处理参数。"],
+      prompt: ["提示词", "编辑 bot 的人设和回复规则，保存后热生效。"],
+      memory: ["记忆", "查看群记忆、成员偏好、梗、摘要和导出 JSON。"],
+      archive: ["聊天存档", "查看会话 JSONL 存档、导出或清理，并调整连续消息合并。"],
+      tasks: ["任务 / Agent", "管理闲聊与正式任务路由、权限、后台进度和产物。"],
+      reviewer: ["回复审查", "查看低思考审查指标，并检查标准记忆的冲突和证据状态。"],
+      backup: ["备份与迁移", "创建可校验的普通备份或加密完整迁移包，并安全迁移到另一台 Mac。"],
+      logs: ["日志", "查看桥接日志和错误日志，定位连接、搜索、识图问题。"]
+    };
+
+    let cfg = null;
+    let statusData = null;
+    let memoryData = null;
+    let archiveStatusData = null;
+    let archiveConversationData = null;
+    let taskData = null;
+    let reviewerData = null;
+    let memoryIntegrityData = null;
+    let selectedGroupId = "";
+    let selectedGroupMemory = null;
+    let currentLogKind = "main";
+    let autoRefresh = true;
+    let refreshTimer = null;
+    let dirty = false;
+    let aiProfilesDraft = { activeId: "", profiles: [] };
+    let selectedAiProfileId = "";
+    const desktopApi = window.hermesQQ || null;
+    let browserHostAvailable = false;
+    let hostProgressTimer = null;
+    let desktopStatusData = null;
+    let localBackups = [];
+    let backupProgress = null;
+    let backupDestination = "";
+    let restoreBackupPath = "";
+    let legacyProjectPath = "";
+
+    function toast(message, kind = "good") {
+      const item = document.createElement("div");
+      item.className = `toast ${kind}`;
+      item.textContent = message;
+      $("toastWrap").appendChild(item);
+      setTimeout(() => item.remove(), 4200);
+    }
+
+    function setBusy(id, busy, label) {
+      const el = $(id);
+      if (!el) return;
+      if (busy) {
+        el.dataset.oldText = el.textContent;
+        el.textContent = label || "处理中...";
+        el.disabled = true;
+      } else {
+        el.textContent = el.dataset.oldText || el.textContent;
+        el.disabled = false;
+      }
+    }
+
+    async function api(path, opts = {}) {
+      const res = await fetch(path, opts);
+      const text = await res.text();
+      let body;
+      try { body = text ? JSON.parse(text) : {}; }
+      catch { body = { ok: false, error: text }; }
+      if (!res.ok) throw new Error(body.error || res.statusText || `HTTP ${res.status}`);
+      return body;
+    }
+
+    async function hostApi(path, method = "GET", body) {
+      return api(`/api/host${path}`, {
+        method,
+        ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
+      });
+    }
+
+    async function refreshHostProgress() {
+      if (!browserHostAvailable && !desktopApi) return;
+      try {
+        const result = desktopApi ? await desktopApi.getBackupStatus() : await hostApi("/backup/status");
+        if (!result) return;
+        backupProgress = result.status === "idle" ? null : Object.hasOwn(result, "progress") ? result.progress : result.status ? result : null;
+        renderBackupProgress();
+      } catch { /* 下一次刷新会重试；不打断其他页面 */ }
+    }
+
+    function fmtTime(date = new Date()) {
+      if (typeof date === "number") date = new Date(date);
+      return date.toLocaleTimeString("zh-CN", { hour12: false });
+    }
+
+    function fmtAgo(ts) {
+      const n = typeof ts === "string" ? Date.parse(ts) : Number(ts || 0);
+      if (!n) return "暂无";
+      const sec = Math.max(0, Math.round((Date.now() - n) / 1000));
+      if (sec < 3) return "刚刚";
+      if (sec < 60) return `${sec} 秒前`;
+      const min = Math.round(sec / 60);
+      if (min < 60) return `${min} 分钟前`;
+      const hour = Math.round(min / 60);
+      return `${hour} 小时前`;
+    }
+
+    function fmtMs(ms) {
+      const n = Number(ms || 0);
+      if (!Number.isFinite(n) || n <= 0) return "未设置";
+      if (n < 1000) return `${n}ms`;
+      if (n < 60000) return `${Math.round(n / 1000)}秒`;
+      if (n < 3600000) return `${Math.round(n / 60000)}分钟`;
+      return `${(n / 3600000).toFixed(1)}小时`;
+    }
+
+    function pct(v) {
+      const n = Number(v || 0);
+      return `${Math.round(n * 100)}%`;
+    }
+
+    function esc(s) {
+      return String(s ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
+    }
+
+    function setVal(id, value) {
+      const el = $(id);
+      if (!el) return;
+      if (el.type === "checkbox") el.checked = Boolean(value);
+      else if (Array.isArray(value)) el.value = value.join("\n");
+      else el.value = value ?? "";
+    }
+
+    function getVal(id) {
+      const el = $(id);
+      if (!el) return undefined;
+      if (el.type === "checkbox") return el.checked;
+      if (el.type === "number" || el.type === "range") return Number(el.value);
+      return el.value;
+    }
+
+    function markDirty() {
+      dirty = true;
+      $("saveState").textContent = "有未保存修改";
+    }
+
+    function syncSlider(inputId, sliderId) {
+      const input = $(inputId);
+      const slider = $(sliderId);
+      if (!input || !slider) return;
+      const fromInput = () => { slider.value = input.value || 0; markDirty(); };
+      const fromSlider = () => { input.value = slider.value; markDirty(); };
+      input.addEventListener("input", fromInput);
+      slider.addEventListener("input", fromSlider);
+    }
+
+    function collectAiForm() {
+      return {
+        command: getVal("ai.command"),
+        timeoutMs: getVal("ai.timeoutMs"),
+        provider: getVal("ai.provider"),
+        model: getVal("ai.model"),
+        baseUrl: getVal("ai.baseUrl"),
+        apiKeyEnv: getVal("ai.apiKeyEnv"),
+        reasoningEffort: getVal("ai.reasoningEffort"),
+        args: String(getVal("ai.args") || "").split(/\r?\n+/).map((s) => s.trim()).filter(Boolean)
+      };
+    }
+
+    function selectedAiProfile() {
+      return aiProfilesDraft.profiles.find((profile) => profile.id === selectedAiProfileId) || null;
+    }
+
+    function syncSelectedAiProfileFromForm() {
+      const profile = selectedAiProfile();
+      if (!profile) return;
+      Object.assign(profile, collectAiForm(), {
+        name: String(getVal("ai.profileName") || profile.name || profile.id).trim().slice(0, 60) || profile.id
+      });
+    }
+
+    function loadAiProfileIntoForm(profile) {
+      if (!profile) return;
+      setVal("ai.profileName", profile.name || profile.id);
+      setVal("ai.command", profile.command || "hermes");
+      setVal("ai.timeoutMs", profile.timeoutMs || 120000);
+      setVal("ai.provider", profile.provider || "");
+      setVal("ai.model", profile.model || "");
+      setVal("ai.baseUrl", profile.baseUrl || "");
+      setVal("ai.apiKeyEnv", profile.apiKeyEnv || "");
+      setVal("ai.reasoningEffort", profile.reasoningEffort || "none");
+      setVal("ai.args", profile.args || ["-z"]);
+    }
+
+    function renderAiProfiles() {
+      const select = $("aiProfileSelect");
+      select.replaceChildren();
+      for (const profile of aiProfilesDraft.profiles) {
+        const option = document.createElement("option");
+        option.value = profile.id;
+        option.textContent = `${profile.name || profile.id}${profile.id === aiProfilesDraft.activeId ? "（当前）" : ""}`;
+        select.appendChild(option);
+      }
+      select.value = selectedAiProfileId;
+      const profile = selectedAiProfile();
+      const active = aiProfilesDraft.profiles.find((item) => item.id === aiProfilesDraft.activeId);
+      const keyState = profile?.apiKeyEnv
+        ? (profile.apiKeyEnvPresent ? `${profile.apiKeyEnv} 已存在` : `${profile.apiKeyEnv} 未在桥接进程环境中检测到`)
+        : "未配置 API Key 环境变量名";
+      $("aiProfileActiveState").textContent = `当前运行：${active?.name || "未设置"} · 正在编辑：${profile?.name || "无"} · ${keyState}`;
+      $("deleteAiProfileBtn").disabled = !profile || profile.id === aiProfilesDraft.activeId || aiProfilesDraft.profiles.length <= 1;
+      $("activateAiProfileBtn").disabled = !profile || profile.id === aiProfilesDraft.activeId;
+    }
+
+    function initializeAiProfiles(config) {
+      const preferredProfileId = selectedAiProfileId;
+      const source = config.aiProfiles?.profiles?.length
+        ? config.aiProfiles
+        : {
+            activeId: "current",
+            profiles: [{ id: "current", name: "当前配置", preset: "custom", ...(config.ai || {}) }]
+          };
+      aiProfilesDraft = {
+        activeId: source.activeId || source.profiles[0]?.id || "current",
+        profiles: source.profiles.map((profile) => ({ ...profile, args: Array.isArray(profile.args) ? [...profile.args] : ["-z"] }))
+      };
+      selectedAiProfileId = aiProfilesDraft.profiles.some((profile) => profile.id === preferredProfileId)
+        ? preferredProfileId
+        : aiProfilesDraft.profiles.some((profile) => profile.id === aiProfilesDraft.activeId)
+          ? aiProfilesDraft.activeId
+          : aiProfilesDraft.profiles[0]?.id || "";
+      loadAiProfileIntoForm(selectedAiProfile());
+      renderAiProfiles();
+    }
+
+    function aiProfilesPatch() {
+      syncSelectedAiProfileFromForm();
+      const profiles = aiProfilesDraft.profiles.map(({ apiKeyEnvPresent, ...profile }) => ({ ...profile }));
+      const active = profiles.find((profile) => profile.id === aiProfilesDraft.activeId) || profiles[0] || collectAiForm();
+      return {
+        ai: { ...active },
+        aiProfiles: { activeId: aiProfilesDraft.activeId || active.id, profiles }
+      };
+    }
+
+    function createAiProfile({ duplicate = false } = {}) {
+      syncSelectedAiProfileFromForm();
+      const source = duplicate ? selectedAiProfile() : null;
+      const id = `profile-${Date.now().toString(36)}`;
+      const profile = source
+        ? { ...source, id, name: `${source.name || "配置"} 副本`, apiKeyEnvPresent: false }
+        : {
+            id,
+            name: "新 API 配置",
+            preset: "custom",
+            command: "hermes",
+            args: ["-z"],
+            timeoutMs: 120000,
+            provider: "",
+            model: "",
+            baseUrl: "",
+            apiKeyEnv: "",
+            reasoningEffort: "none",
+            apiKeyEnvPresent: false
+          };
+      aiProfilesDraft.profiles.push(profile);
+      selectedAiProfileId = id;
+      loadAiProfileIntoForm(profile);
+      renderAiProfiles();
+      markDirty();
+    }
+
+    function deleteSelectedAiProfile() {
+      const profile = selectedAiProfile();
+      if (!profile || profile.id === aiProfilesDraft.activeId) {
+        toast("当前运行配置不能删除，请先切换到其他配置", "warn");
+        return;
+      }
+      if (!confirm(`确定删除配置“${profile.name || profile.id}”吗？`)) return;
+      aiProfilesDraft.profiles = aiProfilesDraft.profiles.filter((item) => item.id !== profile.id);
+      selectedAiProfileId = aiProfilesDraft.activeId;
+      loadAiProfileIntoForm(selectedAiProfile());
+      renderAiProfiles();
+      markDirty();
+    }
+
+    function collectPatch() {
+      const profiles = aiProfilesPatch();
+      return {
+        ai: profiles.ai,
+        aiProfiles: profiles.aiProfiles,
+        vision: {
+          enabled: getVal("vision.enabled"),
+          onlyWhenMentionedOrAsked: getVal("vision.onlyWhenMentionedOrAsked"),
+          includeQuotedImages: getVal("vision.includeQuotedImages"),
+          includeImageEmojis: getVal("vision.includeImageEmojis"),
+          aggressiveFollowup: getVal("vision.aggressiveFollowup"),
+          contextAssist: getVal("vision.contextAssist"),
+          describeWhenUncertain: getVal("vision.describeWhenUncertain"),
+          followupWindowMs: getVal("vision.followupWindowMs"),
+          followupMaxMessagesAfterBot: getVal("vision.followupMaxMessagesAfterBot"),
+          contextAssistWindowMs: getVal("vision.contextAssistWindowMs"),
+          contextAssistRecentMessages: getVal("vision.contextAssistRecentMessages"),
+          contextAssistMaxMessagesAfterBot: getVal("vision.contextAssistMaxMessagesAfterBot"),
+          contextAssistShortTextMaxLength: getVal("vision.contextAssistShortTextMaxLength"),
+          maxQuotedMessages: getVal("vision.maxQuotedMessages"),
+          aiJudge: {
+            enabled: getVal("vision.aiJudge.enabled"),
+            minConfidence: getVal("vision.aiJudge.minConfidence"),
+            uncertainMaxConfidence: getVal("vision.aiJudge.uncertainMaxConfidence"),
+            timeoutMs: getVal("vision.aiJudge.timeoutMs"),
+            fallback: getVal("vision.aiJudge.fallback")
+          },
+          provider: getVal("vision.provider"),
+          model: getVal("vision.model"),
+          toolsets: getVal("vision.toolsets"),
+          maxImagesPerMessage: getVal("vision.maxImagesPerMessage"),
+          maxImageBytes: getVal("vision.maxImageBytes"),
+          maxHermesImageBytes: getVal("vision.maxHermesImageBytes"),
+          resizeMaxPixels: getVal("vision.resizeMaxPixels"),
+          jpegQuality: getVal("vision.jpegQuality"),
+          downloadTimeoutMs: getVal("vision.downloadTimeoutMs"),
+          timeoutMs: getVal("vision.timeoutMs"),
+          prompt: getVal("vision.prompt")
+        },
+        webSearch: {
+          enabled: getVal("webSearch.enabled"),
+          provider: getVal("webSearch.provider"),
+          providerOrder: String(getVal("webSearch.providerOrder") || "").split(/[\r\n,]+/).map((s) => s.trim()).filter(Boolean),
+          maxResults: getVal("webSearch.maxResults"),
+          timeoutMs: getVal("webSearch.timeoutMs"),
+          proxy: {
+            urls: String(getVal("webSearch.proxy.urls") || "").split(/\r?\n+/).map((s) => s.trim()).filter(Boolean)
+          }
+        },
+        behaviorModes: { default: getVal("behaviorModes.default") },
+        trigger: {
+          activeProbability: getVal("trigger.activeProbability"),
+          activeCooldownMs: getVal("trigger.activeCooldownMs")
+        },
+        proactive: {
+          enabled: getVal("proactive.enabled"),
+          probability: getVal("proactive.probability"),
+          intervalMs: getVal("proactive.intervalMs"),
+          cooldownMs: getVal("proactive.cooldownMs")
+        },
+        socialPlanner: {
+          enabled: getVal("socialPlanner.enabled"),
+          shadowMode: getVal("socialPlanner.shadowMode"),
+          minConfidence: getVal("socialPlanner.minConfidence"),
+          timeoutMs: getVal("socialPlanner.timeoutMs")
+        },
+        messageDebounce: {
+          enabled: getVal("messageDebounce.enabled"),
+          baseWaitMs: getVal("messageDebounce.baseWaitMs"),
+          minWaitMs: getVal("messageDebounce.minWaitMs"),
+          maxWaitMs: getVal("messageDebounce.maxWaitMs"),
+          sameUserExtendMs: getVal("messageDebounce.sameUserExtendMs"),
+          maxBufferedMessages: getVal("messageDebounce.maxBufferedMessages"),
+          maxBufferedChars: getVal("messageDebounce.maxBufferedChars")
+        },
+        responseQueue: {
+          liveContext: {
+            enabled: getVal("responseQueue.liveContext.enabled"),
+            windowMs: getVal("responseQueue.liveContext.windowMs"),
+            settleMs: getVal("responseQueue.liveContext.settleMs"),
+            maxRegenerations: getVal("responseQueue.liveContext.maxRegenerations"),
+            maxMergedMessages: getVal("responseQueue.liveContext.maxMergedMessages")
+          }
+        },
+        chatArchive: {
+          enabled: getVal("chatArchive.enabled"),
+          defaultOn: getVal("chatArchive.defaultOn"),
+          saveImages: getVal("chatArchive.saveImages"),
+          baseDir: getVal("chatArchive.baseDir"),
+          maxRetrieveItems: getVal("chatArchive.maxRetrieveItems"),
+          summary: { everyMessages: getVal("chatArchive.summary.everyMessages") }
+        },
+        taskMode: {
+          enabled: getVal("taskMode.enabled"),
+          shadowMode: getVal("taskMode.shadowMode"),
+          ownerUserIds: String(getVal("taskMode.ownerUserIds") || "").split(/[\r\n,]+/).map((s) => s.trim()).filter(Boolean),
+          allowedGroupIds: String(getVal("taskMode.allowedGroupIds") || "").split(/[\r\n,]+/).map((s) => s.trim()).filter(Boolean),
+          maxConcurrentGlobal: getVal("taskMode.maxConcurrentGlobal"),
+          maxConcurrentPerConversation: getVal("taskMode.maxConcurrentPerConversation"),
+          progressHeartbeatMs: getVal("taskMode.progressHeartbeatMs"),
+          maxRuntimeMs: getVal("taskMode.maxRuntimeMs"),
+          maxTurns: getVal("taskMode.maxTurns"),
+          intentJudge: { minConfidence: getVal("taskMode.intentJudge.minConfidence") }
+        },
+        reviewer: {
+          enabled: getVal("reviewer.enabled"),
+          shadowMode: getVal("reviewer.shadowMode"),
+          mode: getVal("reviewer.mode"),
+          provider: getVal("reviewer.provider"),
+          model: getVal("reviewer.model"),
+          reasoningEffort: getVal("reviewer.reasoningEffort"),
+          timeoutMs: getVal("reviewer.timeoutMs"),
+          minLength: getVal("reviewer.minLength")
+        },
+        memory: {
+          integrity: {
+            enabled: getVal("memory.integrity.enabled"),
+            requireEvidence: getVal("memory.integrity.requireEvidence"),
+            minStableConfidence: getVal("memory.integrity.minStableConfidence"),
+            promptMinConfidence: getVal("memory.integrity.promptMinConfidence"),
+            maxEntriesPerUser: getVal("memory.integrity.maxEntriesPerUser"),
+            maxConflictsPerUser: getVal("memory.integrity.maxConflictsPerUser")
+          }
+        },
+        accounts: {
+          primary: {
+            id: "primary",
+            qq: getVal("accounts.primary.qq"),
+            protocol: getVal("accounts.primary.protocol"),
+            onebotPath: getVal("accounts.primary.onebotPath"),
+            napcatContainer: getVal("accounts.primary.napcatContainer"),
+            protocolContainer: getVal("accounts.primary.protocolContainer"),
+            webuiPort: getVal("accounts.primary.webuiPort"),
+            noVncPort: getVal("accounts.primary.noVncPort"),
+            vncPort: getVal("accounts.primary.vncPort"),
+            onebotWsUrl: getVal("accounts.primary.onebotWsUrl"),
+            snowlumaImage: getVal("accounts.primary.snowlumaImage")
+          },
+          standbys: [
+            {
+              id: "standby-a",
+              qq: getVal("accounts.standbys.0.qq"),
+              protocol: getVal("accounts.standbys.0.protocol"),
+              onebotPath: getVal("accounts.standbys.0.onebotPath"),
+              napcatContainer: getVal("accounts.standbys.0.napcatContainer"),
+              protocolContainer: getVal("accounts.standbys.0.protocolContainer"),
+              webuiPort: getVal("accounts.standbys.0.webuiPort"),
+              noVncPort: getVal("accounts.standbys.0.noVncPort"),
+              vncPort: getVal("accounts.standbys.0.vncPort"),
+              onebotWsUrl: getVal("accounts.standbys.0.onebotWsUrl"),
+              snowlumaImage: getVal("accounts.standbys.0.snowlumaImage"),
+              behaviorMode: getVal("accounts.standbys.0.behaviorMode"),
+              enabled: String(getVal("accounts.standbys.0.enabled")) !== "false"
+            }
+          ],
+          failover: {
+            enabled: getVal("accounts.failover.enabled"),
+            switchBackWhenPrimaryHealthy: getVal("accounts.failover.switchBackWhenPrimaryHealthy"),
+            switchAfterMs: getVal("accounts.failover.switchAfterMs")
+          }
+        },
+        prompt: { system: getVal("prompt.system") }
+      };
+    }
+
+    function fillConfig() {
+      if (!cfg) return;
+      initializeAiProfiles(cfg);
+
+      setVal("vision.enabled", cfg.vision?.enabled);
+      setVal("vision.onlyWhenMentionedOrAsked", cfg.vision?.onlyWhenMentionedOrAsked);
+      setVal("vision.includeQuotedImages", cfg.vision?.includeQuotedImages);
+      setVal("vision.includeImageEmojis", cfg.vision?.includeImageEmojis);
+      setVal("vision.aggressiveFollowup", cfg.vision?.aggressiveFollowup);
+      setVal("vision.contextAssist", cfg.vision?.contextAssist);
+      setVal("vision.describeWhenUncertain", cfg.vision?.describeWhenUncertain);
+      setVal("vision.followupWindowMs", cfg.vision?.followupWindowMs);
+      setVal("vision.followupMaxMessagesAfterBot", cfg.vision?.followupMaxMessagesAfterBot);
+      setVal("vision.contextAssistWindowMs", cfg.vision?.contextAssistWindowMs);
+      setVal("vision.contextAssistRecentMessages", cfg.vision?.contextAssistRecentMessages);
+      setVal("vision.contextAssistMaxMessagesAfterBot", cfg.vision?.contextAssistMaxMessagesAfterBot);
+      setVal("vision.contextAssistShortTextMaxLength", cfg.vision?.contextAssistShortTextMaxLength);
+      setVal("vision.maxQuotedMessages", cfg.vision?.maxQuotedMessages);
+      setVal("vision.aiJudge.enabled", cfg.vision?.aiJudge?.enabled);
+      setVal("vision.aiJudge.minConfidence", cfg.vision?.aiJudge?.minConfidence);
+      setVal("vision.aiJudge.uncertainMaxConfidence", cfg.vision?.aiJudge?.uncertainMaxConfidence);
+      setVal("vision.aiJudge.timeoutMs", cfg.vision?.aiJudge?.timeoutMs);
+      setVal("vision.aiJudge.fallback", cfg.vision?.aiJudge?.fallback);
+      setVal("vision.provider", cfg.vision?.provider);
+      setVal("vision.model", cfg.vision?.model);
+      setVal("vision.toolsets", cfg.vision?.toolsets);
+      setVal("vision.maxImagesPerMessage", cfg.vision?.maxImagesPerMessage);
+      setVal("vision.maxImageBytes", cfg.vision?.maxImageBytes);
+      setVal("vision.maxHermesImageBytes", cfg.vision?.maxHermesImageBytes);
+      setVal("vision.resizeMaxPixels", cfg.vision?.resizeMaxPixels);
+      setVal("vision.jpegQuality", cfg.vision?.jpegQuality);
+      setVal("vision.downloadTimeoutMs", cfg.vision?.downloadTimeoutMs);
+      setVal("vision.timeoutMs", cfg.vision?.timeoutMs);
+      setVal("vision.prompt", cfg.vision?.prompt);
+
+      setVal("webSearch.enabled", cfg.webSearch?.enabled);
+      setVal("webSearch.provider", cfg.webSearch?.provider);
+      setVal("webSearch.providerOrder", cfg.webSearch?.providerOrder || []);
+      setVal("webSearch.maxResults", cfg.webSearch?.maxResults);
+      setVal("webSearch.timeoutMs", cfg.webSearch?.timeoutMs);
+      setVal("webSearch.proxy.urls", cfg.webSearch?.proxy?.urls || []);
+
+      setVal("behaviorModes.default", cfg.behaviorModes?.default);
+      setVal("trigger.activeProbability", cfg.trigger?.activeProbability);
+      setVal("trigger.activeProbability.slider", cfg.trigger?.activeProbability);
+      setVal("trigger.activeCooldownMs", cfg.trigger?.activeCooldownMs);
+      setVal("proactive.enabled", cfg.proactive?.enabled);
+      setVal("proactive.probability", cfg.proactive?.probability);
+      setVal("proactive.probability.slider", cfg.proactive?.probability);
+      setVal("proactive.intervalMs", cfg.proactive?.intervalMs);
+      setVal("proactive.cooldownMs", cfg.proactive?.cooldownMs);
+      setVal("socialPlanner.enabled", cfg.socialPlanner?.enabled !== false);
+      setVal("socialPlanner.shadowMode", cfg.socialPlanner?.shadowMode === true);
+      setVal("socialPlanner.minConfidence", cfg.socialPlanner?.minConfidence ?? 0.55);
+      setVal("socialPlanner.timeoutMs", cfg.socialPlanner?.timeoutMs || 30000);
+      setVal("messageDebounce.enabled", cfg.messageDebounce?.enabled);
+      setVal("messageDebounce.baseWaitMs", cfg.messageDebounce?.baseWaitMs);
+      setVal("messageDebounce.minWaitMs", cfg.messageDebounce?.minWaitMs);
+      setVal("messageDebounce.maxWaitMs", cfg.messageDebounce?.maxWaitMs);
+      setVal("messageDebounce.sameUserExtendMs", cfg.messageDebounce?.sameUserExtendMs);
+      setVal("messageDebounce.maxBufferedMessages", cfg.messageDebounce?.maxBufferedMessages);
+      setVal("messageDebounce.maxBufferedChars", cfg.messageDebounce?.maxBufferedChars);
+      setVal("responseQueue.liveContext.enabled", cfg.responseQueue?.liveContext?.enabled !== false);
+      setVal("responseQueue.liveContext.windowMs", cfg.responseQueue?.liveContext?.windowMs || 20000);
+      setVal("responseQueue.liveContext.settleMs", cfg.responseQueue?.liveContext?.settleMs ?? 350);
+      setVal("responseQueue.liveContext.maxRegenerations", cfg.responseQueue?.liveContext?.maxRegenerations ?? 2);
+      setVal("responseQueue.liveContext.maxMergedMessages", cfg.responseQueue?.liveContext?.maxMergedMessages || 8);
+      setVal("chatArchive.enabled", cfg.chatArchive?.enabled);
+      setVal("chatArchive.defaultOn", cfg.chatArchive?.defaultOn);
+      setVal("chatArchive.saveImages", cfg.chatArchive?.saveImages);
+      setVal("chatArchive.baseDir", cfg.chatArchive?.baseDir);
+      setVal("chatArchive.maxRetrieveItems", cfg.chatArchive?.maxRetrieveItems);
+      setVal("chatArchive.summary.everyMessages", cfg.chatArchive?.summary?.everyMessages);
+      setVal("taskMode.enabled", cfg.taskMode?.enabled !== false);
+      setVal("taskMode.shadowMode", cfg.taskMode?.shadowMode === true);
+      setVal("taskMode.ownerUserIds", cfg.taskMode?.ownerUserIds || []);
+      setVal("taskMode.allowedGroupIds", cfg.taskMode?.allowedGroupIds || []);
+      setVal("taskMode.maxConcurrentGlobal", cfg.taskMode?.maxConcurrentGlobal || 2);
+      setVal("taskMode.maxConcurrentPerConversation", cfg.taskMode?.maxConcurrentPerConversation || 1);
+      setVal("taskMode.progressHeartbeatMs", cfg.taskMode?.progressHeartbeatMs || 180000);
+      setVal("taskMode.maxRuntimeMs", cfg.taskMode?.maxRuntimeMs || 1200000);
+      setVal("taskMode.maxTurns", cfg.taskMode?.maxTurns || 30);
+      setVal("taskMode.intentJudge.minConfidence", cfg.taskMode?.intentJudge?.minConfidence ?? 0.68);
+      setVal("reviewer.enabled", cfg.reviewer?.enabled !== false);
+      setVal("reviewer.shadowMode", cfg.reviewer?.shadowMode === true);
+      setVal("reviewer.mode", cfg.reviewer?.mode || "adaptive");
+      setVal("reviewer.provider", cfg.reviewer?.provider || "");
+      setVal("reviewer.model", cfg.reviewer?.model || "");
+      setVal("reviewer.reasoningEffort", cfg.reviewer?.reasoningEffort || "low");
+      setVal("reviewer.timeoutMs", cfg.reviewer?.timeoutMs || 12000);
+      setVal("reviewer.minLength", cfg.reviewer?.minLength || 160);
+      setVal("memory.integrity.enabled", cfg.memory?.integrity?.enabled !== false);
+      setVal("memory.integrity.requireEvidence", cfg.memory?.integrity?.requireEvidence !== false);
+      setVal("memory.integrity.minStableConfidence", cfg.memory?.integrity?.minStableConfidence ?? 0.65);
+      setVal("memory.integrity.promptMinConfidence", cfg.memory?.integrity?.promptMinConfidence ?? 0.55);
+      setVal("memory.integrity.maxEntriesPerUser", cfg.memory?.integrity?.maxEntriesPerUser || 180);
+      setVal("memory.integrity.maxConflictsPerUser", cfg.memory?.integrity?.maxConflictsPerUser || 40);
+      setVal("accounts.primary.qq", cfg.accounts?.primary?.qq);
+      setVal("accounts.primary.protocol", cfg.accounts?.primary?.protocol || "napcat");
+      setVal("accounts.primary.onebotPath", cfg.accounts?.primary?.onebotPath || "/onebot");
+      setVal("accounts.primary.napcatContainer", cfg.accounts?.primary?.napcatContainer || "napcat");
+      setVal("accounts.primary.protocolContainer", cfg.accounts?.primary?.protocolContainer || cfg.accounts?.primary?.napcatContainer || "napcat");
+      setVal("accounts.primary.webuiPort", cfg.accounts?.primary?.webuiPort || (cfg.accounts?.primary?.protocol === "snowluma" ? 6103 : ""));
+      setVal("accounts.primary.noVncPort", cfg.accounts?.primary?.noVncPort || (cfg.accounts?.primary?.protocol === "snowluma" ? 6104 : ""));
+      setVal("accounts.primary.vncPort", cfg.accounts?.primary?.vncPort || (cfg.accounts?.primary?.protocol === "snowluma" ? 5902 : ""));
+      setVal("accounts.primary.onebotWsUrl", cfg.accounts?.primary?.onebotWsUrl || (cfg.accounts?.primary?.protocol === "snowluma" ? "ws://127.0.0.1:6303" : ""));
+      setVal("accounts.primary.snowlumaImage", cfg.accounts?.primary?.snowlumaImage || "motricseven7/snowluma:latest");
+      const standbyA = cfg.accounts?.standbys?.[0] || {};
+      setVal("accounts.standbys.0.qq", standbyA.qq);
+      setVal("accounts.standbys.0.protocol", standbyA.protocol || "napcat");
+      setVal("accounts.standbys.0.onebotPath", standbyA.onebotPath || cfg.accounts?.primary?.onebotPath || "/onebot");
+      setVal("accounts.standbys.0.napcatContainer", standbyA.napcatContainer || "napcat-standby-a");
+      setVal("accounts.standbys.0.protocolContainer", standbyA.protocolContainer || standbyA.napcatContainer || (standbyA.protocol === "snowluma" ? "snowluma-standby-a" : "napcat-standby-a"));
+      setVal("accounts.standbys.0.webuiPort", standbyA.webuiPort || (standbyA.protocol === "snowluma" ? 6101 : ""));
+      setVal("accounts.standbys.0.noVncPort", standbyA.noVncPort || (standbyA.protocol === "snowluma" ? 6102 : ""));
+      setVal("accounts.standbys.0.vncPort", standbyA.vncPort || (standbyA.protocol === "snowluma" ? 5901 : ""));
+      setVal("accounts.standbys.0.onebotWsUrl", standbyA.onebotWsUrl || (standbyA.protocol === "snowluma" ? "ws://127.0.0.1:6301" : ""));
+      setVal("accounts.standbys.0.snowlumaImage", standbyA.snowlumaImage || "motricseven7/snowluma:latest");
+      setVal("accounts.standbys.0.behaviorMode", standbyA.behaviorMode || "normal");
+      setVal("accounts.standbys.0.enabled", standbyA.enabled === false ? "false" : "true");
+      setVal("accounts.failover.enabled", cfg.accounts?.failover?.enabled !== false);
+      setVal("accounts.failover.switchBackWhenPrimaryHealthy", cfg.accounts?.failover?.switchBackWhenPrimaryHealthy !== false);
+      setVal("accounts.failover.switchAfterMs", cfg.accounts?.failover?.switchAfterMs || 60000);
+      setVal("prompt.system", cfg.prompt?.system);
+      dirty = false;
+      $("saveState").textContent = "已加载配置";
+      syncProtocolFields();
+    }
+
+    function renderTasks() {
+      const data = taskData || { tasks: [], running: 0, queued: 0 };
+      const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+      $("taskModePill").textContent = cfg?.taskMode?.enabled === false ? "已关闭" : cfg?.taskMode?.shadowMode ? "影子模式" : "正式启用";
+      $("taskCount").textContent = String(tasks.length);
+      $("taskRuntimeSummary").textContent = `运行中：${Number(data.running || 0)}\n排队中：${Number(data.queued || 0)}\n会话并发：${cfg?.taskMode?.maxConcurrentPerConversation || 1}\n全局并发：${cfg?.taskMode?.maxConcurrentGlobal || 2}`;
+      const list = $("taskList");
+      list.replaceChildren();
+      if (!tasks.length) {
+        const empty = document.createElement("div");
+        empty.className = "hint";
+        empty.textContent = "暂无任务记录。影子模式只记录路由日志，不创建任务。";
+        list.appendChild(empty);
+        return;
+      }
+      for (const task of tasks.slice(0, 80)) {
+        const item = document.createElement("div");
+        item.className = "list-item";
+        const title = document.createElement("strong");
+        title.textContent = `${task.id} · ${task.status}`;
+        const detail = document.createElement("span");
+        detail.textContent = `${task.summary || task.objective || "未命名任务"}\n复杂度 ${task.complexity || "standard"} · 思考 ${task.reasoningEffort || "medium"}\n会话 ${task.conversationId || "-"} · 发起人 ${task.senderName || task.userId || "-"} · ${task.updatedAt ? new Date(task.updatedAt).toLocaleString() : ""}`;
+        item.append(title, detail);
+        const actions = document.createElement("div");
+        actions.className = "row";
+        if (["interrupted", "offered"].includes(task.status)) {
+          const resume = document.createElement("button");
+          resume.className = "secondary";
+          resume.textContent = task.status === "offered" ? "确认执行" : "恢复";
+          resume.dataset.taskAction = "resume";
+          resume.dataset.taskId = task.id;
+          actions.appendChild(resume);
+        }
+        if (!["completed", "failed", "cancelled"].includes(task.status)) {
+          const supplement = document.createElement("button");
+          supplement.className = "secondary";
+          supplement.textContent = "补充要求";
+          supplement.dataset.taskAction = "supplement";
+          supplement.dataset.taskId = task.id;
+          actions.appendChild(supplement);
+          const cancel = document.createElement("button");
+          cancel.className = "danger";
+          cancel.textContent = "取消";
+          cancel.dataset.taskAction = "cancel";
+          cancel.dataset.taskId = task.id;
+          actions.appendChild(cancel);
+        }
+        if (task.status === "waiting_permission") {
+          const grant = document.createElement("button");
+          grant.className = "secondary";
+          grant.textContent = "主人授权";
+          grant.dataset.taskAction = "grant";
+          grant.dataset.taskId = task.id;
+          actions.appendChild(grant);
+        }
+        if (task.status === "completed") {
+          const artifacts = document.createElement("button");
+          artifacts.className = "secondary";
+          artifacts.textContent = "查看产物";
+          artifacts.dataset.taskAction = "artifacts";
+          artifacts.dataset.taskId = task.id;
+          actions.appendChild(artifacts);
+        }
+        item.appendChild(actions);
+        list.appendChild(item);
+      }
+    }
+
+    function renderReviewerAndIntegrity() {
+      const metrics = reviewerData?.metrics || {};
+      $("reviewerPill").textContent = reviewerData?.config?.runtimeDisabled === false ? "兼容模式" : "已停用";
+      $("reviewerMetrics").textContent = [
+        `已审查：${Number(metrics.reviewed || 0)}`,
+        `通过：${Number(metrics.passed || 0)}`,
+        `修正：${Number(metrics.corrected || 0)}`,
+        `拒绝：${Number(metrics.rejected || 0)}`,
+        `失败：${Number(metrics.failed || 0)}`,
+        `平均耗时：${metrics.reviewed ? Math.round(Number(metrics.totalDurationMs || 0) / Number(metrics.reviewed)) : 0}ms`,
+        "",
+        ...(Array.isArray(metrics.recent) ? metrics.recent.slice(-12).reverse().map((item) => `${item.at ? new Date(item.at).toLocaleTimeString() : "--"} ${item.mode || "chat"} · ${item.verdict || "-"} · ${(item.issueCodes || []).join(",") || "无问题码"}`) : [])
+      ].join("\n");
+      const totals = memoryIntegrityData?.totals || {};
+      $("memoryIntegrityPill").textContent = memoryIntegrityData?.ok === false ? "发现串人风险" : "结构正常";
+      $("memoryIntegrityView").textContent = JSON.stringify({ generatedAt: memoryIntegrityData?.generatedAt, totals }, null, 2);
+    }
+
+    async function refreshAgentFeatures() {
+      const [tasks, reviewer, integrity] = await Promise.all([
+        api(`/api/tasks?ts=${Date.now()}`).catch((err) => ({ ok: false, tasks: [], error: err.message })),
+        api(`/api/reviewer/status?ts=${Date.now()}`).catch((err) => ({ ok: false, metrics: {}, error: err.message })),
+        api(`/api/memory/integrity?ts=${Date.now()}`).catch((err) => ({ ok: false, totals: {}, error: err.message }))
+      ]);
+      taskData = tasks;
+      reviewerData = reviewer;
+      memoryIntegrityData = integrity;
+      renderTasks();
+      renderReviewerAndIntegrity();
+    }
+
+    async function taskAction(taskId, action) {
+      let body = {};
+      if (action === "supplement") {
+        const text = prompt("补充任务要求：");
+        if (!text) return;
+        body = { text };
+      }
+      if (action === "grant") {
+        const type = prompt("授权类型：read / write / computer / authenticated_browser", "read");
+        if (!type) return;
+        const target = prompt(type === "read" || type === "write" ? "绝对路径：" : "授权用途：");
+        if (!target) return;
+        body = { type, target, purpose: "admin console explicit grant" };
+      }
+      const result = await api(`/api/tasks/${encodeURIComponent(taskId)}/${action}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      toast(action === "cancel" ? "任务已取消" : "任务已进入队列");
+      await refreshAgentFeatures();
+      return result;
+    }
+
+    async function showTaskArtifacts(taskId) {
+      const result = await api(`/api/tasks/${encodeURIComponent(taskId)}/artifacts`);
+      const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
+      if (!artifacts.length) return toast("这个任务没有可下载产物", "bad");
+      const item = Array.from($("taskList").children).find((node) => node.querySelector?.(`[data-task-id="${CSS.escape(taskId)}"]`));
+      const box = document.createElement("div");
+      box.className = "row";
+      for (const artifact of artifacts) {
+        const link = document.createElement("a");
+        link.href = `/api/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(artifact.id)}`;
+        link.textContent = `下载 ${artifact.name} (${Math.ceil(Number(artifact.size || 0) / 1024)}KB)`;
+        link.target = "_blank";
+        link.rel = "noopener";
+        box.appendChild(link);
+      }
+      item?.appendChild(box);
+    }
+
+    async function rebuildMemoryIntegrity(apply = false) {
+      if (apply && !confirm("将先备份 memory.json，再运行 AI 记忆重整。过程可能持续较久，确认继续？")) return;
+      const buttonId = apply ? "memoryApplyBtn" : "memoryDryRunBtn";
+      setBusy(buttonId, true, apply ? "重整中..." : "检查中...");
+      try {
+        const result = await api("/api/memory/integrity/rebuild", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ apply }) });
+        $("memoryIntegrityView").textContent = result.stdout || JSON.stringify(result, null, 2);
+        toast(apply ? "记忆已备份并重整" : "dry-run 完成");
+        await refreshAgentFeatures();
+      } finally {
+        setBusy(buttonId, false);
+      }
+    }
+
+    async function refreshAll({ silent = false } = {}) {
+      if (!silent) $("saveState").textContent = "刷新中...";
+      statusData = await api(`/api/status?ts=${Date.now()}`);
+      renderOverview();
+      renderLogs();
+      renderProtocolControls();
+      $("lastRefresh").textContent = `上次刷新：${fmtTime()} · 状态生成：${fmtAgo(statusData?.health?.generatedAt || statusData?.serverTime)}`;
+      const [config, memory, archiveStatus, archiveConversations] = await Promise.all([
+        api(`/api/config?ts=${Date.now()}`),
+        api(`/api/memory?ts=${Date.now()}`),
+        api(`/api/archive/status?ts=${Date.now()}`).catch((err) => ({ ok: false, error: err.message })),
+        api(`/api/archive/conversations?ts=${Date.now()}`).catch((err) => ({ ok: false, conversations: [], error: err.message }))
+      ]);
+      cfg = config;
+      memoryData = memory;
+      archiveStatusData = archiveStatus;
+      archiveConversationData = archiveConversations;
+      await refreshAgentFeatures();
+      renderAll();
+      if (!dirty) fillConfig();
+      $("lastRefresh").textContent = `上次刷新：${fmtTime()} · 状态生成：${fmtAgo(statusData?.health?.generatedAt || statusData?.serverTime)}`;
+      if (!dirty) $("saveState").textContent = "已同步";
+    }
+
+    function renderAll() {
+      renderOverview();
+      renderAccounts();
+      renderGroups();
+      renderArchive();
+      renderSendGroups();
+      renderLogs();
+      renderSocialPlanner();
+      renderTasks();
+      renderReviewerAndIntegrity();
+      renderProtocolControls();
+      renderDesktopBackup();
+    }
+
+    function renderSocialPlanner() {
+      const target = $("socialPlannerRecent");
+      if (!target) return;
+      const planner = statusData?.health?.diagnostics?.socialPlanner || {};
+      const recent = Array.isArray(planner.recent) ? planner.recent.slice(-12).reverse() : [];
+      if (!recent.length) {
+        target.textContent = `状态：${planner.enabled === false ? "已关闭" : planner.shadowMode ? "影子模式" : "已启用"}\n暂无社交判断记录`;
+        return;
+      }
+      target.textContent = recent.map((item) => {
+        const time = item.at ? new Date(item.at).toLocaleTimeString() : "--:--:--";
+        return `${time} 群${item.groupId || "-"} ${item.action || "observe"} ${Number(item.confidence || 0).toFixed(2)} · ${item.reason || item.candidateReason || "无理由"}`;
+      }).join("\n");
+    }
+
+    function statusPill(ok, text) {
+      return `<span class="pill ${ok ? "good" : "bad"}"><span class="dot ${ok ? "good" : "bad"}"></span>${esc(text)}</span>`;
+    }
+
+    function domSafe(value) {
+      return String(value || "x").replace(/[^a-zA-Z0-9_-]/g, "-") || "x";
+    }
+
+    function normalizedProtocol(value) {
+      return String(value || "napcat").trim().toLowerCase() === "snowluma" ? "snowluma" : "napcat";
+    }
+
+    function accountNoVncUrl(account) {
+      if (!account || normalizedProtocol(account.protocol) !== "snowluma") return "";
+      return account.noVnc?.url || (account.noVncPort ? `http://127.0.0.1:${Number(account.noVncPort)}` : "");
+    }
+
+    function primaryAccountRow() {
+      return accountRows().find((item) => item.role === "primary" || item.id === "primary") || {};
+    }
+
+    function activeAccountRow() {
+      const rows = accountRows();
+      const activeId = statusData?.health?.activeAccountId || statusData?.config?.accounts?.activeAccountId;
+      return rows.find((item) => item.id === activeId) || rows.find((item) => item.active) || rows.find((item) => item.role === "primary") || {};
+    }
+
+    function syncProtocolFields() {
+      const selected = {
+        primary: normalizedProtocol(getVal("accounts.primary.protocol")),
+        "standby-a": normalizedProtocol(getVal("accounts.standbys.0.protocol"))
+      };
+      for (const field of document.querySelectorAll("[data-protocol-account][data-protocol-kind]")) {
+        field.hidden = selected[field.dataset.protocolAccount] !== field.dataset.protocolKind;
+      }
+    }
+
+    function renderProtocolControls() {
+      const active = activeAccountRow();
+      const protocol = normalizedProtocol(active.protocol);
+      const label = active.protocolLabel || (protocol === "snowluma" ? "SnowLuma" : "NapCat");
+      const webuiUrl = active.webui?.url || "";
+      const noVncUrl = accountNoVncUrl(active);
+      const webuiLink = $("activeProtocolLink");
+      if (webuiLink) {
+        webuiLink.href = webuiUrl || "#";
+        webuiLink.classList.toggle("hidden", !webuiUrl);
+      }
+      if ($("activeProtocolText")) $("activeProtocolText").textContent = `${active.displayName || active.id || "当前账号"} · ${label} · ${active.protocolContainer || "容器未配置"}`;
+      if ($("activeNoVncAction")) $("activeNoVncAction").classList.toggle("hidden", !noVncUrl);
+      if ($("activeNoVncLink")) $("activeNoVncLink").href = noVncUrl || "#";
+      if ($("restartActiveProtocolHint")) $("restartActiveProtocolHint").textContent = `重启 ${active.displayName || active.id || "当前账号"} 的 ${label} 容器，用于登录态、Hook 或 OneBot 异常。`;
+      const hasNapcat = accountRows().some((item) => normalizedProtocol(item.protocol) === "napcat");
+      if ($("legacyNapcatTools")) $("legacyNapcatTools").classList.toggle("hidden", !hasNapcat);
+      syncProtocolFields();
+    }
+
+    function configuredAccounts() {
+      const primary = {
+        id: cfg?.accounts?.primary?.id || "primary",
+        role: "primary",
+        displayName: cfg?.accounts?.primary?.displayName || "Hermes小跟班",
+        configuredQq: cfg?.accounts?.primary?.qq || "",
+        qq: cfg?.accounts?.primary?.qq || "",
+        protocol: cfg?.accounts?.primary?.protocol || "napcat",
+        onebotPath: cfg?.accounts?.primary?.onebotPath || "/onebot",
+        napcatContainer: cfg?.accounts?.primary?.napcatContainer || "napcat",
+        protocolContainer: cfg?.accounts?.primary?.protocolContainer || cfg?.accounts?.primary?.napcatContainer || "napcat",
+        onebotWsUrl: cfg?.accounts?.primary?.onebotWsUrl || "",
+        webuiPort: cfg?.accounts?.primary?.webuiPort || null,
+        noVncPort: cfg?.accounts?.primary?.noVncPort || null,
+        vncPort: cfg?.accounts?.primary?.vncPort || null,
+        snowlumaImage: cfg?.accounts?.primary?.snowlumaImage || "",
+        enabled: true
+      };
+      const standbys = (cfg?.accounts?.standbys || []).map((item, index) => ({
+        id: item.id || `standby-${index + 1}`,
+        role: "standby",
+        displayName: item.displayName || `Hermes小跟班${index + 2}`,
+        configuredQq: item.qq || "",
+        qq: item.qq || "",
+        protocol: item.protocol || "napcat",
+        onebotPath: item.onebotPath || primary.onebotPath,
+        napcatContainer: item.napcatContainer || `napcat-standby-${index + 1}`,
+        protocolContainer: item.protocolContainer || item.napcatContainer || (item.protocol === "snowluma" ? `snowluma-standby-${index + 1}` : `napcat-standby-${index + 1}`),
+        onebotWsUrl: item.onebotWsUrl || "",
+        webuiPort: item.webuiPort || null,
+        noVncPort: item.noVncPort || null,
+        vncPort: item.vncPort || null,
+        snowlumaImage: item.snowlumaImage || "",
+        behaviorMode: item.behaviorMode || "normal",
+        enabled: item.enabled !== false
+      }));
+      if (!standbys.length) {
+        standbys.push({
+          id: "standby-a",
+          role: "standby",
+          displayName: "Hermes小跟班2",
+          configuredQq: "",
+          qq: "",
+          protocol: "snowluma",
+          onebotPath: primary.onebotPath,
+          napcatContainer: "napcat-standby-a",
+          protocolContainer: "snowluma-standby-a",
+          onebotWsUrl: "ws://127.0.0.1:6301",
+          webuiPort: 6101,
+          noVncPort: 6102,
+          vncPort: 5901,
+          snowlumaImage: "motricseven7/snowluma:latest",
+          behaviorMode: "normal",
+          enabled: true
+        });
+      }
+      return [primary, ...standbys];
+    }
+
+    function accountRows() {
+      const configured = configuredAccounts();
+      const statusItems = statusData?.health?.accounts || statusData?.config?.accounts?.items || [];
+      const byId = new Map(configured.map((item) => [item.id, { ...item }]));
+      for (const item of statusItems) {
+        const existing = byId.get(item.id) || {};
+        byId.set(item.id, { ...existing, ...item });
+      }
+      return Array.from(byId.values());
+    }
+
+    function renderAccounts() {
+      const list = $("accountCards");
+      if (!list) return;
+      const rows = accountRows();
+      if (!rows.length) {
+        list.innerHTML = `<div class="hint">还没有账号配置。</div>`;
+        return;
+      }
+      list.innerHTML = "";
+      for (const acc of rows) {
+        const id = acc.id || "primary";
+        const safe = domSafe(id);
+        const connected = Boolean(acc.connected);
+        const active = Boolean(acc.active);
+        const qr = acc.qrcode || {};
+        const diagnosis = acc.diagnosis || {};
+        const statusLevel = acc.statusLevel || diagnosis.level || (connected ? "good" : "bad");
+        const statusText = acc.statusText || diagnosis.text || (connected ? "正常" : "未连接");
+        const statusReason = acc.statusReason || diagnosis.reason || "";
+        const routeState = acc.routeState || diagnosis.routeState || "";
+        const routeStateLabel = acc.routeStateLabel || diagnosis.routeStateLabel || statusText;
+        const routingAction = acc.routingAction || diagnosis.routingAction || "";
+        const roleText = acc.role === "primary" ? "主账号" : "备用账号";
+        const protocol = normalizedProtocol(acc.protocol);
+        const protocolLabel = acc.protocolLabel || (protocol === "snowluma" ? "SnowLuma" : "NapCat");
+        const protocolContainer = acc.protocolContainer || acc.napcatContainer || "";
+        const card = document.createElement("div");
+        card.className = "card";
+        const shouldShowQr = protocol !== "snowluma" && Boolean(qr.exists && (
+          acc.needsLogin
+          || acc.wrongAccountLoggedIn
+          || routeState === "LOGIN_REQUIRED"
+          || routeState === "DISCONNECTED"
+        ));
+        const qrHidden = shouldShowQr ? "" : "hidden";
+        const actualQq = acc.actualQq || acc.qq || "";
+        const configuredQq = acc.configuredQq || "";
+        const qqText = actualQq || configuredQq || "未识别";
+        const webuiUrl = acc.webui?.url || diagnosis.webui?.url || "";
+        const noVncUrl = accountNoVncUrl(acc);
+        const probe = diagnosis.probe || acc.probe || null;
+        const peerPing = diagnosis.peerPing || {};
+        const peerSendText = peerPing.sentAt
+          ? `${peerPing.sentOk ? "发出成功" : `发出失败：${peerPing.sentError || "未知错误"}`} ${fmtAgo(peerPing.sentAt)}${peerPing.sentTo ? ` → ${peerPing.sentTo}` : ""}`
+          : "尚未发出";
+        const ownerSendText = peerPing.ownerSentAt
+          ? `${peerPing.ownerSentOk ? "成功" : `失败：${peerPing.ownerSentError || "未知错误"}`} ${fmtAgo(peerPing.ownerSentAt)}${peerPing.ownerSentTo ? ` → ${peerPing.ownerSentTo}` : ""}`
+          : "尚未检测";
+        const peerReceiveText = peerPing.receivedAt
+          ? `收到 ${fmtAgo(peerPing.receivedAt)}${peerPing.receivedFrom ? ` ← ${peerPing.receivedFrom}` : ""}`
+          : peerPing.expectedAt
+            ? `${peerPing.receiveMissing ? "应收未收" : "等待接收"} ${fmtAgo(peerPing.expectedAt)}${peerPing.expectedFrom ? ` ← ${peerPing.expectedFrom}` : ""}`
+            : "尚无接收验活";
+        const caps = acc.capabilities || diagnosis.capabilities || {};
+        const capClass = (cap) => cap?.status === "ok" ? "good" : cap?.status === "bad" ? "bad" : cap?.status === "warn" ? "warn" : "secondary";
+        const capText = (name, cap) => `<span class="pill ${capClass(cap)}">${esc(name)}：${esc(cap?.text || "未验证")}</span>`;
+        const capReason = (name, cap) => cap
+          ? `<div class="hint">${esc(name)}：${esc(cap.reason || cap.text || "")}${cap.at ? ` · ${fmtAgo(cap.at)}` : ""}${cap.evidence ? ` · ${esc(cap.evidence)}` : ""}</div>`
+          : "";
+        card.innerHTML = `
+          <h3>${esc(roleText)} <span class="pill ${active ? "good" : "secondary"}">${active ? "当前接管" : esc(id)}</span></h3>
+          <div class="row" style="margin-bottom:8px">
+            ${statusPill(statusLevel !== "bad", routeStateLabel)}
+            ${statusPill(connected, connected ? "OneBot 已连接" : "OneBot 未连接")}
+            <span class="pill">实际QQ：${esc(qqText)}</span>
+            ${configuredQq && configuredQq !== actualQq ? `<span class="pill bad">配置QQ：${esc(configuredQq)}</span>` : configuredQq ? `<span class="pill">配置QQ：${esc(configuredQq)}</span>` : ""}
+            <span class="pill">昵称：${esc(acc.displayName || "")}</span>
+            <span class="pill">${acc.enabled === false ? "已停用" : "已启用"}</span>
+          </div>
+          <div class="${statusLevel === "bad" ? "alert" : statusLevel === "warn" ? "warning" : "success"}" style="margin:8px 0">${esc(statusReason || statusText)}</div>
+          <div class="row" style="margin:8px 0">
+            ${capText("身份", caps.identity)}
+            ${capText("OneBot", caps.onebot)}
+            ${capText("API", caps.api)}
+          </div>
+          <div class="row" style="margin:8px 0">
+            ${capText("私聊发", caps.privateSend)}
+            ${capText("私聊收", caps.privateReceive)}
+            ${capText("群聊发", caps.groupSend)}
+            ${capText("群聊收", caps.groupReceive)}
+          </div>
+          <details style="margin:8px 0">
+            <summary class="muted">查看证据详情</summary>
+            ${capReason("身份", caps.identity)}
+            ${capReason("OneBot", caps.onebot)}
+            ${capReason("API", caps.api)}
+            ${capReason("私聊发送", caps.privateSend)}
+            ${capReason("私聊接收", caps.privateReceive)}
+            ${capReason("群聊发送", caps.groupSend)}
+            ${capReason("群聊接收", caps.groupReceive)}
+            ${protocol === "napcat" ? capReason("二维码", caps.qrcode) : ""}
+            <div class="hint">路由动作：${esc(routingAction || "observe")}；强证据：${Number(acc.evidence?.strong ?? diagnosis.evidence?.strong ?? 0)}，弱证据：${Number(acc.evidence?.weak ?? diagnosis.evidence?.weak ?? 0)}</div>
+          </details>
+          <div class="hint">协议端：<span class="kbd">${esc(protocolLabel)}</span> · 容器：<span class="kbd">${esc(protocolContainer)}</span></div>
+          <div class="hint">${protocol === "snowluma" ? "主动 WS" : "反向 WS"}：<span class="kbd">${protocol === "snowluma" ? esc(acc.onebotWsUrl || "ws://127.0.0.1:6301") : `ws://host.docker.internal:6199${esc(acc.onebotPath || "/onebot")}`}</span></div>
+          ${protocol === "snowluma" ? `<div class="hint">WebUI：${esc(webuiUrl || "未配置")} · noVNC：${esc(noVncUrl || "未配置")}</div>` : ""}
+          <div class="hint">最近帧：${fmtAgo(acc.lastFrameAt)} · 最近消息：${fmtAgo(acc.lastMessageAt)} · 探测：${probe?.checkedAt ? `${probe.ok ? "成功" : "失败"} ${fmtAgo(probe.checkedAt)}` : "等待检测"}</div>
+          <div class="hint">给主人发送检测：${esc(ownerSendText)}</div>
+          <div class="hint">互发验活：${esc(peerSendText)} · ${esc(peerReceiveText)}</div>
+          <div class="row" style="margin-top:8px">
+            ${statusPill(Boolean(acc.canReceive), acc.canReceive ? "可收消息" : "收消息未确认")}
+            ${statusPill(Boolean(acc.canSend), acc.canSend ? "可发消息" : "发送未确认")}
+            ${acc.wrongAccountLoggedIn ? '<span class="pill bad">账号错绑</span>' : ""}
+            ${acc.suspectFakeOnline ? '<span class="pill bad">疑似假在线</span>' : ""}
+            ${acc.needsLogin ? '<span class="pill bad">建议重新登录</span>' : ""}
+          </div>
+          <div class="row" style="margin-top:10px">
+            <img id="accountQr-${safe}" class="qr ${qrHidden}" alt="${esc(id)} 登录二维码" src="${shouldShowQr ? `/qrcode/${encodeURIComponent(id)}.png?ts=${Date.now()}` : ""}" />
+            <div>
+              <div id="accountQrInfo-${safe}" class="muted">${protocol === "snowluma" ? (acc.needsLogin || !connected ? "请打开 SnowLuma WebUI 检查注入状态，或进入 noVNC 桌面完成 QQ 登录。" : "SnowLuma 登录与 QQ 桌面均可从下方入口管理，无需使用 NapCat 二维码。") : shouldShowQr ? `请扫码登录/确认。二维码：${esc(qr.path || "")} · ${fmtAgo(qr.mtimeMs)}` : connected ? (qr.exists ? `账号未被判定为需登录；残留二维码已隐藏：${esc(qr.path || "")} · ${fmtAgo(qr.mtimeMs)}` : "账号看起来已连接；需要重登时再刷新二维码。") : qr.exists ? `二维码：${esc(qr.path || "")} · ${fmtAgo(qr.mtimeMs)}` : "暂无二维码；需要登录时点刷新二维码。"}</div>
+              <div class="row account-actions" style="margin-top:8px">
+                <button id="accountProbe-${safe}" data-account-action="probe" data-account-id="${esc(id)}">检测账号</button>
+                <button id="accountActivate-${safe}" class="secondary" data-account-action="activate" data-account-id="${esc(id)}">切为当前</button>
+                ${webuiUrl ? `<a class="pill" target="_blank" rel="noreferrer" href="${esc(webuiUrl)}">打开 ${esc(protocolLabel)} WebUI</a>` : ""}
+                ${noVncUrl ? `<a class="pill" target="_blank" rel="noreferrer" href="${esc(noVncUrl)}">打开 noVNC 桌面</a>` : ""}
+                ${protocol === "napcat" ? `<button id="accountRefresh-${safe}" data-account-action="refresh-qr" data-account-id="${esc(id)}">刷新二维码</button><button id="accountForceRefresh-${safe}" class="danger" data-account-action="force-refresh-qr" data-account-id="${esc(id)}">强制刷新</button><button id="accountResetLogin-${safe}" class="danger" data-account-action="reset-login" data-account-id="${esc(id)}">清理登录态</button>` : ""}
+                <button id="accountRestart-${safe}" class="danger" data-account-action="restart" data-account-id="${esc(id)}">重启${esc(protocolLabel)}</button>
+              </div>
+            </div>
+          </div>
+        `;
+        list.appendChild(card);
+      }
+    }
+
+    function renderOverview() {
+      const h = statusData?.health || {};
+      const runtime = h.runtime || {};
+      const primaryAccount = primaryAccountRow();
+      const activeAccount = activeAccountRow();
+      const protocol = normalizedProtocol(primaryAccount.protocol);
+      const protocolLabel = primaryAccount.protocolLabel || (protocol === "snowluma" ? "SnowLuma" : "NapCat");
+      const primaryConnected = Boolean(primaryAccount.connected);
+      const needsLogin = Boolean(primaryAccount.needsLogin || primaryAccount.routeState === "LOGIN_REQUIRED");
+      const sendBad = Boolean(h.sendFailureActive || primaryAccount.canSend === false || primaryAccount.routeState === "DEGRADED_SEND");
+      const messageInactive = Boolean(h.messageInactive);
+      const primaryBad = Boolean(primaryAccount.strongBad || primaryAccount.needsLogin || primaryAccount.wrongAccountLoggedIn || primaryAccount.routeState === "LOGIN_REQUIRED" || primaryAccount.routeState === "WRONG_ACCOUNT" || primaryAccount.routeState === "DISCONNECTED" || primaryAccount.routeState === "STALE");
+      const activeConnected = Boolean(activeAccount.connected ?? h.onebotConnected);
+      const replyState = h.replyCoordinator || h.diagnostics?.replyCoordinator || {};
+      const needsAttention = Boolean(needsLogin || !activeConnected || h.onebotStale || sendBad || messageInactive || primaryBad);
+      $("statLogin").innerHTML = `<span class="dot ${needsLogin || sendBad || primaryBad ? "bad" : "good"}"></span>${needsLogin ? "需登录" : sendBad ? "发送失败" : primaryBad ? "主号异常" : "正常"}`;
+      $("statLoginHint").textContent = `${primaryAccount.displayName || "主账号"} · ${protocolLabel} · ${primaryAccount.statusReason || primaryAccount.statusText || "等待账号诊断"} · 状态生成 ${fmtAgo(h.generatedAt || statusData?.serverTime)}`;
+      $("statOnebot").innerHTML = `<span class="dot ${activeConnected && !h.onebotStale && !messageInactive ? "good" : "bad"}"></span>${h.onebotStale ? "疑似卡住" : messageInactive ? "消息停滞" : activeConnected ? "已连接" : "未连接"}`;
+      $("statOnebotHint").textContent = `当前接管：${activeAccount.displayName || activeAccount.id || "未知"} · 回复生成 ${Number(replyState.activeCount || 0)} · 待处理 ${Number(replyState.pending || 0)} · 已合并 ${Number(replyState.merged || 0)} · 重生成 ${Number(replyState.regenerated || 0)}${replyState.lastCancellationReason ? ` · 最近取消：${replyState.lastCancellationReason}` : ""} · 最近帧 ${fmtAgo(runtime.lastOneBotFrameAt)} · 最近消息 ${fmtAgo(runtime.lastOneBotMessageAt)}${h.onebotStale ? " · 超过 90 秒无心跳/事件" : ""}${messageInactive ? " · 心跳正常但聊天事件长时间未进入" : ""}${sendBad ? ` · 最近发送失败：${primaryAccount.sendHealth?.lastSendError || h.sendHealth?.lastSendFailure || "未知错误"}` : ""}`;
+      $("statModel").textContent = cfg?.ai?.model || statusData?.config?.ai?.model || "未设置";
+      $("statModelHint").textContent = `provider: ${cfg?.ai?.provider || "未设置"} · timeout: ${fmtMs(cfg?.ai?.timeoutMs)}`;
+      $("statMemory").textContent = `${memoryData?.groupCount ?? 0} 群`;
+      const users = (memoryData?.groups || []).reduce((sum, g) => sum + Number(g.users || 0), 0);
+      $("statMemoryHint").textContent = `${users} 个成员档案 · ${cfg?.memory?.aiExtraction?.enabled === false ? "AI 记忆关闭" : "AI 记忆开启"}`;
+      $("sideStatus").innerHTML = [
+        statusPill(!needsLogin && !sendBad && !primaryBad, needsLogin ? "QQ 需登录" : sendBad ? "发送失败" : primaryBad ? "主号需关注" : "QQ 正常"),
+        statusPill(Boolean(activeConnected && !h.onebotStale && !messageInactive), h.onebotStale ? "OneBot 卡住" : messageInactive ? "消息停滞" : activeConnected ? "OneBot 已连" : "OneBot 断开")
+      ].join("");
+      $("attentionPill").className = needsAttention ? "pill bad" : "pill good";
+      $("attentionPill").textContent = needsAttention ? "需要处理" : "一切正常";
+      const box = $("attentionBox");
+      box.className = needsAttention ? "alert" : "success";
+      const freshness = `最近消息：${runtime.lastOneBotMessagePreview || "暂无"}（${fmtAgo(runtime.lastOneBotMessageAt)}）`;
+      box.textContent = needsLogin
+        ? `${primaryAccount.displayName || "主账号"} 需要重新登录，请从 ${protocolLabel} 登录入口处理。${freshness}`
+        : sendBad
+          ? `OneBot 看起来连着，但 QQ 真实发送失败：${primaryAccount.statusReason || h.sendHealth?.lastSendFailure || "未知错误"}。这通常是协议端假在线或登录态失效，建议检测账号后重启 ${protocolLabel}。${freshness}`
+        : h.onebotStale
+          ? `OneBot 连接存在但长时间没有心跳/事件，可能是假在线；建议检测账号后重启当前协议端。${freshness}`
+        : messageInactive
+          ? `OneBot 心跳正常，但真实聊天消息已经 ${fmtAgo(runtime.lastOneBotMessageAt)} 没进入桥接；如果 QQ 里实际有新消息，请执行账号检测或双向验活。${freshness}`
+        : primaryBad
+          ? `主号存在强异常：${primaryAccount.statusReason || h.primaryRecoveryBlocked || h.primaryReceiveStalled || "主号状态需要确认"}。${freshness}`
+          : activeConnected
+          ? `QQ 已登录，当前由 ${activeAccount.displayName || activeAccount.id || "账号"} 通过 ${activeAccount.protocolLabel || protocolLabel} 收发消息。 ${freshness}`
+          : `当前协议端未连接，请到主备账号页检查。 ${freshness}`;
+
+      const loginAssistVisible = Boolean(needsLogin || !primaryConnected || primaryAccount.suspectFakeOnline || primaryAccount.wrongAccountLoggedIn);
+      $("loginAssist").classList.toggle("hidden", !loginAssistVisible);
+      const webuiUrl = primaryAccount.webui?.url || "";
+      const noVncUrl = accountNoVncUrl(primaryAccount);
+      $("overviewProtocolWebuiLink").href = webuiUrl || "#";
+      $("overviewProtocolWebuiLink").classList.toggle("hidden", !webuiUrl);
+      $("overviewProtocolWebuiLink").textContent = `打开 ${protocolLabel} WebUI`;
+      $("overviewNoVncLink").href = noVncUrl || "#";
+      $("overviewNoVncLink").classList.toggle("hidden", !noVncUrl);
+      $("overviewRefreshQrBtn").classList.toggle("hidden", protocol !== "napcat");
+      $("overviewRebuildNapcatBtn").classList.toggle("hidden", protocol !== "napcat");
+      if (protocol === "snowluma") {
+        $("loginQr").classList.add("hidden");
+        $("loginQr").removeAttribute("src");
+        $("loginAssistInfo").textContent = "SnowLuma 不使用本页的 NapCat 二维码。请先打开 WebUI 查看注入状态；需要扫码或处理 QQ 弹窗时打开 noVNC 桌面。";
+      } else {
+        const qr = primaryAccount.qrcode || {};
+        $("loginQr").classList.toggle("hidden", !qr.exists);
+        if (qr.exists) $("loginQr").src = `/qrcode/${encodeURIComponent(primaryAccount.id || "primary")}.png?ts=${Date.now()}`;
+        else $("loginQr").removeAttribute("src");
+        $("loginAssistInfo").textContent = qr.exists ? `请扫码登录。二维码更新于 ${fmtAgo(qr.mtimeMs)}。` : "当前没有可用二维码，请点击刷新二维码。";
+      }
+      $("capabilityPills").innerHTML = [
+        `<span class="pill ${cfg?.webSearch?.enabled === false ? "bad" : "good"}">联网搜索：${cfg?.webSearch?.enabled === false ? "关" : "开"}</span>`,
+        `<span class="pill ${cfg?.vision?.enabled === false ? "bad" : "good"}">识图：${cfg?.vision?.enabled === false ? "关" : "开"}</span>`,
+        `<span class="pill ${cfg?.proactive?.enabled === false ? "warn" : "good"}">定时插话：${cfg?.proactive?.enabled === false ? "关" : "开"}</span>`,
+        `<span class="pill ${h.privateChats ? "good" : "warn"}">私聊：${h.privateChats ? "开" : "关"}</span>`
+      ].join("");
+      $("scopeText").textContent = h.allGroups ? "当前监听所有已加入群聊；私聊也开启。" : `群：${(h.targetGroups || []).join(", ") || "未设置"}`;
+      $("behaviorText").textContent = `${cfg?.behaviorModes?.default || "默认"} · 普通接话 ${pct(cfg?.trigger?.activeProbability)} · 主动插话 ${pct(cfg?.proactive?.probability)}`;
+      $("recentLog").textContent = statusData?.logs?.tail || "暂无日志。";
+      renderProtocolControls();
+    }
+
+    function renderSendGroups() {
+      const select = $("send.groupSelect");
+      select.innerHTML = `<option value="">从记忆群选择</option>`;
+      for (const g of memoryData?.groups || []) {
+        const option = document.createElement("option");
+        option.value = g.groupId;
+        option.textContent = `${g.groupId} · ${g.users || 0} 人`;
+        select.appendChild(option);
+      }
+    }
+
+    function renderGroups() {
+      const list = $("groupList");
+      const count = memoryData?.groupCount ?? 0;
+      $("memoryCount").textContent = `${count} 群`;
+      const q = String($("memorySearch").value || "").toLowerCase();
+      const groups = (memoryData?.groups || []).filter((g) => JSON.stringify(g).toLowerCase().includes(q));
+      list.innerHTML = "";
+      if (!groups.length) {
+        list.innerHTML = `<div class="hint">没有匹配的群记忆。</div>`;
+        return;
+      }
+      for (const g of groups) {
+        const item = document.createElement("div");
+        item.className = `list-item ${g.groupId === selectedGroupId ? "active" : ""}`;
+        item.innerHTML = `<strong>群 ${esc(g.groupId)}</strong><div class="hint">${g.users || 0} 人 · ${g.profiledUsers || 0} 个画像 · ${g.facts || 0} facts · ${g.topics || 0} topics</div><div class="hint">${g.botSelfUpdatedAt ? "bot自我记忆已启用 · " : ""}${esc(g.rollingSummary || "暂无摘要")}</div>`;
+        item.addEventListener("click", () => loadGroup(g.groupId));
+        list.appendChild(item);
+      }
+    }
+
+    function renderMemoryDetail() {
+      $("selectedGroupPill").textContent = selectedGroupId ? `群 ${selectedGroupId}` : "未选择";
+      if (!selectedGroupMemory) return;
+      const gm = selectedGroupMemory;
+      const users = Object.keys(gm.users || {}).length;
+      $("memorySummaryBox").innerHTML = [
+        `<span class="pill">成员 ${users}</span>`,
+        `<span class="pill">群事实 ${(gm.facts || []).length}</span>`,
+        `<span class="pill">话题 ${(gm.topics || []).length}</span>`,
+        `<span class="pill">摘要 ${(gm.summaries || []).length}</span>`
+      ].join("");
+      const q = String($("memoryDetailSearch").value || "").toLowerCase();
+      if (!q) {
+        $("memoryView").textContent = JSON.stringify(gm, null, 2);
+        return;
+      }
+      const filtered = JSON.parse(JSON.stringify(gm));
+      filtered.users = Object.fromEntries(Object.entries(filtered.users || {}).filter(([id, value]) => (`${id} ${JSON.stringify(value)}`).toLowerCase().includes(q)));
+      filtered.facts = (filtered.facts || []).filter((x) => JSON.stringify(x).toLowerCase().includes(q));
+      filtered.topics = (filtered.topics || []).filter((x) => JSON.stringify(x).toLowerCase().includes(q));
+      $("memoryView").textContent = JSON.stringify(filtered, null, 2);
+    }
+
+    async function loadGroup(groupId) {
+      selectedGroupId = groupId;
+      selectedGroupMemory = await api(`/api/memory?group_id=${encodeURIComponent(groupId)}`);
+      renderGroups();
+      renderMemoryDetail();
+    }
+
+    function renderArchive() {
+      const status = archiveStatusData || {};
+      const conversations = archiveConversationData?.conversations || [];
+      const enabled = cfg?.chatArchive?.enabled !== false;
+      const statusPill = $("archiveStatusPill");
+      if (statusPill) {
+        statusPill.className = `pill ${enabled && status.ok !== false ? "good" : "warn"}`;
+        statusPill.textContent = enabled ? "已开启" : "已关闭";
+      }
+      if ($("archiveCount")) $("archiveCount").textContent = `${conversations.length} 个`;
+      if ($("archiveStatusView")) {
+        $("archiveStatusView").textContent = JSON.stringify({
+          enabled,
+          defaultOn: cfg?.chatArchive?.defaultOn !== false,
+          baseDir: cfg?.chatArchive?.baseDir,
+          exists: status.exists,
+          conversations: status.conversationCount ?? conversations.length,
+          totalBytes: status.totalBytes,
+          error: status.error || archiveConversationData?.error || ""
+        }, null, 2);
+      }
+      const list = $("archiveList");
+      if (!list) return;
+      const q = String($("archiveSearch")?.value || "").toLowerCase();
+      const filtered = conversations.filter((item) => JSON.stringify(item).toLowerCase().includes(q));
+      list.innerHTML = "";
+      if (!filtered.length) {
+        list.innerHTML = `<div class="hint">${conversations.length ? "没有匹配的会话存档。" : "还没有聊天存档。"}</div>`;
+        return;
+      }
+      for (const item of filtered) {
+        const row = document.createElement("div");
+        row.className = "list-item";
+        const conversationId = item.conversationId || item.id || "";
+        row.innerHTML = `
+          <strong>${esc(conversationId)}</strong>
+          <div class="hint">${esc(item.kind || "")} · ${Number(item.messageCount || 0)} 条 · ${Number(item.bytes || 0)} bytes · 更新 ${fmtAgo(item.mtimeMs)}</div>
+          <div class="hint">${esc(item.path || "")}</div>
+          <div class="row" style="margin-top:8px">
+            <button class="secondary" data-archive-action="export" data-conversation-id="${esc(conversationId)}">导出 JSONL</button>
+            <button class="danger" data-archive-action="clear" data-conversation-id="${esc(conversationId)}">清理此会话</button>
+          </div>
+        `;
+        list.appendChild(row);
+      }
+    }
+
+    async function refreshArchive() {
+      archiveStatusData = await api(`/api/archive/status?ts=${Date.now()}`);
+      archiveConversationData = await api(`/api/archive/conversations?ts=${Date.now()}`);
+      renderArchive();
+    }
+
+    function exportArchive(conversationId) {
+      if (!conversationId) return;
+      location.href = `/api/archive/export?conversation_id=${encodeURIComponent(conversationId)}`;
+    }
+
+    async function clearArchive(conversationId = "") {
+      const label = conversationId ? `会话 ${conversationId}` : "全部聊天存档";
+      if (!confirm(`确定清理 ${label} 吗？这个操作会删除本机 JSONL 存档。`)) return;
+      const result = await api("/api/archive/clear", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ confirm: true, conversationId })
+      });
+      toast(result.ok ? "存档已清理" : "清理失败", result.ok ? "good" : "bad");
+      await refreshArchive();
+    }
+
+    function renderLogs() {
+      const text = currentLogKind === "error" ? (statusData?.logs?.errorTail || "暂无错误日志。") : (statusData?.logs?.tail || "暂无普通日志。");
+      $("logView").textContent = text;
+    }
+
+    function accountConfigEffectText(configPayload, healthPayload) {
+      const accounts = configPayload?.accounts || {};
+      const standby = accounts.standbys?.[0] || {};
+      const effectiveFailover = Boolean(accounts.failover?.enabled !== false && standby.enabled !== false);
+      const primaryProtocol = normalizedProtocol(accounts.primary?.protocol);
+      const standbyProtocol = normalizedProtocol(standby.protocol);
+      const lines = [
+        "账号配置已保存。",
+        "",
+        `主号 QQ：${accounts.primary?.qq || "未填"}`,
+        `主号协议端：${primaryProtocol === "snowluma" ? "SnowLuma" : "NapCat"}`,
+        `主号协议端容器：${accounts.primary?.protocolContainer || accounts.primary?.napcatContainer || "未填"}`,
+        primaryProtocol === "snowluma" ? `主号 OneBot WS：${accounts.primary?.onebotWsUrl || "未填"}` : `主号 OneBot 路径：${accounts.primary?.onebotPath || "/onebot"}`,
+        primaryProtocol === "snowluma" ? `主号 WebUI / noVNC：${accounts.primary?.webuiPort || "未填"} / ${accounts.primary?.noVncPort || "未填"}` : "",
+        "",
+        `备用 A QQ：${standby.qq || "未填，登录后可自动识别"}`,
+        `备用 A 协议端：${standbyProtocol === "snowluma" ? "SnowLuma" : "NapCat"}`,
+        `备用 A 协议端容器：${standby.protocolContainer || standby.napcatContainer || "未填"}`,
+        standbyProtocol === "snowluma" ? `备用 A OneBot WS：${standby.onebotWsUrl || "未填"}` : `备用 A OneBot 路径：${standby.onebotPath || "/onebot"}`,
+        standbyProtocol === "snowluma" ? `备用 A WebUI / noVNC：${standby.webuiPort || "未填"} / ${standby.noVncPort || "未填"}` : "",
+        `备用 A 启用：${standby.enabled === false ? "停用（仍可管理登录，但不参与聊天接管）" : "启用"}`,
+        `主备切换：${accounts.failover?.enabled === false ? "关闭" : "打开"}`,
+        `实际接管能力：${effectiveFailover ? "可在主号异常时切到备用" : "关闭/无可用备用，不会自动切换"}`,
+        "",
+        `当前接管：${healthPayload?.activeAccountId || healthPayload?.accounts?.activeAccountId || "未知"}`
+      ];
+      return lines.filter(Boolean).join("\n");
+    }
+
+    function formatBytes(value) {
+      const bytes = Number(value || 0);
+      if (!bytes) return "0 B";
+      const units = ["B", "KB", "MB", "GB"];
+      const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+      return `${(bytes / (1024 ** index)).toFixed(index ? 1 : 0)} ${units[index]}`;
+    }
+
+    function renderBackupProgress() {
+      const panel = $("backupProgressPanel");
+      if (!panel) return;
+      panel.classList.toggle("hidden", !(desktopApi || browserHostAvailable) || !backupProgress);
+      if (!backupProgress) return;
+      const running = ["running", "cancelling"].includes(backupProgress.status);
+      const percent = Math.max(0, Math.min(100, Number(backupProgress.percent) || 0));
+      $("backupProgressTitle").textContent = backupProgress.status === "completed" ? "备份完成"
+        : backupProgress.status === "cancelled" ? "备份已取消"
+        : backupProgress.status === "failed" ? "备份失败"
+        : `${backupProgress.type === "full" ? "完整迁移备份" : "普通数据备份"} · ${percent}%`;
+      $("backupProgressBar").value = percent;
+      $("backupProgressDetail").textContent = backupProgress.detail || "正在准备…";
+      $("cancelBackupBtn").classList.toggle("hidden", !running || backupProgress.stage === "restart");
+      $("cancelBackupBtn").disabled = backupProgress.status === "cancelling";
+      $("cancelBackupBtn").textContent = backupProgress.status === "cancelling" ? "正在取消…" : "取消备份";
+      for (const id of ["createSafeBackupBtn", "createFullBackupBtn", "restoreBackupBtn", "migrateLegacyProjectBtn"]) {
+        if ($(id)) $(id).disabled = !(desktopApi || browserHostAvailable) || running || (id === "migrateLegacyProjectBtn" && !legacyProjectPath);
+      }
+    }
+
+    function renderDesktopBackup() {
+      const desktop = Boolean(desktopApi);
+      const available = desktop || browserHostAvailable;
+      const running = Boolean(desktopStatusData?.bridgeRunning ?? desktopStatusData?.running);
+      $("backupBrowserNotice")?.classList.toggle("hidden", available);
+      if ($("desktopAppState")) $("desktopAppState").textContent = available ? `${desktop ? "App" : "WebUI"} · ${running ? "运行中" : "已停止"}` : "旧版桥接";
+      if ($("desktopAppHint")) $("desktopAppHint").textContent = desktop
+        ? `${desktopStatusData?.appVersion || ""} · ${desktopStatusData?.arch || ""}`
+        : browserHostAvailable ? "本机宿主提供备份与恢复" : "请启动新版本地 WebUI 或桌面应用";
+      if ($("desktopDataState")) $("desktopDataState").textContent = available ? "独立保存" : "—";
+      if ($("desktopDataPath")) $("desktopDataPath").textContent = desktopStatusData?.stateRoot || "本机用户数据目录";
+      if ($("desktopBackupState")) $("desktopBackupState").textContent = localBackups.length ? fmtAgo(localBackups[0].modifiedAt) : "尚无";
+      if ($("desktopBackupPath")) $("desktopBackupPath").textContent = desktopStatusData?.backupRoot || "默认备份目录";
+      if ($("desktopAutoStart")) $("desktopAutoStart").checked = Boolean(desktopStatusData?.autoStart);
+      if ($("desktopStatusView")) {
+        $("desktopStatusView").textContent = available ? JSON.stringify({
+          platform: `${desktopStatusData?.platform || ""}/${desktopStatusData?.arch || ""}`,
+          docker: desktopStatusData?.docker,
+          hermes: desktopStatusData?.hermes,
+          bridgeRunning: running,
+          bridgeHealth: desktopStatusData?.bridgeHealth,
+          lastBridgeExit: desktopStatusData?.lastBridgeExit,
+          stateRoot: desktopStatusData?.stateRoot,
+          logRoot: desktopStatusData?.logRoot,
+          backupRoot: desktopStatusData?.backupRoot
+        }, null, 2) : "当前桥接没有备份宿主。请从新版本地 WebUI 启动器或桌面应用打开。";
+      }
+      for (const id of ["createSafeBackupBtn", "createFullBackupBtn", "chooseBackupDestinationBtn", "chooseBackupFileBtn", "inspectBackupBtn", "restoreBackupBtn", "selectLegacyProjectBtn", "refreshBackupsBtn", "desktopStartBtn", "desktopStopBtn", "desktopRestartBtn", "desktopAutoStart"]) {
+        if ($(id)) $(id).disabled = !available || ((!desktop || desktopStatusData?.externalHost) && id === "chooseBackupDestinationBtn");
+      }
+      $("webLegacyPathField")?.classList.toggle("hidden", desktop);
+      if ($("selectLegacyProjectBtn")) $("selectLegacyProjectBtn").textContent = desktop ? "选择旧项目" : "检查目录";
+      if ($("migrateLegacyProjectBtn")) $("migrateLegacyProjectBtn").disabled = !available || !legacyProjectPath || ["running", "cancelling"].includes(backupProgress?.status);
+      if (!desktop) $("backupDestinationLabel").textContent = "使用本机默认备份目录";
+      renderBackupProgress();
+      const list = $("localBackupList");
+      if (!list) return;
+      list.innerHTML = "";
+      if (!available) { list.innerHTML = `<div class="hint">启动本地 WebUI 宿主后可查看备份。</div>`; return; }
+      if (!localBackups.length) { list.innerHTML = `<div class="hint">默认目录里还没有备份。</div>`; return; }
+      for (const item of localBackups) {
+        const row = document.createElement("div");
+        row.className = "list-item";
+        const title = document.createElement("strong");
+        title.textContent = item.name;
+        const detail = document.createElement("div");
+        detail.className = "hint";
+        detail.textContent = `${formatBytes(item.size)} · ${new Date(item.modifiedAt).toLocaleString()}`;
+        const actions = document.createElement("div");
+        actions.className = "row";
+        actions.style.marginTop = "8px";
+        const open = document.createElement("button");
+        open.className = "secondary";
+        open.textContent = desktop ? "在 Finder 中显示" : "下载";
+        open.addEventListener("click", async () => {
+          try {
+            if (desktop) await desktopApi.revealBackup(item.path);
+            else {
+              const link = document.createElement("a");
+              link.href = `/api/host/backups/${encodeURIComponent(item.name)}/download`;
+              link.download = item.name;
+              link.click();
+            }
+          }
+          catch (error) { toast(error.message, "bad"); }
+        });
+        const remove = document.createElement("button");
+        remove.className = "danger";
+        remove.textContent = "删除";
+        remove.addEventListener("click", async () => {
+          if (!confirm(`确定删除备份 ${item.name} 吗？`)) return;
+          if (desktop) await desktopApi.deleteLocalBackup(item.path);
+          else await hostApi(`/backups/${encodeURIComponent(item.name)}`, "DELETE");
+          await refreshDesktopBackup();
+        });
+        actions.append(open, remove);
+        row.append(title, detail, actions);
+        list.appendChild(row);
+      }
+    }
+
+    async function refreshDesktopBackup() {
+      if (desktopApi) {
+        [desktopStatusData, localBackups, backupProgress] = await Promise.all([desktopApi.getAppStatus(), desktopApi.listLocalBackups(), desktopApi.getBackupStatus()]);
+      } else {
+        try {
+          const [status, backups, progress] = await Promise.all([hostApi("/status"), hostApi("/backups"), hostApi("/backup/status")]);
+          browserHostAvailable = true;
+          desktopStatusData = status;
+          localBackups = Array.isArray(backups) ? backups : backups.items || backups.backups || [];
+          backupProgress = progress.status === "idle" ? null : Object.hasOwn(progress, "progress") ? progress.progress : progress.status ? progress : null;
+        } catch {
+          browserHostAvailable = false;
+          desktopStatusData = null;
+          localBackups = [];
+          backupProgress = null;
+        }
+      }
+      if ((desktopApi || browserHostAvailable) && !hostProgressTimer) hostProgressTimer = setInterval(refreshHostProgress, 1000);
+      renderDesktopBackup();
+    }
+
+    async function createDesktopBackup(type) {
+      if (!desktopApi && !browserHostAvailable) return;
+      if (["running", "cancelling"].includes(backupProgress?.status)) return;
+      const password = $("backupPassword").value || "";
+      if (type === "full" && !password) { toast("完整迁移备份必须设置密码", "bad"); return; }
+      const includeLogs = type === "full" && $("backupIncludeLogs").checked;
+      const buttonId = type === "full" ? "createFullBackupBtn" : "createSafeBackupBtn";
+      setBusy(buttonId, true, type === "full" ? "加密导出中..." : "备份中...");
+      try {
+        const result = desktopApi
+          ? await desktopApi.createBackup({ type, password, includeLogs, destination: backupDestination || undefined })
+          : await hostApi("/backup", "POST", { type, password, includeLogs });
+        toast(`备份完成：${result.path || result.name || "默认备份目录"}`);
+        $("backupInspectView").textContent = JSON.stringify({ name: result.name || result.path, size: formatBytes(result.size), manifest: result.manifest }, null, 2);
+        $("backupPassword").value = "";
+        await refreshDesktopBackup();
+      } catch (error) {
+        if (backupProgress?.status === "cancelled" || /备份已取消/.test(error.message)) toast("备份已取消，未保留不完整的文件", "good");
+        else toast(error.message, "bad");
+      } finally { setBusy(buttonId, false); }
+    }
+
+    async function inspectDesktopBackup() {
+      if ((!desktopApi && !browserHostAvailable) || !restoreBackupPath) { toast("请先选择迁移包", "bad"); return; }
+      setBusy("inspectBackupBtn", true, "检查中...");
+      try {
+        const result = desktopApi
+          ? await desktopApi.inspectBackup({ path: restoreBackupPath, password: $("backupPassword").value || "" })
+          : await hostApi("/backup/inspect", "POST", { name: restoreBackupPath, password: $("backupPassword").value || "" });
+        $("backupInspectView").textContent = JSON.stringify(result.manifest, null, 2);
+        toast("迁移包校验通过");
+      } finally { setBusy("inspectBackupBtn", false); }
+    }
+
+    async function restoreDesktopBackup() {
+      if ((!desktopApi && !browserHostAvailable) || !restoreBackupPath) { toast("请先选择迁移包", "bad"); return; }
+      if (!confirm("恢复会先创建回滚包，然后整体替换当前配置和数据。确认继续？")) return;
+      setBusy("restoreBackupBtn", true, "恢复中...");
+      try {
+        const result = desktopApi
+          ? await desktopApi.restoreBackup({ path: restoreBackupPath, password: $("backupPassword").value || "" })
+          : await hostApi("/backup/restore", "POST", { name: restoreBackupPath, password: $("backupPassword").value || "" });
+        $("backupInspectView").textContent = JSON.stringify(result, null, 2);
+        toast(result.warning || "恢复完成");
+        setTimeout(() => location.reload(), 1200);
+      } finally { setBusy("restoreBackupBtn", false); }
+    }
+
+    async function saveConfig(buttonId = "saveBtn", { focusAccounts = false } = {}) {
+      setBusy(buttonId, true, "保存中...");
+      try {
+        const res = await api("/api/config", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(collectPatch())
+        });
+        cfg = res.config || cfg;
+        dirty = false;
+        $("saveState").textContent = res.restartRequired ? "已保存；部分项需重启" : "已保存并热生效";
+        toast("配置已保存并热生效");
+        await refreshAll({ silent: true });
+        if (focusAccounts) {
+          $("opsResult").textContent = accountConfigEffectText(cfg, statusData?.health || {});
+          renderAccounts();
+          renderOverview();
+        }
+      } catch (err) {
+        toast(`保存失败：${err.message}`, "bad");
+        $("opsResult").textContent = `保存失败：${err.message}`;
+        throw err;
+      } finally {
+        setBusy(buttonId, false);
+      }
+    }
+
+    async function testAi(buttonId = "testAiBtn") {
+      setBusy(buttonId, true, "测试中...");
+      $("aiTest").textContent = "测试中...";
+      try {
+        const result = await api("/api/ai/test", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ai: collectAiForm() })
+        });
+        $("aiTest").textContent = JSON.stringify(result, null, 2);
+        $("opsResult").textContent = JSON.stringify(result, null, 2);
+        toast(result.ok ? "模型测试成功" : "模型测试失败", result.ok ? "good" : "bad");
+      } finally {
+        setBusy(buttonId, false);
+      }
+    }
+
+    async function testSearch(buttonId = "testSearchBtn") {
+      setBusy(buttonId, true, "搜索中...");
+      $("opsResult").textContent = "测试搜索中...";
+      try {
+        const result = await api(`/api/search/test?q=${encodeURIComponent("24小时内重要的科技新闻")}`);
+        $("opsResult").textContent = JSON.stringify(result, null, 2);
+        toast("搜索测试完成");
+      } finally {
+        setBusy(buttonId, false);
+      }
+    }
+
+    async function refreshAccountQr(accountId, buttonId, { force = false } = {}) {
+      setBusy(buttonId, true, force ? "强刷中..." : "刷新中...");
+      const account = accountRows().find((item) => item.id === accountId) || {};
+      const isSnowLuma = String(account.protocol || "").toLowerCase() === "snowluma";
+      $("opsResult").textContent = isSnowLuma
+        ? `正在启动/检查 ${accountId} 的 SnowLuma；请在 WebUI 中完成登录...`
+        : `正在刷新 ${accountId} 的二维码：清理旧二维码、重启对应 NapCat、等待新二维码生成...`;
+      try {
+        const result = await api(`/api/accounts/${encodeURIComponent(accountId)}/qrcode/refresh`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ timeoutMs: 25000, force })
+        });
+        $("opsResult").textContent = JSON.stringify(result, null, 2);
+        toast(result.ok ? (isSnowLuma ? `${accountId} SnowLuma 已就绪，请打开 WebUI` : `${accountId} 二维码已刷新`) : (result.message || `${accountId} 操作未完成`), result.ok ? "good" : result.online ? "warn" : "bad");
+        if (result.accounts) {
+          statusData = {
+            ...(statusData || {}),
+            health: {
+              ...(statusData?.health || {}),
+              accounts: result.accounts
+            }
+          };
+          renderAccounts();
+        }
+        setTimeout(() => refreshAll({ silent: true }).catch((e) => toast(e.message, "bad")), 2500);
+      } finally {
+        setBusy(buttonId, false);
+      }
+    }
+
+    async function restartAccountProtocol(accountId, buttonId) {
+      setBusy(buttonId, true, "重启中...");
+      const account = accountRows().find((item) => item.id === accountId) || {};
+      const label = String(account.protocol || "").toLowerCase() === "snowluma" ? "SnowLuma" : "NapCat";
+      $("opsResult").textContent = `正在重启 ${accountId} 对应的 ${label} 容器...`;
+      try {
+        const result = await api(`/api/accounts/${encodeURIComponent(accountId)}/protocol/restart`, { method: "POST" });
+        $("opsResult").textContent = JSON.stringify(result, null, 2);
+        toast(result.ok ? `${accountId} ${label} 重启命令已执行` : `${accountId} ${label} 重启失败`, result.ok ? "good" : "bad");
+        if (result.accounts) {
+          statusData = {
+            ...(statusData || {}),
+            health: {
+              ...(statusData?.health || {}),
+              accounts: result.accounts
+            }
+          };
+          renderAccounts();
+        }
+        setTimeout(() => refreshAll({ silent: true }).catch((e) => toast(e.message, "bad")), 3500);
+      } finally {
+        setBusy(buttonId, false);
+      }
+    }
+
+    async function probeAccount(accountId, buttonId) {
+      setBusy(buttonId, true, "检测中...");
+      $("opsResult").textContent = `正在检测 ${accountId}：调用 OneBot get_status/get_login_info，并刷新账号诊断...`;
+      try {
+        const result = await api(`/api/accounts/${encodeURIComponent(accountId)}/probe`, { method: "POST" });
+        $("opsResult").textContent = JSON.stringify(result, null, 2);
+        toast(result.ok ? `${accountId} 检测完成` : `${accountId} 检测异常`, result.ok ? "good" : "bad");
+        if (result.accounts) {
+          statusData = {
+            ...(statusData || {}),
+            health: {
+              ...(statusData?.health || {}),
+              accounts: result.accounts
+            }
+          };
+          renderAccounts();
+          renderOverview();
+        }
+        setTimeout(() => refreshAll({ silent: true }).catch((e) => toast(e.message, "bad")), 1500);
+      } finally {
+        setBusy(buttonId, false);
+      }
+    }
+
+    async function peerPingAccounts(buttonId = "peerPingBtn") {
+      setBusy(buttonId, true, "验活中...");
+      $("opsResult").textContent = "正在让主备账号互发 Hermes 诊断私聊，用来确认发送和接收是否真实可用...";
+      try {
+        const result = await api("/api/accounts/peer-ping", { method: "POST" });
+        $("opsResult").textContent = JSON.stringify(result, null, 2);
+        toast(result.ok ? "双向验活完成" : "双向验活有异常", result.ok ? "good" : "bad");
+        if (result.accounts) {
+          statusData = {
+            ...(statusData || {}),
+            health: {
+              ...(statusData?.health || {}),
+              accounts: result.accounts
+            }
+          };
+          renderAccounts();
+          renderOverview();
+        }
+        setTimeout(() => refreshAll({ silent: true }).catch((e) => toast(e.message, "bad")), 2500);
+      } finally {
+        setBusy(buttonId, false);
+      }
+    }
+
+    async function activateAccount(accountId, buttonId) {
+      setBusy(buttonId, true, "切换中...");
+      $("opsResult").textContent = `正在把当前发言账号切换为 ${accountId}...`;
+      try {
+        const result = await api(`/api/accounts/${encodeURIComponent(accountId)}/activate`, { method: "POST" });
+        $("opsResult").textContent = JSON.stringify(result, null, 2);
+        toast(result.ok ? result.message || `${accountId} 已成为当前账号` : result.message || `${accountId} 切换失败`, result.ok ? "good" : "bad");
+        if (result.health) statusData = { ...(statusData || {}), health: result.health };
+        if (result.accounts) {
+          statusData = {
+            ...(statusData || {}),
+            health: {
+              ...(statusData?.health || {}),
+              accounts: result.accounts
+            }
+          };
+        }
+        renderAccounts();
+        renderOverview();
+        setTimeout(() => refreshAll({ silent: true }).catch((e) => toast(e.message, "bad")), 1500);
+      } finally {
+        setBusy(buttonId, false);
+      }
+    }
+
+    async function resetAccountLogin(accountId, buttonId) {
+      const account = accountRows().find((item) => item.id === accountId) || {};
+      const isSnowLuma = String(account.protocol || "").toLowerCase() === "snowluma";
+      if (isSnowLuma) {
+        const url = account.webui?.url || "";
+        if (url) window.open(url, "_blank", "noopener,noreferrer");
+        toast(url ? "已打开 SnowLuma 登录管理" : "未配置 SnowLuma WebUI 地址", url ? "good" : "bad");
+        return;
+      }
+      if (!confirm(`确定要清理 ${accountId} 的 QQ 登录态吗？旧登录目录会被改名备份，然后容器会重启并生成新二维码。`)) return;
+      setBusy(buttonId, true, "清理中...");
+      $("opsResult").textContent = `正在清理 ${accountId} 的 QQ 登录态并等待新二维码...`;
+      try {
+        const result = await api(`/api/accounts/${encodeURIComponent(accountId)}/login/reset`, { method: "POST" });
+        $("opsResult").textContent = JSON.stringify(result, null, 2);
+        toast(result.ok ? `${accountId} 已清理登录态，请扫码` : `${accountId} 清理登录态失败`, result.ok ? "good" : "bad");
+        if (result.accounts) {
+          statusData = {
+            ...(statusData || {}),
+            health: {
+              ...(statusData?.health || {}),
+              accounts: result.accounts
+            }
+          };
+        }
+        renderAccounts();
+        renderOverview();
+        setTimeout(() => refreshAll({ silent: true }).catch((e) => toast(e.message, "bad")), 2500);
+      } finally {
+        setBusy(buttonId, false);
+      }
+    }
+
+    async function rebuildNapcatStable(buttonId = "legacyRebuildNapcatBtn") {
+      const ok = confirm("稳定重建会停止并重建 NapCat 容器，可能需要重新登录 QQ。继续吗？");
+      if (!ok) return;
+      setBusy(buttonId, true, "重建中...");
+      $("opsResult").textContent = "正在按稳定设备身份重建 NapCat 容器...";
+      try {
+        const result = await api("/api/napcat/rebuild-stable", { method: "POST" });
+        $("opsResult").textContent = JSON.stringify(result, null, 2);
+        toast(result.ok ? "NapCat 稳定重建完成" : "NapCat 稳定重建失败", result.ok ? "good" : "bad");
+        if (result.qrcode?.exists) {
+          statusData = { ...(statusData || {}), qrcode: result.qrcode };
+        }
+        setTimeout(() => refreshAll({ silent: true }).catch((e) => toast(e.message, "bad")), 5000);
+      } finally {
+        setBusy(buttonId, false);
+      }
+    }
+
+    async function restartBridge() {
+      setBusy("restartBridgeBtn", true, "重启中...");
+      $("opsResult").textContent = "重启桥接中...";
+      try {
+        const result = await api("/api/bridge/restart", { method: "POST" });
+        $("opsResult").textContent = JSON.stringify(result, null, 2);
+        toast("桥接重启命令已执行");
+      } catch (err) {
+        $("opsResult").textContent = err.message;
+        toast(`桥接重启请求返回：${err.message}`, "bad");
+      } finally {
+        setTimeout(() => refreshAll({ silent: true }).catch(() => {}), 5000);
+        setBusy("restartBridgeBtn", false);
+      }
+    }
+
+    async function sendMessage() {
+      setBusy("sendBtn", true, "发送中...");
+      try {
+        const body = { group_id: getVal("send.groupId"), message: getVal("send.message") };
+        const result = await api("/send", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        $("opsResult").textContent = JSON.stringify(result, null, 2);
+        toast(result.ok ? "测试消息已发送" : "发送失败", result.ok ? "good" : "bad");
+      } finally {
+        setBusy("sendBtn", false);
+      }
+    }
+
+    function applyPreset(kind) {
+      if (kind === "restrained") {
+        setVal("behaviorModes.default", "restrained");
+        setVal("trigger.activeProbability", 0.04);
+        setVal("trigger.activeProbability.slider", 0.04);
+        setVal("trigger.activeCooldownMs", 240000);
+        setVal("proactive.enabled", true);
+        setVal("proactive.probability", 0.08);
+        setVal("proactive.probability.slider", 0.08);
+        setVal("proactive.intervalMs", 900000);
+        setVal("proactive.cooldownMs", 2400000);
+        toast("已填入克制版参数，保存后生效");
+      } else if (kind === "normal") {
+        setVal("behaviorModes.default", "normal");
+        setVal("trigger.activeProbability", 0.12);
+        setVal("trigger.activeProbability.slider", 0.12);
+        setVal("trigger.activeCooldownMs", 120000);
+        setVal("proactive.enabled", true);
+        setVal("proactive.probability", 0.25);
+        setVal("proactive.probability.slider", 0.25);
+        setVal("proactive.intervalMs", 300000);
+        setVal("proactive.cooldownMs", 900000);
+        toast("已填入正常版参数，保存后生效");
+      } else {
+        setVal("behaviorModes.default", "lively");
+        setVal("trigger.activeProbability", 0.25);
+        setVal("trigger.activeProbability.slider", 0.25);
+        setVal("trigger.activeCooldownMs", 60000);
+        setVal("proactive.enabled", true);
+        setVal("proactive.probability", 0.45);
+        setVal("proactive.probability.slider", 0.45);
+        setVal("proactive.intervalMs", 300000);
+        setVal("proactive.cooldownMs", 900000);
+        toast("已填入活跃版参数，保存后生效");
+      }
+      markDirty();
+    }
+
+    function applyModelPreset(kind) {
+      const presets = {
+        openai: {
+          name: "OpenAI",
+          provider: "openai-api",
+          model: "gpt-5.4-mini",
+          baseUrl: "https://api.openai.com/v1",
+          apiKeyEnv: "OPENAI_API_KEY"
+        },
+        faro: {
+          name: "Faro API",
+          provider: "custom",
+          model: "",
+          baseUrl: "",
+          apiKeyEnv: "FARO_API_KEY"
+        },
+        mimo: {
+          name: "Xiaomi MiMo",
+          provider: "xiaomi",
+          model: "mimo-v2.5",
+          baseUrl: "https://api.xiaomimimo.com/v1",
+          apiKeyEnv: "XIAOMI_API_KEY"
+        },
+        deepseek: {
+          name: "DeepSeek 日常",
+          provider: "deepseek",
+          model: "deepseek-v4-flash",
+          baseUrl: "https://api.deepseek.com/v1",
+          apiKeyEnv: "DEEPSEEK_API_KEY"
+        }
+      };
+      const preset = presets[kind];
+      if (!preset) return;
+      const profile = selectedAiProfile();
+      if (profile) profile.preset = kind;
+      setVal("ai.profileName", preset.name);
+      setVal("ai.command", "hermes");
+      setVal("ai.timeoutMs", 120000);
+      setVal("ai.provider", preset.provider);
+      setVal("ai.model", preset.model);
+      setVal("ai.baseUrl", preset.baseUrl);
+      setVal("ai.apiKeyEnv", preset.apiKeyEnv);
+      setVal("ai.reasoningEffort", "none");
+      const args = ["--provider", preset.provider];
+      if (preset.model) args.push("-m", preset.model);
+      args.push("-z");
+      setVal("ai.args", args);
+      syncSelectedAiProfileFromForm();
+      renderAiProfiles();
+      markDirty();
+    }
+
+    function switchPage(name) {
+      for (const page of document.querySelectorAll(".page")) page.classList.remove("active");
+      $(`page-${name}`)?.classList.add("active");
+      for (const btn of document.querySelectorAll("#nav button")) btn.classList.toggle("active", btn.dataset.page === name);
+      $("pageTitle").textContent = pageMeta[name]?.[0] || "控制台";
+      $("pageSubtitle").textContent = pageMeta[name]?.[1] || "";
+      if (name === "backup") refreshDesktopBackup().catch((error) => toast(error.message, "bad"));
+    }
+
+    function exportMemory() {
+      location.href = "/api/memory/export";
+    }
+
+    function copyText(text) {
+      navigator.clipboard?.writeText(text).then(() => toast("已复制到剪贴板")).catch(() => toast("复制失败", "bad"));
+    }
+
+    function showFatalError(message) {
+      toast(message, "bad");
+      $("saveState").textContent = "加载失败";
+      const log = $("recentLog") || $("opsResult");
+      if (log) log.textContent = message;
+    }
+
+    function wireEvents() {
+      $("refreshBtn").addEventListener("click", () => refreshAll().catch((e) => showFatalError(e.message)));
+      $("saveBtn").addEventListener("click", () => saveConfig("saveBtn").catch(() => {}));
+      for (const id of ["saveModelBtn", "saveSearchBtn", "saveVisionBtn", "savePromptBtn", "saveArchiveBtn", "saveTaskBtn", "saveReviewerBtn", "saveIntegrityBtn"]) $(id).addEventListener("click", () => saveConfig(id).catch(() => {}));
+      $("saveAccountsBtn").addEventListener("click", () => saveConfig("saveAccountsBtn", { focusAccounts: true }).catch(() => {}));
+      $("refreshAccountsBtn").addEventListener("click", () => refreshAll().catch((e) => showFatalError(e.message)));
+      $("refreshAccountsTopBtn").addEventListener("click", () => refreshAll().catch((e) => showFatalError(e.message)));
+      $("autoRefreshBtn").addEventListener("click", () => {
+        autoRefresh = !autoRefresh;
+        $("autoRefreshBtn").textContent = `自动刷新：${autoRefresh ? "开" : "关"}`;
+        scheduleAutoRefresh();
+      });
+      for (const btn of document.querySelectorAll("#nav button")) btn.addEventListener("click", () => switchPage(btn.dataset.page));
+      for (const btn of document.querySelectorAll("[data-jump]")) btn.addEventListener("click", () => switchPage(btn.dataset.jump));
+      for (const el of document.querySelectorAll("input, textarea, select")) {
+        if (el.id === "memorySearch" || el.id === "memoryDetailSearch" || el.id === "archiveSearch" || el.id === "send.groupSelect" || el.id === "modelPreset" || el.id === "aiProfileSelect" || el.id.startsWith("backup") || el.id.startsWith("desktop")) continue;
+        el.addEventListener("input", markDirty);
+        el.addEventListener("change", markDirty);
+      }
+      syncSlider("trigger.activeProbability", "trigger.activeProbability.slider");
+      syncSlider("proactive.probability", "proactive.probability.slider");
+      $("testAiBtn").addEventListener("click", () => testAi("testAiBtn").catch((e) => toast(e.message, "bad")));
+      $("testAiBtn2").addEventListener("click", () => testAi("testAiBtn2").catch((e) => toast(e.message, "bad")));
+      $("testSearchBtn").addEventListener("click", () => testSearch("testSearchBtn").catch((e) => toast(e.message, "bad")));
+      $("testSearchBtn2").addEventListener("click", () => testSearch("testSearchBtn2").catch((e) => toast(e.message, "bad")));
+      $("overviewProbePrimaryBtn").addEventListener("click", () => probeAccount("primary", "overviewProbePrimaryBtn").catch((e) => toast(e.message, "bad")));
+      $("overviewRestartProtocolBtn").addEventListener("click", () => restartAccountProtocol("primary", "overviewRestartProtocolBtn").catch((e) => toast(e.message, "bad")));
+      $("overviewRefreshQrBtn").addEventListener("click", () => refreshAccountQr("primary", "overviewRefreshQrBtn").catch((e) => toast(e.message, "bad")));
+      $("overviewRebuildNapcatBtn").addEventListener("click", () => rebuildNapcatStable("overviewRebuildNapcatBtn").catch((e) => toast(e.message, "bad")));
+      $("restartActiveProtocolBtn").addEventListener("click", () => {
+        const account = activeAccountRow();
+        restartAccountProtocol(account.id || "primary", "restartActiveProtocolBtn").catch((e) => toast(e.message, "bad"));
+      });
+      $("legacyRefreshQrBtn").addEventListener("click", () => refreshAccountQr("primary", "legacyRefreshQrBtn").catch((e) => toast(e.message, "bad")));
+      $("legacyRebuildNapcatBtn").addEventListener("click", () => rebuildNapcatStable("legacyRebuildNapcatBtn").catch((e) => toast(e.message, "bad")));
+      $("peerPingBtn").addEventListener("click", () => peerPingAccounts("peerPingBtn").catch((e) => toast(e.message, "bad")));
+      $("peerPingTopBtn").addEventListener("click", () => peerPingAccounts("peerPingTopBtn").catch((e) => toast(e.message, "bad")));
+      $("accountCards").addEventListener("click", (event) => {
+        const btn = event.target.closest("[data-account-action]");
+        if (!btn) return;
+        const accountId = btn.dataset.accountId || "primary";
+        if (btn.dataset.accountAction === "restart") {
+          restartAccountProtocol(accountId, btn.id).catch((e) => toast(e.message, "bad"));
+        } else if (btn.dataset.accountAction === "probe") {
+          probeAccount(accountId, btn.id).catch((e) => toast(e.message, "bad"));
+        } else if (btn.dataset.accountAction === "activate") {
+          activateAccount(accountId, btn.id).catch((e) => toast(e.message, "bad"));
+        } else if (btn.dataset.accountAction === "reset-login") {
+          resetAccountLogin(accountId, btn.id).catch((e) => toast(e.message, "bad"));
+        } else if (btn.dataset.accountAction === "force-refresh-qr") {
+          refreshAccountQr(accountId, btn.id, { force: true }).catch((e) => toast(e.message, "bad"));
+        } else if (btn.dataset.accountAction === "refresh-qr") {
+          refreshAccountQr(accountId, btn.id).catch((e) => toast(e.message, "bad"));
+        }
+      });
+      $("restartBridgeBtn").addEventListener("click", restartBridge);
+      $("sendBtn").addEventListener("click", () => sendMessage().catch((e) => toast(e.message, "bad")));
+      $("clearOpsBtn").addEventListener("click", () => { $("opsResult").textContent = "操作结果会显示在这里。"; });
+      $("send.groupSelect").addEventListener("change", (e) => { if (e.target.value) $("send.groupId").value = e.target.value; });
+      $("presetRestrained").addEventListener("click", () => applyPreset("restrained"));
+      $("presetNormal").addEventListener("click", () => applyPreset("normal"));
+      $("presetLively").addEventListener("click", () => applyPreset("lively"));
+      $("modelPreset").addEventListener("change", (e) => { if (e.target.value) applyModelPreset(e.target.value); e.target.value = ""; });
+      $("aiProfileSelect").addEventListener("change", (e) => {
+        syncSelectedAiProfileFromForm();
+        selectedAiProfileId = e.target.value;
+        loadAiProfileIntoForm(selectedAiProfile());
+        renderAiProfiles();
+      });
+      $("newAiProfileBtn").addEventListener("click", () => createAiProfile());
+      $("duplicateAiProfileBtn").addEventListener("click", () => createAiProfile({ duplicate: true }));
+      $("deleteAiProfileBtn").addEventListener("click", deleteSelectedAiProfile);
+      $("activateAiProfileBtn").addEventListener("click", () => {
+        syncSelectedAiProfileFromForm();
+        if (!selectedAiProfile()) return;
+        aiProfilesDraft.activeId = selectedAiProfileId;
+        renderAiProfiles();
+        markDirty();
+        saveConfig("activateAiProfileBtn").catch(() => {});
+      });
+      $("accounts.primary.protocol").addEventListener("change", syncProtocolFields);
+      $("accounts.standbys.0.protocol").addEventListener("change", syncProtocolFields);
+      $("memorySearch").addEventListener("input", renderGroups);
+      $("memoryDetailSearch").addEventListener("input", renderMemoryDetail);
+      $("exportMemoryBtn").addEventListener("click", exportMemory);
+      $("archiveSearch").addEventListener("input", renderArchive);
+      $("refreshArchiveBtn").addEventListener("click", () => refreshArchive().catch((e) => toast(e.message, "bad")));
+      $("clearArchiveBtn").addEventListener("click", () => clearArchive().catch((e) => toast(e.message, "bad")));
+      $("archiveList").addEventListener("click", (event) => {
+        const btn = event.target.closest("[data-archive-action]");
+        if (!btn) return;
+        const conversationId = btn.dataset.conversationId || "";
+        if (btn.dataset.archiveAction === "export") exportArchive(conversationId);
+        if (btn.dataset.archiveAction === "clear") clearArchive(conversationId).catch((e) => toast(e.message, "bad"));
+      });
+      $("refreshTasksBtn").addEventListener("click", () => refreshAgentFeatures().catch((e) => toast(e.message, "bad")));
+      $("refreshReviewerBtn").addEventListener("click", () => refreshAgentFeatures().catch((e) => toast(e.message, "bad")));
+      $("memoryDryRunBtn").addEventListener("click", () => rebuildMemoryIntegrity(false).catch((e) => toast(e.message, "bad")));
+      $("memoryApplyBtn").addEventListener("click", () => rebuildMemoryIntegrity(true).catch((e) => toast(e.message, "bad")));
+      $("taskList").addEventListener("click", (event) => {
+        const btn = event.target.closest("[data-task-action]");
+        if (!btn) return;
+        const taskId = btn.dataset.taskId || "";
+        if (btn.dataset.taskAction === "artifacts") showTaskArtifacts(taskId).catch((e) => toast(e.message, "bad"));
+        else taskAction(taskId, btn.dataset.taskAction).catch((e) => toast(e.message, "bad"));
+      });
+      $("showMainLog").addEventListener("click", () => { currentLogKind = "main"; renderLogs(); });
+      $("showErrorLog").addEventListener("click", () => { currentLogKind = "error"; renderLogs(); });
+      $("copyLogBtn").addEventListener("click", () => copyText($("logView").textContent || ""));
+      $("copyPromptBtn").addEventListener("click", () => copyText($("prompt.system").value || ""));
+      $("createSafeBackupBtn")?.addEventListener("click", () => createDesktopBackup("safe").catch((e) => toast(e.message, "bad")));
+      $("createFullBackupBtn")?.addEventListener("click", () => createDesktopBackup("full").catch((e) => toast(e.message, "bad")));
+      $("cancelBackupBtn")?.addEventListener("click", async () => {
+        try {
+          if (desktopApi) await desktopApi.cancelBackup();
+          else if (browserHostAvailable) await hostApi("/backup/cancel", "POST");
+          await refreshHostProgress();
+        }
+        catch (error) { toast(error.message, "bad"); }
+      });
+      desktopApi?.onBackupProgress((progress) => { backupProgress = progress; renderBackupProgress(); });
+      $("chooseBackupDestinationBtn")?.addEventListener("click", async () => {
+        const result = await desktopApi?.chooseBackupDestination();
+        if (!result || result.canceled) return;
+        backupDestination = result.path;
+        $("backupDestinationLabel").textContent = result.path;
+      });
+      $("chooseBackupFileBtn")?.addEventListener("click", async () => {
+        if (desktopApi) {
+          const result = await desktopApi.chooseBackupFile();
+          if (!result || result.canceled) return;
+          restoreBackupPath = result.path;
+          $("restoreFileLabel").textContent = result.path;
+          $("backupInspectView").textContent = "已选择迁移包，点击“检查内容”验证密码与校验和。";
+        } else if (browserHostAvailable) $("webBackupFileInput").click();
+      });
+      $("webBackupFileInput")?.addEventListener("change", async (event) => {
+        const file = event.target.files?.[0];
+        if (!file || !browserHostAvailable) return;
+        setBusy("chooseBackupFileBtn", true, "导入中...");
+        try {
+          const result = await api("/api/host/backup/upload", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: file });
+          restoreBackupPath = result.name;
+          $("restoreFileLabel").textContent = file.name;
+          $("backupInspectView").textContent = "迁移包已导入本机。点击“检查内容”验证密码与校验和。";
+          await refreshDesktopBackup();
+        } catch (error) { toast(error.message, "bad"); }
+        finally { setBusy("chooseBackupFileBtn", false); event.target.value = ""; }
+      });
+      $("inspectBackupBtn")?.addEventListener("click", () => inspectDesktopBackup().catch((e) => toast(e.message, "bad")));
+      $("restoreBackupBtn")?.addEventListener("click", () => restoreDesktopBackup().catch((e) => toast(e.message, "bad")));
+      $("refreshBackupsBtn")?.addEventListener("click", () => refreshDesktopBackup().catch((e) => toast(e.message, "bad")));
+      $("selectLegacyProjectBtn")?.addEventListener("click", async () => {
+        try {
+          const result = desktopApi
+            ? await desktopApi.selectLegacyProject()
+            : await hostApi("/legacy/inspect", "POST", { path: $("webLegacyProjectPath").value.trim() });
+          if (!result || result.canceled) return;
+          legacyProjectPath = result.root;
+          $("legacyProjectInfo").textContent = `${result.root} · memory=${result.hasMemory ? "有" : "无"} · archive=${result.hasArchive ? "有" : "无"}`;
+          $("migrateLegacyProjectBtn").disabled = false;
+        } catch (error) { toast(error.message, "bad"); }
+      });
+      $("migrateLegacyProjectBtn")?.addEventListener("click", async () => {
+        if (!legacyProjectPath || !confirm("将旧项目数据复制到当前入口。现有数据会先保存到回滚目录，确认继续？")) return;
+        setBusy("migrateLegacyProjectBtn", true, "迁移中...");
+        try {
+          const result = desktopApi && !desktopStatusData?.externalHost
+            ? await desktopApi.migrateLegacyProject(legacyProjectPath)
+            : await hostApi("/legacy/migrate", "POST", { path: legacyProjectPath });
+          $("legacyProjectInfo").textContent = result.rollbackDir ? `迁移完成 · 回滚目录 ${result.rollbackDir}` : "迁移完成 · 已保留回滚快照";
+          toast("旧项目数据迁移完成");
+          setTimeout(() => location.reload(), 1200);
+        } catch (error) { toast(error.message, "bad"); }
+        finally { setBusy("migrateLegacyProjectBtn", false); }
+      });
+      $("desktopStartBtn")?.addEventListener("click", async () => { if (desktopApi) await desktopApi.startBot(); else await hostApi("/bridge/start", "POST"); await refreshDesktopBackup(); });
+      $("desktopStopBtn")?.addEventListener("click", async () => { if (desktopApi) await desktopApi.stopBot(); else await hostApi("/bridge/stop", "POST"); await refreshDesktopBackup(); });
+      $("desktopRestartBtn")?.addEventListener("click", async () => { if (desktopApi) await desktopApi.restartBot(); else await hostApi("/bridge/restart", "POST"); await refreshDesktopBackup(); });
+      $("desktopAutoStart")?.addEventListener("change", async (event) => {
+        const enabled = event.target.checked;
+        try {
+          if (desktopApi) await desktopApi.setAutoStart(enabled);
+          else await hostApi("/autostart", "POST", { enabled });
+          await refreshDesktopBackup();
+        } catch (error) { event.target.checked = !enabled; toast(error.message, "bad"); }
+      });
+      for (const btn of document.querySelectorAll(".promptTip")) {
+        btn.addEventListener("click", () => {
+          const tip = btn.dataset.tip || "";
+          const textarea = $("prompt.system");
+          textarea.value = `${textarea.value.trim()}\n\n${tip}`.trim();
+          markDirty();
+        });
+      }
+      document.addEventListener("keydown", (event) => {
+        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+          event.preventDefault();
+          saveConfig().catch(() => {});
+        }
+      });
+    }
+
+    function scheduleAutoRefresh() {
+      if (refreshTimer) clearInterval(refreshTimer);
+      if (!autoRefresh) return;
+      refreshTimer = setInterval(() => {
+        if (!dirty) refreshAll({ silent: true }).catch(() => {});
+      }, 3000);
+    }
+
+    window.addEventListener("error", (e) => showFatalError(`前端脚本错误：${e.message || e.error || "unknown error"}`));
+    window.addEventListener("unhandledrejection", (e) => showFatalError(`异步加载错误：${e.reason?.message || e.reason || "unknown rejection"}`));
+
+    wireEvents();
+    refreshAll().catch(async (error) => {
+      showFatalError(`桥接暂不可用：${error.message}。备份与迁移页仍可用于启动或恢复服务。`);
+      await refreshDesktopBackup();
+    }).finally(scheduleAutoRefresh);
+  </script>
+</body>
+</html>

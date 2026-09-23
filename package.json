@@ -1,0 +1,40 @@
+{
+  "name": "qq-hermes-onebot-bridge",
+  "version": "1.0.0-beta.4",
+  "description": "Local desktop manager and OneBot bridge for Hermes-powered QQ bots",
+  "main": "desktop/main.cjs",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.12 <26" },
+  "scripts": {
+    "start": "node src/bridge.js",
+    "web:start": "node src/web-host.js",
+    "web:release:check": "node scripts/release-safety-check.mjs",
+    "web:release:package": "node scripts/package-web.mjs",
+    "source:preview": "node scripts/package-source.mjs",
+    "check": "node src/bridge.js --check",
+    "test:social": "node src/bridge.js --social-self-test",
+    "test:agent": "node scripts/agent-feature-self-test.js",
+    "test:reply": "node scripts/reply-coordinator-self-test.js",
+    "test:backup": "node scripts/backup-service-self-test.js",
+    "test:web-host": "node scripts/web-host-self-test.js",
+    "test:docker-backup": "node scripts/docker-migration-self-test.js",
+    "memory:rebuild": "node scripts/memory-rebuild.js",
+    "memory:rebuild:apply": "node scripts/memory-rebuild.js --apply",
+    "app:start": "electron-forge start",
+    "app:package": "electron-forge package --arch=arm64",
+    "app:make": "electron-forge make --arch=arm64 && zsh scripts/make-dmg.sh"
+  },
+  "dependencies": {
+    "tar": "^7.4.3",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.8.3",
+    "@electron-forge/maker-zip": "^7.8.3",
+    "electron": "^44.4.5"
+  },
+  "allowScripts": {
+    "electron@44.4.5": true
+  }
+}

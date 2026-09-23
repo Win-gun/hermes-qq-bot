@@ -1,0 +1,767 @@
+{
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 6199,
+    "path": "/onebot"
+  },
+  "control": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 6200,
+    "maxBodyBytes": 65536
+  },
+  "status": {
+    "onebotStaleMs": 90000
+  },
+  "observability": {
+    "logIncomingMessages": true,
+    "logSkippedMessages": true,
+    "logInactiveAccountMessages": false,
+    "standbyReadBackfill": false,
+    "standbyBackfillGraceMs": 1200,
+    "recentInboundMax": 80,
+    "duplicateWindowMs": 15000
+  },
+  "targetGroups": [
+    "*"
+  ],
+  "privateChats": {
+    "enabled": true,
+    "targetUsers": [
+      "*"
+    ],
+    "ownerUserIds": [],
+    "ownerSystem": "你正在与 bot 的主人/管理员进行一对一私聊。这里不是群聊。优先理解并遵循对方的明确指令；如果指令涉及无法直接执行的外部操作，要诚实说明并给出可操作步骤。私聊上下文与群聊互动互不污染。回答要清楚、可执行、尽量短。"
+  },
+  "adminNotifications": {
+    "enabled": true,
+    "recipients": [],
+    "checkIntervalMs": 15000,
+    "notifyOnline": true,
+    "notifyLoginInvalid": true,
+    "notifyQuickLogin": true,
+    "notifyDisconnected": true,
+    "maxLength": 900,
+    "periodicStatusEnabled": false,
+    "periodicStatusIntervalMs": 1800000,
+    "periodicStatusCheckIntervalMs": 60000,
+    "periodicStatusSendOnStart": false
+  },
+  "loginRecovery": {
+    "enabled": true,
+    "checkIntervalMs": 15000,
+    "restartCooldownMs": 600000,
+    "recoveryWaitMs": 45000,
+    "autoRestartNapcat": true,
+    "refreshQrOnFailure": true,
+    "notifyOwner": true,
+    "maxAutoRestartsPerIncident": 1,
+    "passwordFallback": false
+  },
+  "accounts": {
+    "primary": {
+      "id": "primary",
+      "qq": "",
+      "role": "primary",
+      "displayName": "Hermes小跟班",
+      "protocol": "snowluma",
+      "onebotPath": "/onebot",
+      "napcatContainer": "napcat",
+      "protocolContainer": "snowluma-primary",
+      "webuiPort": 6103,
+      "noVncPort": 6104,
+      "vncPort": 5902,
+      "onebotWsUrl": "ws://127.0.0.1:6303",
+      "snowlumaImage": "motricseven7/snowluma:latest"
+    },
+    "standbys": [
+      {
+        "id": "standby-a",
+        "qq": "",
+        "role": "standby",
+        "displayName": "Hermes小跟班2",
+        "protocol": "snowluma",
+        "onebotPath": "/onebot",
+        "napcatContainer": "napcat-standby-a",
+        "protocolContainer": "snowluma-standby-a",
+        "webuiPort": 6101,
+        "noVncPort": 6102,
+        "vncPort": 5901,
+        "onebotWsUrl": "ws://127.0.0.1:6301",
+        "snowlumaImage": "motricseven7/snowluma:latest",
+        "behaviorMode": "normal",
+        "enabled": true
+      }
+    ],
+    "failover": {
+      "enabled": true,
+      "primaryRecoveryFirst": true,
+      "switchAfterMs": 15000,
+    "minSwitchIntervalMs": 300000,
+      "messageStaleMs": 120000,
+      "standbyFreshMs": 120000,
+      "switchBackWhenPrimaryHealthy": true,
+      "announceTakeover": true,
+      "autoAdoptUnknownStandby": true,
+      "primaryRecoveryRequiresNewMessage": true,
+      "announceInGroups": false,
+      "groupNoticeCooldownMs": 300000,
+      "groupNoticeActiveWindowMs": 21600000,
+      "groupNoticeMaxGroups": 8
+    },
+    "diagnostics": {
+    "probeIntervalMs": 30000,
+    "probeTimeoutMs": 5000,
+    "probeStaleMs": 120000,
+    "sendEvidenceFreshMs": 1800000,
+    "receiveEvidenceFreshMs": 1800000,
+    "noMessageWarnMs": 60000,
+      "freshQrSeconds": 1800,
+      "peerPingEnabled": true,
+      "peerPingIntervalMs": 600000,
+      "peerPingFreshMs": 900000,
+      "peerPingSendTimeoutMs": 10000,
+      "peerPingReceiveTimeoutMs": 45000,
+      "peerPingOnMessageInactive": true,
+      "peerPingMessageInactiveMs": 600000,
+      "peerPingInactiveCooldownMs": 1800000,
+      "qrcodeRefreshSafetyEnabled": true,
+      "qrcodeRefreshGlobalCooldownMs": 600000,
+      "qrcodeRefreshAccountCooldownMs": 900000,
+      "qrcodeRefreshTransitionGuardMs": 120000,
+      "qrcodeRefreshFailoverGuardMs": 120000
+    }
+  },
+  "behaviorModes": {
+    "default": "normal",
+    "presets": {
+      "normal": {
+        "trigger": {
+          "activeProbability": 0.12,
+          "activeCooldownMs": 120000
+        },
+        "discussionParticipation": {
+          "activeProbabilityBoost": 0.12,
+          "maxActiveProbability": 0.38,
+          "activeCooldownMs": 90000,
+          "proactiveProbabilityBoost": 0.08,
+          "maxProactiveProbability": 0.45,
+          "proactiveCooldownMs": 600000
+        },
+        "proactive": {
+          "probability": 0.25,
+          "cooldownMs": 900000
+        },
+        "reply": {
+          "proactiveMinRecentMessages": 3
+        },
+        "implicitReply": {
+          "confidenceThreshold": 0.55
+        },
+        "socialPlanner": {
+          "minConfidence": 0.58
+        }
+      },
+      "restrained": {
+        "trigger": {
+          "activeProbability": 0.04,
+          "activeCooldownMs": 240000
+        },
+        "discussionParticipation": {
+          "activeProbabilityBoost": 0.04,
+          "maxActiveProbability": 0.16,
+          "activeCooldownMs": 180000,
+          "proactiveProbabilityBoost": 0.03,
+          "maxProactiveProbability": 0.18,
+          "proactiveCooldownMs": 1800000
+        },
+        "proactive": {
+          "probability": 0.08,
+          "cooldownMs": 2400000
+        },
+        "reply": {
+          "proactiveMinRecentMessages": 5
+        },
+        "implicitReply": {
+          "confidenceThreshold": 0.68
+        },
+        "socialPlanner": {
+          "minConfidence": 0.72
+        }
+      },
+      "lively": {
+        "trigger": {
+          "activeProbability": 0.34,
+          "activeCooldownMs": 45000
+        },
+        "discussionParticipation": {
+          "activeProbabilityBoost": 0.22,
+          "maxActiveProbability": 0.62,
+          "activeCooldownMs": 45000,
+          "proactiveProbabilityBoost": 0.15,
+          "maxProactiveProbability": 0.72,
+          "proactiveCooldownMs": 180000
+        },
+        "proactive": {
+          "probability": 0.55,
+          "cooldownMs": 600000
+        },
+        "reply": {
+          "proactiveMinRecentMessages": 2
+        },
+        "implicitReply": {
+          "confidenceThreshold": 0.45
+        },
+        "socialPlanner": {
+          "minConfidence": 0.45
+        }
+      }
+    }
+  },
+  "botNames": [
+    "Hermes",
+    "小跟班",
+    "机器人",
+    "GPT"
+  ],
+  "trigger": {
+    "replyToAt": true,
+    "replyToKeywords": true,
+    "keywordCooldownMs": 30000,
+    "activeReply": true,
+    "activeProbability": 0.12,
+    "activeCooldownMs": 120000,
+    "ignoreOwnMessages": true
+  },
+  "discussionParticipation": {
+    "enabled": true,
+    "activeProbabilityBoost": 0.12,
+    "maxActiveProbability": 0.38,
+    "activeCooldownMs": 90000,
+    "proactiveProbabilityBoost": 0.08,
+    "maxProactiveProbability": 0.45,
+    "proactiveCooldownMs": 600000,
+    "windowMessages": 8,
+    "minRecentMessages": 3,
+    "minRecentDistinctSpeakers": 2,
+    "minCurrentLength": 6,
+    "markers": [
+      "怎么",
+      "为什么",
+      "为啥",
+      "咋",
+      "如何",
+      "是不是",
+      "能不能",
+      "要不要",
+      "吗",
+      "?",
+      "？",
+      "观点",
+      "看法",
+      "建议",
+      "觉得",
+      "讨论",
+      "还是",
+      "有没有",
+      "谁",
+      "哪个",
+      "咋办",
+      "咋说",
+      "怎么说",
+      "细说"
+    ]
+  },
+  "memory": {
+    "enabled": true,
+    "maxNamesPerUser": 5,
+    "maxItemsPerUser": 24,
+    "maxGroupFacts": 80,
+    "maxTopics": 20,
+    "maxSummaries": 14,
+    "promptMaxUsers": 12,
+    "maxExtractLength": 80,
+    "privacyFilter": true,
+    "integrity": {
+      "enabled": true,
+      "minStableConfidence": 0.65,
+      "promptMinConfidence": 0.55,
+      "requireEvidence": true,
+      "maxEntriesPerUser": 180,
+      "maxConflictsPerUser": 40
+    },
+    "aiExtraction": {
+      "enabled": true,
+      "everyMessages": 4,
+      "maxPatchItems": 10,
+      "maxPendingMessages": 24,
+      "maxMessageLength": 220,
+      "includeStyle": true,
+      "includeRelationships": true
+    },
+    "maxAliasesPerUser": 12,
+    "maxCoreMemesPerUser": 16,
+    "maxBoundariesPerUser": 16,
+    "maxInteractionTipsPerUser": 16,
+    "maxQuotesPerUser": 10,
+    "promptProfileItems": 3,
+    "promptPersonalityItems": 4,
+    "promptMemeItems": 5,
+    "promptTipItems": 3,
+    "botSelf": {
+      "enabled": true,
+      "promptInclude": true,
+      "maxRecentMessages": 16,
+      "maxNotableMessages": 24,
+      "maxMessageLength": 180,
+      "notableMinLength": 12,
+      "promptRecentMessages": 5,
+      "promptNotableMessages": 4,
+      "maxIdentityItems": 10,
+      "maxPersonalityItems": 12,
+      "maxSpeechStyleItems": 12,
+      "maxCatchphrases": 12,
+      "maxCapabilities": 12,
+      "maxBoundaries": 12,
+      "maxStances": 24,
+      "promptStances": 5
+    }
+  },
+  "commands": {
+    "enabled": true,
+    "adminUserIds": [],
+    "adminRoles": [
+      "owner",
+      "admin"
+    ],
+    "defaultQuietDuration": "10m",
+    "memoryChunkLength": 1200,
+    "chunkDelayMs": 1000
+  },
+  "proactive": {
+    "enabled": true,
+    "intervalMs": 180000,
+    "probability": 0.25,
+    "cooldownMs": 900000,
+    "activeWindowMs": 600000,
+    "requireHumanAfterBot": true,
+    "activeHours": {
+      "start": 8,
+      "end": 24
+    }
+  },
+  "socialPlanner": {
+    "enabled": true,
+    "shadowMode": false,
+    "timeoutMs": 30000,
+    "recentMessages": 12,
+    "minCandidateConfidence": 0.2,
+    "minConfidence": 0.55,
+    "recentDecisionLimit": 60
+  },
+  "webSearch": {
+    "enabled": true,
+    "aiJudge": {
+      "enabled": true,
+      "minConfidence": 0.55,
+      "timeoutMs": 120000,
+      "fallback": "skip"
+    },
+    "provider": "google",
+    "providerOrder": [
+      "google",
+      "baidu"
+    ],
+    "maxResults": 4,
+    "timeoutMs": 8000,
+    "minQueryLength": 2,
+    "maxQueryLength": 120,
+    "aggregateProviders": false,
+    "minResultScore": 1,
+    "proxy": {
+      "enabled": true,
+      "autoDetect": true,
+      "urls": [
+        "http://127.0.0.1:7897",
+        "http://127.0.0.1:7890",
+        "socks5h://127.0.0.1:1080",
+        "socks5h://127.0.0.1:1087"
+      ],
+      "directFallback": true
+    },
+    "google": {
+      "proxy": true,
+      "newsLang": "zh-CN",
+      "newsRegion": "CN",
+      "newsCeid": "CN:zh-Hans"
+    },
+    "baidu": {
+      "proxy": false
+    },
+    "urlAlwaysAllowed": false,
+    "appendDateForFreshQueries": true,
+    "weather": {
+      "enabled": true,
+      "provider": "wttr.in",
+      "timeoutMs": 8000,
+      "defaultLocation": ""
+    },
+    "preReply": {
+      "enabled": true,
+      "replyToMessage": true,
+      "templates": [
+        "我搜一下，等我几秒。",
+        "等下，我去翻一下网页。",
+        "我查一下，别急。"
+      ]
+    },
+    "triggerPhrases": [
+      "联网查",
+      "联网搜",
+      "上网查",
+      "上网搜",
+      "网上查",
+      "网上搜",
+      "搜一下",
+      "搜索一下",
+      "帮我搜索",
+      "帮我搜",
+      "帮我查",
+      "查一下",
+      "查查",
+      "查个",
+      "搜个",
+      "查网页",
+      "看网页"
+    ],
+    "softTriggerPhrases": [
+      "最新",
+      "最近",
+      "今天",
+      "现在",
+      "目前",
+      "实时",
+      "刚刚",
+      "新闻",
+      "价格",
+      "天气",
+      "汇率",
+      "股价",
+      "票房",
+      "比分",
+      "赛程",
+      "公告",
+      "版本"
+    ]
+  },
+  "reply": {
+    "useContextBundle": true,
+    "allowSkip": true,
+    "proactiveMinRecentMessages": 3,
+    "repetitionWindow": 20,
+    "maxRepeatedOpening": 2,
+    "openingSignatureLength": 10
+  },
+  "responseQueue": {
+    "enabled": true,
+    "minDelayMs": 1000,
+    "liveContext": {
+      "enabled": true,
+      "windowMs": 20000,
+      "settleMs": 350,
+      "maxRegenerations": 2,
+      "maxMergedMessages": 8,
+      "cancelProactiveOnDirect": true
+    }
+  },
+  "implicitReply": {
+    "enabled": true,
+    "windowMs": 480000,
+    "recentBotMessages": 6,
+    "maxMessagesAfterBot": 8,
+    "earlyMessagesAfterBot": 2,
+    "immediateFollowupBoost": 0.38,
+    "earlyFollowupBoost": 0.28,
+    "nearMessagesAfterBot": 3,
+    "confidenceThreshold": 0.55,
+    "mentionedUserFollowupBoost": 0.4,
+    "mentionedUserMaxMessagesAfterBot": 6,
+    "cooldownMs": 10000,
+    "shortFollowupMaxLength": 60,
+    "replyToMessage": true
+  },
+  "delayedUnderstanding": {
+    "enabled": true,
+    "waitMs": 4500,
+    "maxWaitMs": 9000,
+    "minImplicitConfidence": 0.22,
+    "maxImplicitConfidence": 0.55,
+    "shortAmbiguousMaxLength": 36,
+    "maxMessages": 5,
+    "maxChars": 700,
+    "minFollowupMessages": 1,
+    "replyToMessage": false,
+    "skipIfBotRepliedAfterSeed": true,
+    "discussion": {
+      "enabled": true,
+      "probability": 0.35,
+      "minTextLength": 4,
+      "maxTextLength": 80
+    }
+  },
+  "messageDebounce": {
+    "enabled": true,
+    "baseWaitMs": 3000,
+    "minWaitMs": 1500,
+    "maxWaitMs": 6000,
+    "sameUserExtendMs": 2500,
+    "maxBufferedMessages": 8,
+    "maxBufferedChars": 1000
+  },
+  "chatArchive": {
+    "enabled": true,
+    "defaultOn": true,
+    "baseDir": "data/chat-archive",
+    "saveImages": true,
+    "privacyFilter": true,
+    "maxRetrieveItems": 8,
+    "hydrateRecentMessages": 120,
+    "index": {
+      "enabled": true
+    },
+    "summary": {
+      "everyMessages": 50
+    }
+  },
+  "messageTime": {
+    "timezone": "Asia/Shanghai"
+  },
+  "taskMode": {
+    "enabled": true,
+    "shadowMode": true,
+    "allowedGroupIds": [],
+    "ownerUserIds": [],
+    "maxConcurrentGlobal": 2,
+    "maxConcurrentPerConversation": 1,
+    "progressHeartbeatMs": 180000,
+    "workspaceBaseDir": "data/tasks",
+    "defaultToolsets": [
+      "web",
+      "todo"
+    ],
+    "maxRuntimeMs": 1200000,
+    "maxTurns": 30,
+    "maxArtifactBytes": 20971520,
+    "maxGrantedFileChars": 120000,
+    "useSandboxExec": true,
+    "intentJudge": {
+      "enabled": true,
+      "timeoutMs": 15000,
+      "minConfidence": 0.68
+    }
+  },
+  "reviewer": {
+    "enabled": false,
+    "mode": "adaptive",
+    "provider": "",
+    "model": "",
+    "reasoningEffort": "low",
+    "timeoutMs": 12000,
+    "minLength": 160,
+    "maxContextChars": 7000,
+    "failOpenLowRisk": true,
+    "shadowMode": true
+  },
+  "feedback": {
+    "autoReduceProactive": true,
+    "negativeQuietMs": 900000,
+    "negativePatterns": [
+      "话真密",
+      "话密",
+      "谁问你",
+      "闭嘴",
+      "别吵",
+      "别说了",
+      "别插嘴",
+      "话好多",
+      "话太多",
+      "话多",
+      "每句都接",
+      "每句都要接",
+      "接太多",
+      "别接",
+      "别回",
+      "逆天了",
+      "太吵",
+      "别刷",
+      "真讨厌",
+      "烦死"
+    ],
+    "positivePatterns": [
+      "好样的",
+      "可以",
+      "有点意思",
+      "笑死",
+      "牛",
+      "继续"
+    ]
+  },
+  "dailyMessages": {
+    "enabled": true,
+    "checkIntervalMs": 60000,
+    "windowMinutes": 5,
+    "requireKnownGroup": true,
+    "schedules": [
+      {
+        "name": "morning",
+        "mode": "morning",
+        "time": "08:30",
+        "prompt": "早安，叫大家起床/开工，语气轻松像群友。"
+      },
+      {
+        "name": "evening",
+        "mode": "evening",
+        "time": "23:00",
+        "prompt": "晚上了，轻松收个尾，可以提醒大家早点休息。"
+      },
+      {
+        "name": "summary",
+        "mode": "summary",
+        "time": "23:30",
+        "requireHistory": true,
+        "prompt": "请总结今天群里的重点、好笑的梗和可能的待办。"
+      }
+    ]
+  },
+  "history": {
+    "maxMessages": 40,
+    "rawMaxMessages": 120,
+    "promptRecentMessages": 28,
+    "summaryAfterMessages": 40,
+    "rollingSummaryMaxLength": 800,
+    "maxQuotedMessages": 4
+  },
+  "ai": {
+    "command": "hermes",
+    "args": [
+      "--provider",
+      "deepseek",
+      "-m",
+      "deepseek-v4-flash",
+      "-z"
+    ],
+    "timeoutMs": 120000,
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash",
+    "baseUrl": "https://api.deepseek.com/v1",
+    "apiKeyEnv": "DEEPSEEK_API_KEY",
+    "reasoningEffort": "none"
+  },
+  "aiProfiles": {
+    "activeId": "deepseek-default",
+    "profiles": [
+      {
+        "id": "deepseek-default",
+        "name": "DeepSeek 日常",
+        "preset": "deepseek",
+        "command": "hermes",
+        "args": ["--provider", "deepseek", "-m", "deepseek-v4-flash", "-z"],
+        "timeoutMs": 120000,
+        "provider": "deepseek",
+        "model": "deepseek-v4-flash",
+        "baseUrl": "https://api.deepseek.com/v1",
+        "apiKeyEnv": "DEEPSEEK_API_KEY",
+        "reasoningEffort": "none"
+      },
+      {
+        "id": "openai-default",
+        "name": "OpenAI",
+        "preset": "openai",
+        "command": "hermes",
+        "args": ["--provider", "openai-api", "-m", "gpt-5.4-mini", "-z"],
+        "timeoutMs": 120000,
+        "provider": "openai-api",
+        "model": "gpt-5.4-mini",
+        "baseUrl": "https://api.openai.com/v1",
+        "apiKeyEnv": "OPENAI_API_KEY",
+        "reasoningEffort": "none"
+      },
+      {
+        "id": "faro-default",
+        "name": "Faro API",
+        "preset": "faro",
+        "command": "hermes",
+        "args": ["--provider", "custom", "-z"],
+        "timeoutMs": 120000,
+        "provider": "custom",
+        "model": "",
+        "baseUrl": "",
+        "apiKeyEnv": "FARO_API_KEY",
+        "reasoningEffort": "none"
+      },
+      {
+        "id": "mimo-default",
+        "name": "Xiaomi MiMo",
+        "preset": "mimo",
+        "command": "hermes",
+        "args": ["--provider", "xiaomi", "-m", "mimo-v2.5", "-z"],
+        "timeoutMs": 120000,
+        "provider": "xiaomi",
+        "model": "mimo-v2.5",
+        "baseUrl": "https://api.xiaomimimo.com/v1",
+        "apiKeyEnv": "XIAOMI_API_KEY",
+        "reasoningEffort": "none"
+      }
+    ]
+  },
+  "vision": {
+    "enabled": true,
+    "provider": "xiaomi",
+    "model": "mimo-v2.5",
+    "toolsets": "vision",
+    "onlyWhenMentionedOrAsked": true,
+    "includeQuotedImages": true,
+    "includeImageEmojis": true,
+    "aggressiveFollowup": true,
+    "contextAssist": true,
+    "describeWhenUncertain": true,
+    "followupWindowMs": 300000,
+    "followupMaxMessagesAfterBot": 3,
+    "contextAssistWindowMs": 300000,
+    "contextAssistRecentMessages": 10,
+    "contextAssistMaxMessagesAfterBot": 6,
+    "contextAssistShortTextMaxLength": 24,
+    "maxQuotedMessages": 2,
+    "aiJudge": {
+      "enabled": true,
+      "minConfidence": 0.55,
+      "followupOverrideMinConfidence": 0.25,
+      "uncertainMaxConfidence": 0.7,
+      "timeoutMs": 120000,
+      "fallback": "rule"
+    },
+    "maxImagesPerMessage": 2,
+    "maxImageBytes": 33554432,
+    "maxHermesImageBytes": 6291456,
+    "resizeMaxPixels": 1800,
+    "jpegQuality": 84,
+    "downloadTimeoutMs": 30000,
+    "timeoutMs": 120000,
+    "maxDescriptionLength": 260,
+    "cacheMaxAgeMs": 86400000,
+    "prompt": "请用中文简洁描述这张 QQ 聊天图片，重点包括：\\n1. 图片里主要有什么；\\n2. 如果是截图/表情包/文字图，尽量读出关键文字；\\n3. 如果用户正在问图，请给出可用于聊天回复的判断。\\n不要编造看不见的细节。输出 1-3 句。"
+  },
+  "hourlyChat": {
+    "enabled": false,
+    "checkIntervalMs": 60000,
+    "ownerUserIds": [],
+    "prompt": "现在时间 {{time}}。给你的主人发一条简短的私聊消息，语气活泼亲昵。报时、闲聊、分享趣事都行。不超过40个字，最多一个emoji。"
+  },
+  "send": {
+    "replyToMessage": true,
+    "maxLength": 420
+  },
+  "prompt": {
+    "system": "你是 QQ 群里的 Hermes AI 群友，风格像机灵损友：有趣、会接梗、可轻微吐槽，但不攻击人。你要优先理解完整上下文，再决定怎么回。可以参考群记忆里的昵称、偏好、群梗和互动关系，但不要像在读档案，也不要泄露隐私。不要装成人类同学；被问身份就说自己是 AI 群友。不要乱报底层模型。不会的事就承认不会，不要承诺转账、充值、@群主、管理群或发图；如果上下文里有图片识别结果，可以基于它聊图，没有识别结果就别假装看到了。少用模板话，默认 1-3 句，最多 1 个 emoji。"
+  }
+}

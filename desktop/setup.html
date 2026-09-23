@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Hermes QQ Bot 初始设置</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b0f17; --panel:#151c2b; --line:#293247; --text:#eef4ff; --muted:#93a4bd; --accent:#6c82ff; --good:#5ee08c; --bad:#ff6b81; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; font:15px -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif; color:var(--text); background:radial-gradient(circle at 20% 0,rgba(108,130,255,.25),transparent 42rem),var(--bg); }
+    main { width:min(980px,calc(100% - 48px)); margin:48px auto; }
+    .hero { display:flex; align-items:center; gap:18px; margin-bottom:28px; }
+    .logo { width:68px; height:68px; border-radius:22px; display:grid; place-items:center; font-size:34px; background:linear-gradient(135deg,#6c82ff,#6ee7ff); box-shadow:0 20px 60px rgba(80,110,255,.35); }
+    h1 { margin:0 0 7px; font-size:32px; } p { color:var(--muted); line-height:1.6; }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+    .card { background:rgba(21,28,43,.92); border:1px solid var(--line); border-radius:20px; padding:20px; box-shadow:0 18px 45px rgba(0,0,0,.2); }
+    .card h2 { margin:0 0 8px; font-size:18px; }
+    .status { display:inline-flex; gap:7px; align-items:center; padding:7px 10px; border-radius:999px; background:#222d44; }
+    .status.good { color:var(--good); } .status.bad { color:var(--bad); }
+    button { border:0; border-radius:12px; padding:11px 15px; color:white; background:linear-gradient(135deg,#3f63ff,#6c82ff); cursor:pointer; font:inherit; }
+    button.secondary { background:#273149; } button:disabled { opacity:.45; cursor:not-allowed; }
+    .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+    .wide { grid-column:1/-1; }
+    pre { white-space:pre-wrap; color:#c9d7ef; background:#0d1320; border:1px solid var(--line); border-radius:14px; padding:14px; max-height:220px; overflow:auto; }
+    @media(max-width:760px){.grid{grid-template-columns:1fr}.wide{grid-column:auto}}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="hero"><div class="logo">🤖</div><div><h1>设置 Hermes QQ Bot</h1><p>应用会把配置和聊天数据保存在你的用户目录，更新 App 时不会覆盖。</p></div></div>
+    <div class="grid">
+      <section class="card"><h2>1. 运行环境</h2><div id="platform" class="status">检测中</div><p>首个版本支持 macOS 13+ 的 Apple 芯片 Mac。</p><div id="disk" class="status">检查磁盘空间中</div></section>
+      <section class="card"><h2>2. Docker Desktop</h2><div id="docker" class="status">检测中</div><p>SnowLuma 账号协议端通过 Docker 运行。</p><button id="dockerHelp" class="secondary">打开 Docker 官网</button></section>
+      <section class="card"><h2>3. Hermes</h2><div id="hermes" class="status">检测中</div><p>Hermes CLI 负责模型调用与 Agent 任务。</p><button id="hermesHelp" class="secondary">打开 Hermes 安装说明</button></section>
+      <section class="card"><h2>4. 本机桥接</h2><div id="bridge" class="status">检测中</div><p>控制台只监听 127.0.0.1，不开放到局域网或公网。</p><button id="restart" class="secondary">重启桥接</button></section>
+      <section class="card wide"><h2>已有旧项目数据？先迁移</h2><p>App 与新 WebUI 共用用户数据目录，但不会自动读取旧项目文件夹。选择原项目后，迁移配置、记忆、聊天存档和 SnowLuma 登录状态；旧项目与回滚数据会保留。迁移会短暂停止旧桥接和协议端。</p><div class="row"><button id="selectLegacy" class="secondary">选择旧项目</button><button id="migrateLegacy" disabled>验证并迁移</button><span id="legacyInfo"></span></div></section>
+      <section class="card wide"><h2>5. 新安装：准备 QQ 协议端</h2><p>没有旧项目时才使用此入口。准备 SnowLuma 镜像和主备账号容器，然后在各自的 WebUI 或桌面中扫码登录。</p><div class="row"><button id="prepareAccounts">准备主备账号</button><span id="accountStatus"></span></div><div id="accountLinks" class="row" style="margin-top:12px"></div></section>
+      <section class="card wide"><h2>准备完成</h2><p>进入控制台后，可在“备份与迁移”中创建普通数据包或带密码的完整迁移包。</p><div class="row"><button id="refresh" class="secondary">重新检测</button><button id="continue" disabled>进入控制台</button></div><pre id="detail">正在检查依赖……</pre></section>
+    </div>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let legacyPath = "";
+    function mark(id, ok, text) { const el=$(id); el.className=`status ${ok?"good":"bad"}`; el.textContent=text; }
+    async function refresh() {
+      try {
+        const s = await window.hermesQQ.getAppStatus();
+        mark("platform", s.supportedPlatform, `${s.platform} / ${s.arch}`);
+        mark("disk", s.disk?.enough, `可用磁盘：${(Number(s.disk?.availableBytes || 0) / 1024 ** 3).toFixed(1)} GB`);
+        mark("docker", s.docker.running, s.docker.running ? `已运行 ${s.docker.version}` : "未运行或未安装");
+        mark("hermes", s.hermes.installed, s.hermes.installed ? s.hermes.version : "未检测到 Hermes");
+        const occupied = s.ports?.control6200 === "occupied" || s.ports?.onebot6199 === "occupied";
+        mark("bridge", Boolean(s.bridgeHealth?.generatedAt), s.bridgeHealth?.generatedAt ? (s.bridgeHealth.ok ? "桥接与 QQ 均正常" : "桥接已启动，QQ 待登录") : occupied ? "旧网页桥接占用端口；请先迁移" : s.firstRun ? "等待选择迁移或新安装" : "桥接尚未就绪");
+        $("restart").disabled = s.firstRun && !s.bridgeHealth;
+        $("continue").disabled = !(s.supportedPlatform && s.disk?.enough && s.docker.running && s.hermes.installed && s.bridgeHealth?.generatedAt);
+        $("detail").textContent = JSON.stringify({ stateRoot:s.stateRoot, logRoot:s.logRoot, backupRoot:s.backupRoot, ports:s.ports, dockerError:s.docker.error, hermesError:s.hermes.error }, null, 2);
+      } catch (error) { $("detail").textContent = error.message; }
+    }
+    $("dockerHelp").addEventListener("click", () => window.hermesQQ.openExternal("https://www.docker.com/products/docker-desktop/"));
+    $("hermesHelp").addEventListener("click", () => window.hermesQQ.openExternal("https://github.com/NousResearch/hermes-agent"));
+    $("restart").addEventListener("click", async () => { try { await window.hermesQQ.restartBot(); await refresh(); } catch(error) { $("detail").textContent=`重启失败：${error.message}`; } });
+    $("prepareAccounts").addEventListener("click", async () => {
+      $("prepareAccounts").disabled = true;
+      $("accountStatus").textContent = "正在准备镜像和容器……";
+      try {
+        const result = await window.hermesQQ.prepareSnowLuma();
+        $("accountStatus").textContent = result.accounts.length ? "协议端已准备好，请分别完成 QQ 登录。" : "没有启用的 SnowLuma 账号。";
+        $("accountLinks").replaceChildren();
+        for (const account of result.accounts) {
+          for (const [label, url] of [[`${account.id} WebUI`, account.webuiUrl], [`${account.id} 桌面`, account.noVncUrl]]) {
+            const button = document.createElement("button");
+            button.className = "secondary";
+            button.textContent = label;
+            button.addEventListener("click", () => window.hermesQQ.openExternal(url));
+            $("accountLinks").append(button);
+          }
+        }
+        await refresh();
+      } catch (error) { $("accountStatus").textContent = `准备失败：${error.message}`; }
+      finally { $("prepareAccounts").disabled = false; }
+    });
+    $("refresh").addEventListener("click", refresh);
+    $("continue").addEventListener("click", () => window.hermesQQ.completeSetup());
+    $("selectLegacy").addEventListener("click", async () => { const r=await window.hermesQQ.selectLegacyProject(); if(r.canceled)return; legacyPath=r.root; $("legacyInfo").textContent=`已选择：${r.root}`; $("migrateLegacy").disabled=false; });
+    $("migrateLegacy").addEventListener("click", async () => { if(!legacyPath || !confirm("迁移期间将暂停旧网页桥接和 QQ 协议端；成功后由桌面应用接管，失败则尝试回滚。确认开始？"))return; $("migrateLegacy").disabled=true; try { const r=await window.hermesQQ.migrateLegacyProject(legacyPath); $("legacyInfo").textContent=`迁移完成，回滚目录：${r.rollbackDir}`; await refresh(); } catch(error) { $("legacyInfo").textContent=`迁移失败：${error.message}`; } finally { $("migrateLegacy").disabled=false; } });
+    window.addEventListener("error", (event) => { $("detail").textContent=`页面错误：${event.message}`; });
+    window.addEventListener("unhandledrejection", (event) => { $("detail").textContent=`操作失败：${event.reason?.message || event.reason}`; });
+    refresh();
+  </script>
+</body>
+</html>

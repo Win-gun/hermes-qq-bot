@@ -1,0 +1,40 @@
+.DS_Store
+
+# Dependencies
+node_modules/
+out/
+
+# Local runtime state and logs
+logs/
+napcat/
+napcat-*/
+snowluma*/
+secrets/
+data/
+data/images/
+data/chat-archive/
+data/memory.json
+data/memory.json.bak.*
+data/memory-rebuild-report.*.json
+
+# Local live configuration and backups may contain secrets or account state
+config.json
+config.json.bak.*
+.env
+.env.*
+!.env.example
+*.bak.*
+*.hermesqqbackup
+launchd/*.plist
+
+# Temporary extraction / debug artifacts
+memory_extract_*.json
+tmp_*.json
+temp_*.json
+temp_extract.json
+temp_memory_extract.json
+output.json
+hermes-memory-*.json
+hermes_memory_*.json
+qq_memory_*.json
+qq_memory_extract.json
