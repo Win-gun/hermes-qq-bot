@@ -6,7 +6,7 @@ import net from "node:net";
 import { spawn } from "node:child_process";
 
 const root = path.resolve(import.meta.dirname, "..");
-const appBinary = path.join(root, process.env.HERMES_QQ_BUILD_OUT || "out", "Hermes QQ Bot-darwin-arm64", "Hermes QQ Bot.app", "Contents", "MacOS", "Hermes QQ Bot");
+const appBinary = path.join(path.resolve(root, process.env.HERMES_QQ_BUILD_OUT || "out"), "Hermes QQ Bot-darwin-arm64", "Hermes QQ Bot.app", "Contents", "MacOS", "Hermes QQ Bot");
 if (!fs.existsSync(appBinary)) throw new Error("先构建 app，再运行桌面冒烟测试");
 
 async function freePort() {

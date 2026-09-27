@@ -59,10 +59,13 @@
     "passwordFallback": false
   },
   "accounts": {
+    "topology": "failover",
     "primary": {
       "id": "primary",
       "qq": "",
       "role": "primary",
+      "enabled": true,
+      "styleProfileId": "legacy",
       "displayName": "Hermes小跟班",
       "protocol": "snowluma",
       "onebotPath": "/onebot",
@@ -79,6 +82,7 @@
         "id": "standby-a",
         "qq": "",
         "role": "standby",
+        "styleProfileId": "legacy",
         "displayName": "Hermes小跟班2",
         "protocol": "snowluma",
         "onebotPath": "/onebot",
@@ -131,6 +135,43 @@
       "qrcodeRefreshTransitionGuardMs": 120000,
       "qrcodeRefreshFailoverGuardMs": 120000
     }
+  },
+  "botFeatures": {
+    "defaultMode": "all",
+    "accountModes": {},
+    "interBot": {
+      "enabled": false,
+      "probability": 0.03,
+      "cooldownMs": 1800000
+    }
+  },
+  "styleProfiles": {
+    "activeId": "legacy",
+    "profiles": [
+      { "id": "legacy", "name": "原有风格", "systemPrompt": "" }
+    ]
+  },
+  "automation": {
+    "enabled": false,
+    "rules": []
+  },
+  "learningMode": {
+    "enabled": true,
+    "groupIds": [],
+    "minIntervalMs": 1800000,
+    "maxQuestionsPerDay": 3
+  },
+  "voice": {
+    "enabled": false,
+    "replyMode": "mixed",
+    "apiKeyEnv": "MIMO_API_KEY",
+    "timeoutMs": 60000,
+    "maxInputBytes": 5242880,
+    "maxOutputBytes": 10485760,
+    "aiJudge": { "enabled": true, "timeoutMs": 7000, "minConfidence": 0.7 },
+    "asr": { "enabled": true, "autoTranscribe": false },
+    "tts": { "enabled": true, "model": "mimo-v2.5-tts", "voice": "mimo_default", "allowedVoices": ["mimo_default", "冰糖", "茉莉", "苏打", "白桦", "Mia", "Chloe", "Milo", "Dean"], "voiceDescription": "", "allowMemberVoiceDesign": false },
+    "voiceClone": { "enabled": false, "requireConsent": true }
   },
   "behaviorModes": {
     "default": "normal",
@@ -540,6 +581,8 @@
     "enabled": true,
     "shadowMode": true,
     "allowedGroupIds": [],
+    "webResearchEnabled": true,
+    "allowedWebDomains": [],
     "ownerUserIds": [],
     "maxConcurrentGlobal": 2,
     "maxConcurrentPerConversation": 1,

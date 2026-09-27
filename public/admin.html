@@ -235,6 +235,17 @@
     .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .field { min-width: 0; }
     .field.full { grid-column: 1 / -1; }
+    .settings-block { margin-top: 14px; }
+    .settings-block .hint { margin: 0 0 12px; }
+    .settings-block .row { margin-top: 12px; }
+    .profile-prompt { min-height: 220px; }
+    .automation-rule { cursor: default; overflow-wrap: anywhere; }
+    .automation-rule .row { justify-content: space-between; }
+    .automation-rule p { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+    .automation-days { display: flex; flex-wrap: wrap; gap: 8px 14px; }
+    .automation-days label { display: inline-flex; align-items: center; gap: 5px; margin: 0; }
+    .voice-presets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .voice-presets label { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 0; padding: 9px 10px; border: 1px solid var(--line-soft); border-radius: 12px; background: rgba(13, 19, 32, .62); overflow-wrap: anywhere; }
     .switch-row {
       display: flex;
       align-items: center;
@@ -282,6 +293,12 @@
     .protocol-fields[hidden], .protocol-only[hidden] { display: none !important; }
     .account-actions { align-items: stretch; }
     .account-actions > a, .account-actions > button { display: inline-flex; align-items: center; justify-content: center; }
+    .account-manager-card { padding: 16px; border: 1px solid var(--line); border-radius: 16px; background: rgba(13, 19, 32, .62); }
+    .account-manager-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+    .account-manager-head strong { display: block; font-size: 16px; }
+    .account-manager-head .hint { margin: 4px 0 0; }
+    .account-manager-card .form-grid { gap: 12px; }
+    .account-manager-card .switch-row { margin: 0 0 12px; }
     .login-assist { display: grid; gap: 10px; }
     .memory-layout {
       display: grid;
@@ -303,6 +320,19 @@
     }
     .list-item:hover, .list-item.active { border-color: rgba(124, 156, 255, .45); background: rgba(124, 156, 255, .11); }
     .list-item strong { display: block; margin-bottom: 5px; }
+    .task-item { cursor: default; overflow-wrap: anywhere; }
+    .task-item .task-title { font-size: 15px; line-height: 1.45; }
+    .task-item .task-meta { display: block; margin: 7px 0 10px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .task-item details { color: var(--muted); font-size: 13px; margin: 8px 0; }
+    .task-item details p { margin: 8px 0; white-space: pre-wrap; }
+    .artifact-layout { display: grid; grid-template-columns: minmax(190px, 280px) minmax(0, 1fr); gap: 14px; }
+    .artifact-list { display: grid; align-content: start; gap: 8px; }
+    .artifact-list button { width: 100%; text-align: left; overflow-wrap: anywhere; }
+    .artifact-preview { min-height: 340px; max-height: 72vh; overflow: auto; border: 1px solid var(--line); border-radius: 14px; background: #0d1320; padding: 12px; }
+    .artifact-preview img { display: block; max-width: 100%; max-height: 68vh; margin: auto; object-fit: contain; }
+    .artifact-preview iframe { display: block; width: 100%; height: 66vh; border: 0; background: white; }
+    .artifact-preview pre { max-height: none; margin: 0; border: 0; background: transparent; overflow-wrap: anywhere; }
+    @media (max-width: 760px) { .artifact-layout { grid-template-columns: 1fr; } }
     .log-tabs { display: flex; gap: 8px; margin-bottom: 10px; }
     .toast-wrap {
       position: fixed;
@@ -377,7 +407,7 @@
 
       <nav class="nav" id="nav">
         <button data-page="overview" class="active">总览</button>
-        <button data-page="accounts">主备账号</button>
+        <button data-page="accounts">账号管理</button>
         <button data-page="quick">常用操作</button>
         <button data-page="model">模型 / API</button>
         <button data-page="behavior">活跃度</button>
@@ -386,6 +416,8 @@
         <button data-page="memory">记忆</button>
         <button data-page="archive">聊天存档</button>
         <button data-page="tasks">任务 / Agent</button>
+        <button data-page="automation">自动化</button>
+        <button data-page="voice">语音</button>
         <button data-page="reviewer">回复审查</button>
         <button data-page="backup">备份与迁移</button>
         <button data-page="logs">日志</button>
@@ -488,25 +520,44 @@
       </section>
 
       <section id="page-accounts" class="page">
+        <div class="card">
+          <h3>账号管理</h3>
+          <p class="hint">在这里设置每个账号是否参与机器人工作、承担聊天或任务、以及各自的名字和风格。停用只停止消息处理，不会退出 QQ；全部停用后机器人不再发言。</p>
+          <div class="form-grid">
+            <div class="field"><label for="accounts.topology">账号关系</label><select id="accounts.topology"><option value="failover">同一个 bot · 主备故障接管</option><option value="function_split">独立 bot · 按功能分工</option><option value="collaboration">独立 bot · 协作聊天</option></select></div>
+            <div class="field"><label for="botFeatures.defaultMode">未单独设置时的功能</label><select id="botFeatures.defaultMode"><option value="all">聊天 + 任务</option><option value="chat">仅聊天</option><option value="task">仅任务</option></select></div>
+          </div>
+          <p id="accountTopologyHint" class="hint" aria-live="polite"></p>
+          <div id="accountModeFields" class="grid two settings-block"></div>
+          <p class="hint">群友画像、群聊事实和历史记录继续共用；独立 bot 各自保存“我是谁、我说过什么”，不会覆盖原有记忆。新风格可到“提示词”页创建。</p>
+          <div class="row"><button id="saveFeatureModesBtn">保存账号角色与风格</button><button id="editAccountStylesBtn" class="secondary">编辑风格预设</button></div>
+        </div>
         <div class="grid two">
           <div class="card">
             <div class="section-title">
-              <h3>主、备账号状态</h3>
+              <h3>账号连接状态</h3>
               <div class="row">
                 <button id="peerPingTopBtn">双向验活</button>
                 <button id="refreshAccountsTopBtn" class="secondary">刷新状态</button>
               </div>
             </div>
-            <div class="hint">每个账号都可以单独管理协议端、登录入口和连接状态。绿色“当前接管”表示桥接现在用这个账号收发消息。</div>
+            <div class="hint">每个账号都可单独查看登录与 OneBot 状态。独立模式下“默认发言”只是未指定对象时优先使用的账号；明确 @ 其他账号仍可分别回应。</div>
             <div id="accountCards" class="grid two" style="margin-top:12px"></div>
           </div>
 
           <div class="card">
-            <h3>账号配置</h3>
+            <h3>协议端与登录配置</h3>
             <div class="form-grid">
               <div class="field">
                 <label>主账号 QQ</label>
                 <input id="accounts.primary.qq" placeholder="请输入主账号 QQ" />
+              </div>
+              <div class="field">
+                <label>主账号启用</label>
+                <select id="accounts.primary.enabled">
+                  <option value="true">启用</option>
+                  <option value="false">停用</option>
+                </select>
               </div>
               <div class="field">
                 <label>主账号协议端</label>
@@ -606,6 +657,7 @@
                 </select>
               </div>
             </div>
+            <div id="failoverSettings">
             <div class="switch-row">
               <div><strong>主备切换</strong><span>主号异常时允许备用账号接管，主号恢复后自动切回。</span></div>
               <input id="accounts.failover.enabled" type="checkbox" />
@@ -618,13 +670,35 @@
               <label>切换等待 ms</label>
               <input id="accounts.failover.switchAfterMs" type="number" />
             </div>
+            </div>
             <div class="row" style="margin-top:12px">
               <button id="saveAccountsBtn">保存账号配置</button>
               <button id="refreshAccountsBtn" class="secondary">刷新状态</button>
               <button id="peerPingBtn" class="secondary">双向验活</button>
             </div>
-            <div class="warning" style="margin-top:12px">“备用 A 启用”只控制是否参与自动接管。SnowLuma 的账号登录在 WebUI 或 noVNC 中完成；修改协议类型、容器、端口或 WS 地址后，请保存配置并重启对应协议端。</div>
+            <div class="warning" style="margin-top:12px">停用账号会停止该账号处理消息，不会退出 QQ；全部停用后机器人不再发言。SnowLuma 的账号登录在 WebUI 或 noVNC 中完成；修改协议类型、容器、端口或 WS 地址后，请保存配置并重启对应协议端。</div>
           </div>
+        </div>
+        <div class="card settings-block">
+          <h3>双账号接话（可选）</h3>
+          <p class="hint">只在“独立 bot · 协作聊天”下生效；默认不让两个账号同时回答同一条消息。</p>
+          <div class="switch-row settings-block"><div><strong>允许极少量双账号接话</strong><span>仅“协作”拓扑、群内主动参与后生效；默认关闭。另一账号最多接一句，不会互相触发循环。</span></div><input id="botFeatures.interBot.enabled" type="checkbox" /></div>
+          <div class="form-grid">
+            <div class="field"><label for="botFeatures.interBot.probability">接话概率（0–0.1）</label><input id="botFeatures.interBot.probability" type="number" min="0" max="0.1" step="0.01" /></div>
+            <div class="field"><label for="botFeatures.interBot.cooldownMs">每群冷却（毫秒，至少 5 分钟）</label><input id="botFeatures.interBot.cooldownMs" type="number" min="300000" max="86400000" /></div>
+          </div>
+          <div class="row"><button id="saveInterBotBtn">保存接话设置</button></div>
+        </div>
+        <div class="card settings-block">
+          <h3>新群学习模式</h3>
+          <p class="hint">只在指定群启用。机器人遇到确实不懂的群内称呼或梗时，可以少量提问；不会自动向所有新群发问。</p>
+          <div class="switch-row"><div><strong>允许学习提问</strong><span>群管理员还可在群里用 /bot learn on 或 off 单独控制。</span></div><input id="learningMode.enabled" type="checkbox" /></div>
+          <div class="form-grid">
+            <div class="field full"><label for="learningMode.groupIds">启用的群号（每行一个）</label><textarea id="learningMode.groupIds" placeholder="例如 364433603"></textarea></div>
+            <div class="field"><label for="learningMode.minIntervalMs">两次提问最短间隔（毫秒）</label><input id="learningMode.minIntervalMs" type="number" min="60000" max="86400000" /></div>
+            <div class="field"><label for="learningMode.maxQuestionsPerDay">每群每天最多提问</label><input id="learningMode.maxQuestionsPerDay" type="number" min="1" max="20" /></div>
+          </div>
+          <div class="row"><button id="saveLearningModeBtn">保存学习模式</button></div>
         </div>
       </section>
 
@@ -975,6 +1049,36 @@
             </div>
           </div>
         </div>
+        <div class="card settings-block">
+          <h3>风格预设</h3>
+          <p class="hint">原系统提示词始终单独保留。默认 legacy 预设留空时使用上方现有人设；新预设可独立编辑，不会覆盖原提示词。</p>
+          <div class="form-grid">
+            <div class="field">
+              <label for="styleProfileSelect">正在编辑</label>
+              <select id="styleProfileSelect"></select>
+            </div>
+            <div class="field">
+              <label for="styleProfiles.name">预设名称</label>
+              <input id="styleProfiles.name" maxlength="60" />
+            </div>
+            <div class="field full">
+              <label for="styleProfiles.systemPrompt">预设系统提示词</label>
+              <textarea id="styleProfiles.systemPrompt" class="profile-prompt" maxlength="12000" placeholder="legacy 留空时使用上方系统提示词"></textarea>
+            </div>
+          </div>
+          <p id="styleProfileState" class="hint" aria-live="polite"></p>
+          <div class="row">
+            <button id="newStyleProfileBtn" class="secondary">新建预设</button>
+            <button id="duplicateStyleProfileBtn" class="secondary">复制预设</button>
+            <button id="deleteStyleProfileBtn" class="danger">删除预设</button>
+            <button id="activateStyleProfileBtn" class="secondary">设为默认</button>
+          </div>
+          <div class="form-grid settings-block">
+            <div class="field"><label for="accounts.primary.styleProfileId">主账号风格</label><select id="accounts.primary.styleProfileId"></select></div>
+            <div class="field"><label for="accounts.standbys.0.styleProfileId">备用 A 风格</label><select id="accounts.standbys.0.styleProfileId"></select></div>
+          </div>
+          <div class="row"><button id="saveStyleProfilesBtn">保存风格预设</button></div>
+        </div>
       </section>
 
       <section id="page-memory" class="page">
@@ -1066,6 +1170,8 @@
             <div class="form-grid">
               <div class="field"><label>主人 QQ（每行一个）</label><textarea id="taskMode.ownerUserIds"></textarea></div>
               <div class="field"><label>白名单群（每行一个）</label><textarea id="taskMode.allowedGroupIds" placeholder="留空时只有主人可任务化"></textarea></div>
+              <div class="field"><label>任务受控搜索</label><select id="taskMode.webResearchEnabled"><option value="true">允许</option><option value="false">关闭</option></select></div>
+              <div class="field"><label>允许的网站域名（每行一个，留空为公开网络）</label><textarea id="taskMode.allowedWebDomains" placeholder="例如 docs.example.org"></textarea></div>
               <div class="field"><label>全局最大并发</label><input id="taskMode.maxConcurrentGlobal" type="number" min="1" max="8" /></div>
               <div class="field"><label>每会话最大并发</label><input id="taskMode.maxConcurrentPerConversation" type="number" min="1" max="3" /></div>
               <div class="field"><label>进度心跳 ms</label><input id="taskMode.progressHeartbeatMs" type="number" min="60000" /></div>
@@ -1077,12 +1183,96 @@
               <button id="saveTaskBtn">保存任务配置</button>
               <button id="refreshTasksBtn" class="secondary">刷新任务</button>
             </div>
-            <p class="hint">本地文件、电脑控制和登录态浏览器仍需主人按任务逐次授权。群友任务只使用隔离联网与文本工具。</p>
+            <p class="hint">本地文件和电脑控制仍需主人按任务逐次授权。关闭“受控搜索”仅关闭桥接层搜索，不等于系统断网。设置域名白名单时，只接收指定域名的搜索结果，并拒绝无法按域名约束的浏览器/电脑任务；群友没有电脑和登录态浏览器权限。</p>
           </div>
           <div class="card">
             <h3>任务队列 <span id="taskCount" class="pill">0</span></h3>
             <pre id="taskRuntimeSummary">加载中...</pre>
             <div id="taskList" class="list" style="margin-top:12px"></div>
+          </div>
+        </div>
+        <div id="taskArtifactPanel" class="card hidden" style="margin-top:14px">
+          <div class="row" style="justify-content:space-between">
+            <h3 id="taskArtifactTitle" style="margin:0">任务产物</h3>
+            <button id="closeTaskArtifactsBtn" class="ghost" type="button">关闭预览</button>
+          </div>
+          <p class="hint">仅预览图片、PDF 和文本；其他文件请下载后用合适的应用打开。</p>
+          <div class="artifact-layout">
+            <div id="taskArtifactList" class="artifact-list"></div>
+            <div id="taskArtifactPreview" class="artifact-preview" aria-live="polite">选择左侧文件查看。</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-automation" class="page">
+        <div class="grid two">
+          <div class="card">
+            <h3>自动化规则 <span id="automationCount" class="pill">加载中</span></h3>
+            <div class="switch-row">
+              <div><strong>启用自动化</strong><span>总开关关闭时保留规则但不运行。</span></div>
+              <input id="automation.enabled" type="checkbox" aria-label="启用自动化" />
+            </div>
+            <p class="hint">规则只作用于明确列出的群或私聊。定时规则按指定时区运行；命令规则使用独立的小写斜杠命令。</p>
+            <div id="automationRuleList" class="list" aria-label="自动化规则列表"><p class="hint">正在加载配置…</p></div>
+            <div class="row settings-block">
+              <button id="newAutomationRuleBtn" class="secondary">新建规则</button>
+              <button id="saveAutomationBtn">保存自动化配置</button>
+            </div>
+          </div>
+          <div class="card">
+            <h3>规则编辑 <span id="automationEditorState" class="pill">未选择</span></h3>
+            <p id="automationEditorEmpty" class="hint">正在加载配置…</p>
+            <div id="automationEditor" class="hidden">
+              <div class="switch-row">
+                <div><strong>启用此规则</strong><span>停用后保留设置。</span></div>
+                <input id="automationRule.enabled" type="checkbox" aria-label="启用此规则" />
+              </div>
+              <div class="form-grid">
+                <div class="field"><label for="automationRule.id">规则 ID</label><input id="automationRule.id" maxlength="64" placeholder="daily_summary" /></div>
+                <div class="field"><label for="automationRule.action">执行动作</label><select id="automationRule.action"><option value="message">发送消息</option><option value="summary">生成摘要</option><option value="task">创建任务</option></select></div>
+                <div class="field"><label for="automationRule.triggerType">触发方式</label><select id="automationRule.triggerType"><option value="schedule">定时</option><option value="command">斜杠命令</option></select></div>
+                <div class="field"><label for="automationRule.accountId">执行账号 ID（可选）</label><input id="automationRule.accountId" placeholder="留空由运行时选择" /></div>
+                <div class="field full"><label for="automationRule.scope">会话范围（每行一个）</label><textarea id="automationRule.scope" placeholder="group:123456"></textarea><p class="hint">可填写群号、group:&lt;id&gt; 或 private:&lt;id&gt;；必须明确指定 1–100 个会话，不支持“所有群”。</p></div>
+                <div class="field automation-schedule"><label for="automationRule.timezone">时区</label><input id="automationRule.timezone" placeholder="Asia/Shanghai" /></div>
+                <div class="field automation-schedule"><label for="automationRule.time">本地时间</label><input id="automationRule.time" type="time" /></div>
+                <div class="field automation-schedule"><label for="automationRule.windowMinutes">触发窗口（分钟）</label><input id="automationRule.windowMinutes" type="number" min="1" max="15" /></div>
+                <div class="field full automation-schedule"><label>运行星期</label><div id="automationDays" class="automation-days"></div></div>
+                <div class="field full automation-command hidden"><label for="automationRule.command">命令</label><input id="automationRule.command" placeholder="/daily" maxlength="48" /><p class="hint">仅小写、无参数；不能使用 /bot。</p></div>
+                <div class="field full"><label for="automationRule.prompt">执行提示词</label><textarea id="automationRule.prompt" maxlength="4000" placeholder="说明规则执行时要做什么"></textarea></div>
+              </div>
+              <p id="automationEditorError" class="alert hidden" role="alert"></p>
+              <div class="row"><button id="applyAutomationRuleBtn" class="secondary">应用到列表</button><button id="deleteAutomationRuleBtn" class="danger">删除规则</button></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-voice" class="page">
+        <p id="voiceLoadState" class="hint">正在加载语音配置…</p>
+        <div class="grid two">
+          <div class="card">
+            <h3>语音能力</h3>
+            <div class="switch-row"><div><strong>启用语音</strong><span>总开关；各能力还需单独启用。</span></div><input id="voice.enabled" type="checkbox" aria-label="启用语音" /></div>
+            <div class="field"><label for="voice.replyMode">默认回复模式</label><select id="voice.replyMode"><option value="off">关闭（只发文字）</option><option value="mixed">混合（按请求或对语音酌情回复）</option><option value="force">强制（聊天回复优先语音）</option></select><p class="hint">群内管理员可用 /bot voice off|mixed|force 覆盖本群默认值；ASR 识别单独控制。</p></div>
+            <div class="field"><label for="voice.apiKeyEnv">API Key 环境变量名</label><input id="voice.apiKeyEnv" placeholder="MIMO_API_KEY" maxlength="80" autocomplete="off" spellcheck="false" /><p class="hint">这里只填写变量名，不填写密钥。默认 MIMO_API_KEY 未设置时，会尝试使用当前 Hermes 配置中的小米凭据。</p></div>
+            <div class="switch-row settings-block"><div><strong>ASR 语音识别</strong><span>固定使用 mimo-v2.5-asr。</span></div><input id="voice.asr.enabled" type="checkbox" aria-label="启用 ASR" /></div>
+            <div class="switch-row"><div><strong>自动转写收到的语音</strong><span>仅在 ASR 已启用时生效。</span></div><input id="voice.asr.autoTranscribe" type="checkbox" aria-label="自动转写收到的语音" /></div>
+            <div class="switch-row settings-block"><div><strong>TTS 语音合成</strong><span>把文字生成语音。</span></div><input id="voice.tts.enabled" type="checkbox" aria-label="启用 TTS" /></div>
+            <div class="switch-row"><div><strong>AI 判断语音意图</strong><span>明确的语音指令直接发送；措辞含糊时才让对话模型判断，普通聊天不增加调用。</span></div><input id="voice.aiJudge.enabled" type="checkbox" aria-label="AI 判断语音意图" /></div>
+            <div class="form-grid"><div class="field"><label for="voice.tts.model">TTS 模型</label><select id="voice.tts.model"><option value="mimo-v2.5-tts">mimo-v2.5-tts</option><option value="mimo-v2.5-tts-voicedesign">mimo-v2.5-tts-voicedesign</option></select></div><div class="field"><label for="voice.tts.voice">默认预设音色</label><select id="voice.tts.voice"></select></div></div>
+            <div class="settings-block"><strong>允许群友切换的预设音色</strong><p class="hint">群友可用 <code>/bot voice preset list</code> 查看、用 <code>/bot voice preset 音色ID</code> 切换本会话音色；旧的 /voice preset 仍可用。</p><div id="voiceAllowedVoices" class="voice-presets" role="group" aria-label="允许的预设音色"></div><p id="voiceAllowedState" class="hint" aria-live="polite"></p></div>
+            <div class="form-grid settings-block"><div class="field"><label for="voice.timeoutMs">请求超时（毫秒）</label><input id="voice.timeoutMs" type="number" min="1" max="300000" /></div><div class="field"><label for="voice.maxInputBytes">输入音频上限（字节）</label><input id="voice.maxInputBytes" type="number" min="1" max="7340032" /></div><div class="field"><label for="voice.maxOutputBytes">输出音频上限（字节）</label><input id="voice.maxOutputBytes" type="number" min="1" max="20971520" /></div></div>
+          </div>
+          <div class="card">
+            <h3>音色设计与克隆</h3>
+            <div class="switch-row"><div><strong>VoiceDesign</strong><span>由控制台设定音色描述，并切换 TTS 模型；不是群友自由设计入口。</span></div><input id="voice.voiceDesign.enabled" type="checkbox" aria-label="启用 VoiceDesign" /></div>
+            <div class="field"><label for="voice.tts.voiceDescription">音色描述</label><input id="voice.tts.voiceDescription" maxlength="1000" placeholder="描述目标音色" /></div>
+            <div class="switch-row settings-block"><div><strong>允许群友临时设计原创音色</strong><span>默认关闭。用 /bot voice design 年轻 清亮 活泼 | 要说的话；只接受限定的特征，不保存设计结果，每人 5 分钟冷却。</span></div><input id="voice.tts.allowMemberVoiceDesign" type="checkbox" /></div>
+            <div class="switch-row settings-block"><div><strong>允许一次性克隆本人语音</strong><span>默认关闭。引用自己发的语音，再用 /bot voice clone self 要说的话发起；需本人二次确认。</span></div><input id="voice.voiceClone.enabled" type="checkbox" aria-label="允许一次性克隆本人语音" /></div>
+            <div class="warning">不能引用别人的语音克隆。确认码 2 分钟过期；每次只合成一条，服务器不会保留参考音频或永久音色。启用前请确认群友理解此用途。</div>
+            <p id="voiceCloneState" class="hint"></p>
+            <p id="voiceConfigError" class="alert hidden" role="alert"></p>
+            <div class="row"><button id="saveVoiceBtn">保存语音配置</button></div>
           </div>
         </div>
       </section>
@@ -1205,6 +1395,7 @@
 
   <script>
     const $ = (id) => document.getElementById(id);
+    const VOICE_PRESET_IDS = ["mimo_default", "冰糖", "茉莉", "苏打", "白桦", "Mia", "Chloe", "Milo", "Dean"];
     const pageMeta = {
       overview: ["总览", "查看连接、登录、模型、联网、识图和记忆状态。"],
       accounts: ["主备账号", "分别查看主、备账号的协议端、真实收发、登录入口和接管状态。"],
@@ -1216,6 +1407,8 @@
       memory: ["记忆", "查看群记忆、成员偏好、梗、摘要和导出 JSON。"],
       archive: ["聊天存档", "查看会话 JSONL 存档、导出或清理，并调整连续消息合并。"],
       tasks: ["任务 / Agent", "管理闲聊与正式任务路由、权限、后台进度和产物。"],
+      automation: ["自动化", "配置明确范围内的定时或命令规则。"],
+      voice: ["语音", "配置 ASR、TTS、音色设计与克隆能力。"],
       reviewer: ["回复审查", "查看低思考审查指标，并检查标准记忆的冲突和证据状态。"],
       backup: ["备份与迁移", "创建可校验的普通备份或加密完整迁移包，并安全迁移到另一台 Mac。"],
       logs: ["日志", "查看桥接日志和错误日志，定位连接、搜索、识图问题。"]
@@ -1227,6 +1420,9 @@
     let archiveStatusData = null;
     let archiveConversationData = null;
     let taskData = null;
+    let activeTaskArtifacts = [];
+    let activeArtifactTaskId = "";
+    let artifactPreviewRevision = 0;
     let reviewerData = null;
     let memoryIntegrityData = null;
     let selectedGroupId = "";
@@ -1237,6 +1433,10 @@
     let dirty = false;
     let aiProfilesDraft = { activeId: "", profiles: [] };
     let selectedAiProfileId = "";
+    let styleProfilesDraft = { activeId: "legacy", profiles: [] };
+    let selectedStyleProfileId = "legacy";
+    let automationRulesDraft = [];
+    let selectedAutomationRuleIndex = -1;
     const desktopApi = window.hermesQQ || null;
     let browserHostAvailable = false;
     let hostProgressTimer = null;
@@ -1491,11 +1691,518 @@
       markDirty();
     }
 
+    function renderAccountModeFields(config) {
+      const host = $("accountModeFields");
+      host.replaceChildren();
+      const accounts = [config.accounts?.primary || { id: "primary" }, ...(config.accounts?.standbys || [{ id: "standby-a" }])];
+      for (const [index, account] of accounts.entries()) {
+        const accountId = String(account.id || (index === 0 ? "primary" : `standby-${index}`));
+        const card = document.createElement("div");
+        card.className = "account-manager-card";
+        card.dataset.accountManagerId = accountId;
+        const head = document.createElement("div");
+        head.className = "account-manager-head";
+        const title = document.createElement("div");
+        const name = document.createElement("strong");
+        name.textContent = index === 0 ? "主账号" : `账号 ${index + 1}`;
+        const detail = document.createElement("p");
+        detail.className = "hint";
+        detail.textContent = `${accountId} · QQ ${account.qq || "登录后识别"}`;
+        title.append(name, detail);
+        const status = document.createElement("span");
+        status.className = "pill";
+        status.dataset.accountManagerStatus = accountId;
+        status.textContent = "等待状态";
+        head.append(title, status);
+        card.appendChild(head);
+
+        const enabledRow = document.createElement("label");
+        enabledRow.className = "switch-row";
+        const enabledText = document.createElement("span");
+        enabledText.textContent = "启用此账号参与机器人工作";
+        const enabled = document.createElement("input");
+        enabled.type = "checkbox";
+        enabled.dataset.accountEnabledId = accountId;
+        enabled.checked = account.enabled !== false;
+        enabled.addEventListener("change", () => {
+          if (index < 2) setVal(index === 0 ? "accounts.primary.enabled" : "accounts.standbys.0.enabled", String(enabled.checked));
+          markDirty();
+        });
+        enabledRow.append(enabledText, enabled);
+        card.appendChild(enabledRow);
+
+        const fields = document.createElement("div");
+        fields.className = "form-grid";
+        const field = (labelText, control) => {
+          const wrap = document.createElement("div");
+          wrap.className = "field";
+          const label = document.createElement("label");
+          label.htmlFor = control.id;
+          label.textContent = labelText;
+          wrap.append(label, control);
+          fields.appendChild(wrap);
+        };
+        const displayName = document.createElement("input");
+        displayName.id = `account-display-${index}`;
+        displayName.dataset.accountDisplayId = accountId;
+        displayName.maxLength = 60;
+        displayName.value = account.displayName || (index === 0 ? "Hermes小跟班" : `Hermes小跟班${index + 1}`);
+        displayName.addEventListener("input", markDirty);
+        field("机器人自称（不修改 QQ 昵称）", displayName);
+
+        const select = document.createElement("select");
+        select.id = `account-mode-${index}`;
+        select.dataset.accountModeId = accountId;
+        for (const [value, title] of [["", "继承默认"], ["all", "聊天 + 任务"], ["chat", "仅聊天"], ["task", "仅任务"]]) {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = title;
+          select.appendChild(option);
+        }
+        select.value = config.botFeatures?.accountModes?.[accountId] || "";
+        select.addEventListener("change", markDirty);
+        field("负责的功能", select);
+
+        const style = document.createElement("select");
+        style.id = `account-style-${index}`;
+        style.dataset.accountStyleId = accountId;
+        style.addEventListener("change", () => {
+          if (index < 2) setVal(index === 0 ? "accounts.primary.styleProfileId" : "accounts.standbys.0.styleProfileId", style.value);
+          markDirty();
+        });
+        field("风格预设", style);
+        card.appendChild(fields);
+        host.appendChild(card);
+        fillAccountStyleOptions(style, account.styleProfileId || "");
+      }
+      updateAccountTopologyHint();
+      updateAccountManagerStatuses();
+    }
+
+    function fillAccountStyleOptions(select, selected) {
+      select.replaceChildren();
+      for (const [id, title] of [["", "继承默认风格"], ...styleProfilesDraft.profiles.map((item) => [item.id, item.name || item.id])]) {
+        const option = document.createElement("option");
+        option.value = id;
+        option.textContent = title;
+        select.appendChild(option);
+      }
+      if (selected && !styleProfilesDraft.profiles.some((item) => item.id === selected)) {
+        const missing = document.createElement("option");
+        missing.value = selected;
+        missing.textContent = `${selected}（预设缺失）`;
+        select.appendChild(missing);
+      }
+      select.value = selected;
+    }
+
+    function updateAccountTopologyHint() {
+      const topology = getVal("accounts.topology");
+      $("accountTopologyHint").textContent = topology === "failover"
+        ? "主备代表同一个 bot，共用风格和自我记忆；主号故障时备用号接管。要让备用号成为另一个 bot，请切到独立模式。"
+        : topology === "function_split"
+          ? "两个账号是独立 bot，可分别负责聊天或任务。普通群聊默认由当前账号处理；明确 @ 某账号会路由给该账号。不会自动把一个 bot 的身份当成另一个。"
+          : "两个账号是独立 bot，可参与同一群聊。默认仍只回复一次；双账号接话需另行开启。";
+      $("failoverSettings").classList.toggle("hidden", topology !== "failover");
+      for (const id of ["botFeatures.interBot.enabled", "botFeatures.interBot.probability", "botFeatures.interBot.cooldownMs"]) $(id).disabled = topology !== "collaboration";
+      const primaryId = cfg?.accounts?.primary?.id || "primary";
+      for (const select of document.querySelectorAll("[data-account-mode-id], [data-account-style-id]")) {
+        select.disabled = topology === "failover" && (select.dataset.accountModeId || select.dataset.accountStyleId) !== primaryId;
+      }
+    }
+
+    function updateAccountManagerStatuses() {
+      const rows = new Map(accountRows().map((item) => [item.id, item]));
+      for (const badge of document.querySelectorAll("[data-account-manager-status]")) {
+        const row = rows.get(badge.dataset.accountManagerStatus);
+        badge.textContent = !row ? "待连接" : row.enabled === false ? "已停用" : row.connected ? (row.active ? "在线 · 当前" : "在线") : "未连接";
+        badge.className = `pill ${row?.enabled === false ? "" : row?.connected ? "good" : "bad"}`;
+      }
+    }
+
+    function selectedStyleProfile() {
+      return styleProfilesDraft.profiles.find((profile) => profile.id === selectedStyleProfileId) || null;
+    }
+
+    function syncSelectedStyleProfileFromForm() {
+      const profile = selectedStyleProfile();
+      if (!profile) return;
+      profile.name = String(getVal("styleProfiles.name") || "").trim().slice(0, 60) || profile.id;
+      profile.systemPrompt = getVal("styleProfiles.systemPrompt") || "";
+    }
+
+    function loadStyleProfileIntoForm() {
+      const profile = selectedStyleProfile();
+      setVal("styleProfiles.name", profile?.name || "");
+      setVal("styleProfiles.systemPrompt", profile?.systemPrompt || "");
+    }
+
+    function renderStyleProfiles() {
+      const select = $("styleProfileSelect");
+      select.replaceChildren();
+      for (const profile of styleProfilesDraft.profiles) {
+        const option = document.createElement("option");
+        option.value = profile.id;
+        option.textContent = `${profile.name || profile.id}${profile.id === styleProfilesDraft.activeId ? "（默认）" : ""}`;
+        select.appendChild(option);
+      }
+      select.value = selectedStyleProfileId;
+      const profile = selectedStyleProfile();
+      $("deleteStyleProfileBtn").disabled = !profile || profile.id === "legacy" || profile.id === styleProfilesDraft.activeId;
+      $("activateStyleProfileBtn").disabled = !profile || profile.id === styleProfilesDraft.activeId;
+      const active = styleProfilesDraft.profiles.find((item) => item.id === styleProfilesDraft.activeId);
+      $("styleProfileState").textContent = `当前默认：${active?.name || "原有人设"} · 正在编辑：${profile?.name || "无"}${profile?.id === "legacy" && !profile.systemPrompt ? " · 留空时继承原系统提示词" : ""}`;
+      for (const id of ["accounts.primary.styleProfileId", "accounts.standbys.0.styleProfileId"]) {
+        const accountSelect = $(id);
+        const previous = accountSelect.value;
+        accountSelect.replaceChildren();
+        const defaultOption = document.createElement("option");
+        defaultOption.value = "";
+        defaultOption.textContent = "继承默认风格";
+        accountSelect.appendChild(defaultOption);
+        for (const item of styleProfilesDraft.profiles) {
+          const option = document.createElement("option");
+          option.value = item.id;
+          option.textContent = item.name || item.id;
+          accountSelect.appendChild(option);
+        }
+        if (previous && !styleProfilesDraft.profiles.some((item) => item.id === previous)) {
+          const missingOption = document.createElement("option");
+          missingOption.value = previous;
+          missingOption.textContent = `${previous}（预设缺失）`;
+          accountSelect.appendChild(missingOption);
+        }
+        accountSelect.value = previous;
+      }
+      for (const select of document.querySelectorAll("[data-account-style-id]")) fillAccountStyleOptions(select, select.value);
+    }
+
+    function initializeStyleProfiles(config) {
+      const source = Array.isArray(config.styleProfiles?.profiles) ? config.styleProfiles.profiles : [];
+      const profiles = source.filter((profile) => profile && typeof profile.id === "string" && profile.id).map((profile) => ({ ...profile }));
+      if (!profiles.some((profile) => profile.id === "legacy")) profiles.unshift({ id: "legacy", name: "原有人设", systemPrompt: "" });
+      styleProfilesDraft = {
+        activeId: profiles.some((profile) => profile.id === config.styleProfiles?.activeId) ? config.styleProfiles.activeId : "legacy",
+        profiles
+      };
+      selectedStyleProfileId = profiles.some((profile) => profile.id === selectedStyleProfileId) ? selectedStyleProfileId : styleProfilesDraft.activeId;
+      renderStyleProfiles();
+      for (const [id, value] of [
+        ["accounts.primary.styleProfileId", config.accounts?.primary?.styleProfileId || ""],
+        ["accounts.standbys.0.styleProfileId", config.accounts?.standbys?.[0]?.styleProfileId || ""]
+      ]) {
+        const select = $(id);
+        if (value && !profiles.some((profile) => profile.id === value)) {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = `${value}（预设缺失）`;
+          select.appendChild(option);
+        }
+        select.value = value;
+      }
+      loadStyleProfileIntoForm();
+    }
+
+    function createStyleProfile({ duplicate = false } = {}) {
+      syncSelectedStyleProfileFromForm();
+      if (styleProfilesDraft.profiles.length >= 12) {
+        toast("最多保留 12 个风格预设", "warn");
+        return;
+      }
+      const source = duplicate ? selectedStyleProfile() : null;
+      let id;
+      do { id = `style-${Math.random().toString(36).slice(2, 10)}`; }
+      while (styleProfilesDraft.profiles.some((profile) => profile.id === id));
+      const profile = {
+        id,
+        name: source ? `${source.name || "预设"} 副本` : "新风格",
+        systemPrompt: source?.systemPrompt || getVal("prompt.system") || ""
+      };
+      styleProfilesDraft.profiles.push(profile);
+      selectedStyleProfileId = id;
+      renderStyleProfiles();
+      loadStyleProfileIntoForm();
+      markDirty();
+    }
+
+    function deleteSelectedStyleProfile() {
+      const profile = selectedStyleProfile();
+      if (!profile || profile.id === "legacy" || profile.id === styleProfilesDraft.activeId) return;
+      if (!confirm(`确定删除风格预设“${profile.name || profile.id}”吗？`)) return;
+      for (const id of ["accounts.primary.styleProfileId", "accounts.standbys.0.styleProfileId"]) {
+        if (getVal(id) === profile.id) setVal(id, "");
+      }
+      for (const select of document.querySelectorAll("[data-account-style-id]")) {
+        if (select.value === profile.id) select.value = "";
+      }
+      styleProfilesDraft.profiles = styleProfilesDraft.profiles.filter((item) => item.id !== profile.id);
+      selectedStyleProfileId = styleProfilesDraft.activeId;
+      renderStyleProfiles();
+      loadStyleProfileIntoForm();
+      markDirty();
+    }
+
+    function styleProfilesPatch() {
+      syncSelectedStyleProfileFromForm();
+      return { activeId: styleProfilesDraft.activeId, profiles: styleProfilesDraft.profiles.map((profile) => ({ ...profile })) };
+    }
+
+    function renderAutomationRules() {
+      const list = $("automationRuleList");
+      list.replaceChildren();
+      $("automationCount").textContent = String(automationRulesDraft.length);
+      if (!automationRulesDraft.length) {
+        const empty = document.createElement("p");
+        empty.className = "hint";
+        empty.textContent = "暂无规则。新建后填写范围和提示词，再保存配置。";
+        list.appendChild(empty);
+      }
+      automationRulesDraft.forEach((rule, index) => {
+        const item = document.createElement("div");
+        item.className = `list-item automation-rule${index === selectedAutomationRuleIndex ? " active" : ""}`;
+        const head = document.createElement("div");
+        head.className = "row";
+        const title = document.createElement("strong");
+        title.textContent = rule.id || "未命名规则";
+        const buttons = document.createElement("div");
+        buttons.className = "row";
+        for (const [action, label, className] of [
+          ["edit", "编辑", "secondary"],
+          ["toggle", rule.enabled === false ? "启用" : "停用", rule.enabled === false ? "secondary" : "ghost"]
+        ]) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = className;
+          button.dataset.automationAction = action;
+          button.dataset.automationIndex = String(index);
+          button.textContent = label;
+          buttons.appendChild(button);
+        }
+        const detail = document.createElement("p");
+        const trigger = rule.trigger?.type === "command"
+          ? `命令 ${rule.trigger.text || "未填"}`
+          : `定时 ${rule.trigger?.time || "未填"} · ${rule.timezone || "Asia/Shanghai"}`;
+        detail.textContent = `${rule.enabled === false ? "已停用" : "已启用"} · ${trigger} · ${rule.scope?.conversationIds?.length || 0} 个会话 · ${rule.action?.kind || "message"}`;
+        head.append(title, buttons);
+        item.append(head, detail);
+        list.appendChild(item);
+      });
+      const rule = automationRulesDraft[selectedAutomationRuleIndex];
+      $("automationEditorState").textContent = rule?.id || "未选择";
+      $("automationEditor").classList.toggle("hidden", !rule);
+      $("automationEditorEmpty").classList.toggle("hidden", Boolean(rule));
+      $("newAutomationRuleBtn").disabled = automationRulesDraft.length >= 100;
+    }
+
+    function toggleAutomationTriggerFields() {
+      const isSchedule = getVal("automationRule.triggerType") === "schedule";
+      for (const field of document.querySelectorAll(".automation-schedule")) field.classList.toggle("hidden", !isSchedule);
+      for (const field of document.querySelectorAll(".automation-command")) field.classList.toggle("hidden", isSchedule);
+    }
+
+    function loadAutomationEditor() {
+      const rule = automationRulesDraft[selectedAutomationRuleIndex];
+      renderAutomationRules();
+      $("automationEditorError").classList.add("hidden");
+      if (!rule) return;
+      setVal("automationRule.enabled", rule.enabled !== false);
+      setVal("automationRule.id", rule.id);
+      setVal("automationRule.action", rule.action?.kind || "message");
+      setVal("automationRule.triggerType", rule.trigger?.type || "schedule");
+      setVal("automationRule.accountId", rule.accountId || "");
+      setVal("automationRule.scope", rule.scope?.conversationIds || rule.scope?.groupIds || []);
+      setVal("automationRule.timezone", rule.timezone || "Asia/Shanghai");
+      setVal("automationRule.time", rule.trigger?.type === "schedule" ? rule.trigger.time : "09:00");
+      setVal("automationRule.windowMinutes", rule.trigger?.type === "schedule" ? rule.trigger.windowMinutes ?? 3 : 3);
+      setVal("automationRule.command", rule.trigger?.type === "command" ? rule.trigger.text : "");
+      for (const checkbox of document.querySelectorAll("[data-automation-day]")) {
+        checkbox.checked = rule.trigger?.type === "schedule"
+          ? (rule.trigger.daysOfWeek || [0, 1, 2, 3, 4, 5, 6]).includes(Number(checkbox.value))
+          : true;
+      }
+      setVal("automationRule.prompt", rule.prompt || "");
+      toggleAutomationTriggerFields();
+    }
+
+    function initializeAutomation(config) {
+      const rules = Array.isArray(config.automation?.rules) ? config.automation.rules : [];
+      automationRulesDraft = rules.map((rule) => ({
+        ...rule,
+        scope: { ...rule.scope, conversationIds: [...(rule.scope?.conversationIds || rule.scope?.groupIds || [])] },
+        trigger: { ...rule.trigger, ...(Array.isArray(rule.trigger?.daysOfWeek) ? { daysOfWeek: [...rule.trigger.daysOfWeek] } : {}) },
+        action: { ...rule.action }
+      }));
+      selectedAutomationRuleIndex = Math.min(selectedAutomationRuleIndex, automationRulesDraft.length - 1);
+      if (selectedAutomationRuleIndex < 0 && automationRulesDraft.length) selectedAutomationRuleIndex = 0;
+      setVal("automation.enabled", config.automation?.enabled === true);
+      $("automationEditorEmpty").textContent = "选择规则或新建规则后编辑。";
+      loadAutomationEditor();
+    }
+
+    function readAutomationEditor() {
+      const id = String(getVal("automationRule.id") || "").trim();
+      if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(id)) throw new Error("规则 ID 须以字母开头，仅使用字母、数字、_、-，最长 64 位");
+      const rawScopes = String(getVal("automationRule.scope") || "").split(/[\r\n,]+/).map((value) => value.trim()).filter(Boolean);
+      if (!rawScopes.length || rawScopes.length > 100) throw new Error("须明确指定 1–100 个会话");
+      const scopes = rawScopes.map((value) => /^\d{1,20}$/.test(value) ? `group:${value}` : value);
+      if (scopes.some((value) => !/^(group|private):\d{1,20}$/.test(value) || /^0+$/.test(value.split(":")[1]))) {
+        throw new Error("会话范围只能是群号、group:<id> 或 private:<id>");
+      }
+      const timezone = String(getVal("automationRule.timezone") || "Asia/Shanghai").trim();
+      if (timezone.length > 64) throw new Error("时区名称不能超过 64 字符");
+      try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(0); }
+      catch { throw new Error("时区名称无效"); }
+      const prompt = String(getVal("automationRule.prompt") || "").trim();
+      if (!prompt || prompt.length > 4000 || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(prompt)) throw new Error("执行提示词须为 1–4000 字符且不能包含控制字符");
+      const type = getVal("automationRule.triggerType");
+      let trigger;
+      if (type === "schedule") {
+        const time = getVal("automationRule.time");
+        const daysOfWeek = [...document.querySelectorAll("[data-automation-day]:checked")].map((checkbox) => Number(checkbox.value));
+        const windowMinutes = getVal("automationRule.windowMinutes");
+        if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time || "")) throw new Error("定时时间须为 HH:mm");
+        if (!daysOfWeek.length) throw new Error("至少选择一个运行星期");
+        if (!Number.isInteger(windowMinutes) || windowMinutes < 1 || windowMinutes > 15) throw new Error("触发窗口须为 1–15 分钟");
+        trigger = { type, time, daysOfWeek: daysOfWeek.sort(), windowMinutes };
+      } else {
+        const text = String(getVal("automationRule.command") || "").trim();
+        if (!/^\/[a-z][a-z0-9_-]{0,47}$/.test(text) || ["/bot", "/task", "/voice"].includes(text)) throw new Error("命令须为小写、无参数的斜杠命令，且不能占用 /bot、/task、/voice");
+        trigger = { type: "command", text };
+      }
+      const accountId = String(getVal("automationRule.accountId") || "").trim();
+      if (accountId && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(accountId)) throw new Error("执行账号 ID 格式无效");
+      return {
+        id,
+        enabled: getVal("automationRule.enabled"),
+        timezone,
+        scope: { conversationIds: [...new Set(scopes)] },
+        trigger,
+        action: { kind: getVal("automationRule.action") },
+        ...(accountId ? { accountId } : {}),
+        prompt
+      };
+    }
+
+    function syncAutomationEditor() {
+      if (selectedAutomationRuleIndex < 0) return true;
+      try {
+        automationRulesDraft[selectedAutomationRuleIndex] = readAutomationEditor();
+        $("automationEditorError").classList.add("hidden");
+        return true;
+      } catch (error) {
+        $("automationEditorError").textContent = error.message;
+        $("automationEditorError").classList.remove("hidden");
+        return false;
+      }
+    }
+
+    function automationPatch() {
+      if (!syncAutomationEditor()) throw new Error($("automationEditorError").textContent);
+      if (automationRulesDraft.length > 100) throw new Error("最多保留 100 条规则");
+      const ids = new Set();
+      const commands = new Set();
+      for (const rule of automationRulesDraft) {
+        if (ids.has(rule.id)) throw new Error(`规则 ID 重复：${rule.id}`);
+        ids.add(rule.id);
+        if (rule.trigger.type === "command") for (const scope of rule.scope.conversationIds) {
+          const key = JSON.stringify([scope, rule.trigger.text]);
+          if (commands.has(key)) throw new Error(`命令 ${rule.trigger.text} 在 ${scope} 中重复`);
+          commands.add(key);
+        }
+      }
+      return { enabled: getVal("automation.enabled"), rules: automationRulesDraft.map((rule) => ({ ...rule, scope: { conversationIds: [...rule.scope.conversationIds] }, trigger: { ...rule.trigger }, action: { ...rule.action } })) };
+    }
+
+    function voicePatch() {
+      const { apiKeyEnvPresent: _apiKeyEnvPresent, ...current } = cfg?.voice || {};
+      const apiKeyEnv = String(getVal("voice.apiKeyEnv") || "").trim();
+      const fail = (message) => {
+        $("voiceConfigError").textContent = message;
+        $("voiceConfigError").classList.remove("hidden");
+        throw new Error(message);
+      };
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyEnv)) fail("语音 API Key 环境变量名格式无效；这里只填写变量名，不填写密钥");
+      const timeoutMs = getVal("voice.timeoutMs");
+      const maxInputBytes = getVal("voice.maxInputBytes");
+      const maxOutputBytes = getVal("voice.maxOutputBytes");
+      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300000) fail("语音请求超时须为 1–300000 毫秒");
+      if (!Number.isSafeInteger(maxInputBytes) || maxInputBytes < 1 || maxInputBytes > 7340032) fail("输入音频上限须为 1–7340032 字节");
+      if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1 || maxOutputBytes > 20971520) fail("输出音频上限须为 1–20971520 字节");
+      const ttsModel = getVal("voice.tts.model");
+      const voice = String(getVal("voice.tts.voice") || "").trim();
+      const allowedVoices = [...document.querySelectorAll("[data-voice-preset]:checked")].map((checkbox) => checkbox.value);
+      if (getVal("voice.enabled") && getVal("voice.tts.enabled") && !ttsModel) fail("请选择 TTS 模型");
+      if (getVal("voice.enabled") && getVal("voice.tts.enabled") && !voice) fail("预设音色 ID 不能为空");
+      if (getVal("voice.enabled") && getVal("voice.tts.enabled") && ttsModel === "mimo-v2.5-tts" && !allowedVoices.includes(voice)) fail("默认预设音色必须包含在允许列表中");
+      if (getVal("voice.enabled") && getVal("voice.tts.enabled") && getVal("voice.voiceDesign.enabled") && !String(getVal("voice.tts.voiceDescription") || "").trim()) fail("启用 VoiceDesign 时须填写音色描述");
+      $("voiceConfigError").classList.add("hidden");
+      return {
+        ...current,
+        enabled: getVal("voice.enabled"),
+        replyMode: getVal("voice.replyMode"),
+        apiKeyEnv,
+        asr: { ...(current.asr || {}), enabled: getVal("voice.asr.enabled"), autoTranscribe: getVal("voice.asr.autoTranscribe") },
+        tts: { ...(current.tts || {}), enabled: getVal("voice.tts.enabled"), model: ttsModel, voice, allowedVoices, voiceDescription: getVal("voice.tts.voiceDescription"), allowMemberVoiceDesign: getVal("voice.tts.allowMemberVoiceDesign") },
+        aiJudge: { ...(current.aiJudge || {}), enabled: getVal("voice.aiJudge.enabled") },
+        voiceClone: { ...(current.voiceClone || {}), enabled: getVal("voice.voiceClone.enabled"), requireConsent: true },
+        timeoutMs,
+        maxInputBytes,
+        maxOutputBytes
+      };
+    }
+
     function collectPatch() {
       const profiles = aiProfilesPatch();
+      const primaryId = cfg?.accounts?.primary?.id || "primary";
+      const firstStandbyId = cfg?.accounts?.standbys?.[0]?.id || "standby-a";
+      const accountControl = (attribute, id) => [...document.querySelectorAll(`[${attribute}]`)].find((node) => node.getAttribute(attribute) === id);
+      const primaryEnabled = Boolean(accountControl("data-account-enabled-id", primaryId)?.checked);
+      const standbyEnabled = Boolean(accountControl("data-account-enabled-id", firstStandbyId)?.checked);
+      const accountName = (id, fallback) => {
+        const value = String(accountControl("data-account-display-id", id)?.value || "").trim();
+        if (!value || value.length > 60) throw new Error(`${fallback}名称须为 1–60 字`);
+        return value;
+      };
+      for (const select of document.querySelectorAll("[data-account-style-id]")) {
+        if (select.value && !styleProfilesDraft.profiles.some((profile) => profile.id === select.value)) {
+          throw new Error(`账号 ${select.dataset.accountStyleId} 的风格预设不存在，请重新选择`);
+        }
+      }
+      const accountModes = { ...(cfg?.botFeatures?.accountModes || {}) };
+      for (const select of document.querySelectorAll("[data-account-mode-id]")) {
+        if (select.value) accountModes[select.dataset.accountModeId] = select.value;
+        else delete accountModes[select.dataset.accountModeId];
+      }
+      const learningGroupIds = String(getVal("learningMode.groupIds") || "").split(/[\r\n,]+/).map((s) => s.trim()).filter(Boolean);
+      if (learningGroupIds.length > 100 || learningGroupIds.some((id) => !/^\d{1,20}$/.test(id))) throw new Error("学习模式群号须为数字，最多 100 个");
+      const learningInterval = getVal("learningMode.minIntervalMs");
+      const learningDaily = getVal("learningMode.maxQuestionsPerDay");
+      if (!Number.isSafeInteger(learningInterval) || learningInterval < 60000 || learningInterval > 86400000) throw new Error("学习模式提问间隔须为 1 分钟至 24 小时");
+      if (!Number.isSafeInteger(learningDaily) || learningDaily < 1 || learningDaily > 20) throw new Error("学习模式每日提问次数须为 1–20 次");
+      const interBotProbability = getVal("botFeatures.interBot.probability");
+      const interBotCooldown = getVal("botFeatures.interBot.cooldownMs");
+      if (!Number.isFinite(interBotProbability) || interBotProbability < 0 || interBotProbability > 0.1) throw new Error("双账号接话概率须为 0–0.1");
+      if (!Number.isSafeInteger(interBotCooldown) || interBotCooldown < 300000 || interBotCooldown > 86400000) throw new Error("双账号接话冷却须为 5 分钟至 24 小时");
       return {
         ai: profiles.ai,
         aiProfiles: profiles.aiProfiles,
+        botFeatures: {
+          defaultMode: getVal("botFeatures.defaultMode"), accountModes,
+          interBot: {
+            enabled: getVal("botFeatures.interBot.enabled"),
+            probability: getVal("botFeatures.interBot.probability"),
+            cooldownMs: getVal("botFeatures.interBot.cooldownMs")
+          }
+        },
+        styleProfiles: styleProfilesPatch(),
+        automation: automationPatch(),
+        voice: voicePatch(),
+        learningMode: {
+          enabled: getVal("learningMode.enabled"),
+          groupIds: [...new Set(learningGroupIds)],
+          minIntervalMs: learningInterval,
+          maxQuestionsPerDay: learningDaily
+        },
         vision: {
           enabled: getVal("vision.enabled"),
           onlyWhenMentionedOrAsked: getVal("vision.onlyWhenMentionedOrAsked"),
@@ -1588,6 +2295,8 @@
           shadowMode: getVal("taskMode.shadowMode"),
           ownerUserIds: String(getVal("taskMode.ownerUserIds") || "").split(/[\r\n,]+/).map((s) => s.trim()).filter(Boolean),
           allowedGroupIds: String(getVal("taskMode.allowedGroupIds") || "").split(/[\r\n,]+/).map((s) => s.trim()).filter(Boolean),
+          webResearchEnabled: String(getVal("taskMode.webResearchEnabled")) !== "false",
+          allowedWebDomains: String(getVal("taskMode.allowedWebDomains") || "").split(/[\r\n,]+/).map((s) => s.trim()).filter(Boolean),
           maxConcurrentGlobal: getVal("taskMode.maxConcurrentGlobal"),
           maxConcurrentPerConversation: getVal("taskMode.maxConcurrentPerConversation"),
           progressHeartbeatMs: getVal("taskMode.progressHeartbeatMs"),
@@ -1616,8 +2325,12 @@
           }
         },
         accounts: {
+          topology: getVal("accounts.topology"),
           primary: {
-            id: "primary",
+            id: primaryId,
+            displayName: accountName(primaryId, "主账号"),
+            styleProfileId: accountControl("data-account-style-id", primaryId)?.value || "",
+            enabled: primaryEnabled,
             qq: getVal("accounts.primary.qq"),
             protocol: getVal("accounts.primary.protocol"),
             onebotPath: getVal("accounts.primary.onebotPath"),
@@ -1631,7 +2344,9 @@
           },
           standbys: [
             {
-              id: "standby-a",
+              id: firstStandbyId,
+              displayName: accountName(firstStandbyId, "账号 2"),
+              styleProfileId: accountControl("data-account-style-id", firstStandbyId)?.value || "",
               qq: getVal("accounts.standbys.0.qq"),
               protocol: getVal("accounts.standbys.0.protocol"),
               onebotPath: getVal("accounts.standbys.0.onebotPath"),
@@ -1643,8 +2358,14 @@
               onebotWsUrl: getVal("accounts.standbys.0.onebotWsUrl"),
               snowlumaImage: getVal("accounts.standbys.0.snowlumaImage"),
               behaviorMode: getVal("accounts.standbys.0.behaviorMode"),
-              enabled: String(getVal("accounts.standbys.0.enabled")) !== "false"
-            }
+              enabled: standbyEnabled
+            },
+            ...(cfg?.accounts?.standbys || []).slice(1).map((account, index) => ({
+              ...account,
+              displayName: accountName(account.id, `账号 ${index + 3}`),
+              styleProfileId: accountControl("data-account-style-id", account.id)?.value || "",
+              enabled: Boolean(accountControl("data-account-enabled-id", account.id)?.checked)
+            }))
           ],
           failover: {
             enabled: getVal("accounts.failover.enabled"),
@@ -1659,6 +2380,68 @@
     function fillConfig() {
       if (!cfg) return;
       initializeAiProfiles(cfg);
+      initializeStyleProfiles(cfg);
+      setVal("botFeatures.defaultMode", cfg.botFeatures?.defaultMode || "all");
+      setVal("botFeatures.interBot.enabled", cfg.botFeatures?.interBot?.enabled === true);
+      setVal("botFeatures.interBot.probability", cfg.botFeatures?.interBot?.probability ?? 0.03);
+      setVal("botFeatures.interBot.cooldownMs", cfg.botFeatures?.interBot?.cooldownMs ?? 1800000);
+      setVal("learningMode.enabled", cfg.learningMode?.enabled !== false);
+      setVal("learningMode.groupIds", cfg.learningMode?.groupIds || []);
+      setVal("learningMode.minIntervalMs", cfg.learningMode?.minIntervalMs ?? 1800000);
+      setVal("learningMode.maxQuestionsPerDay", cfg.learningMode?.maxQuestionsPerDay ?? 3);
+      setVal("accounts.topology", cfg.accounts?.topology || "failover");
+      renderAccountModeFields(cfg);
+      initializeAutomation(cfg);
+      setVal("voice.enabled", cfg.voice?.enabled === true);
+      setVal("voice.replyMode", cfg.voice?.replyMode || "mixed");
+      setVal("voice.apiKeyEnv", cfg.voice?.apiKeyEnv || "MIMO_API_KEY");
+      setVal("voice.asr.enabled", cfg.voice?.asr?.enabled !== false);
+      setVal("voice.asr.autoTranscribe", cfg.voice?.asr?.autoTranscribe === true);
+      setVal("voice.tts.enabled", cfg.voice?.tts?.enabled !== false);
+      setVal("voice.aiJudge.enabled", cfg.voice?.aiJudge?.enabled !== false);
+      const ttsModel = cfg.voice?.tts?.model || "mimo-v2.5-tts";
+      const modelSelect = $("voice.tts.model");
+      modelSelect.querySelector("[data-voice-custom-option]")?.remove();
+      if (![...modelSelect.options].some((option) => option.value === ttsModel)) {
+        const option = document.createElement("option");
+        option.value = ttsModel;
+        option.textContent = `${ttsModel}（现有配置）`;
+        option.dataset.voiceCustomOption = "";
+        modelSelect.appendChild(option);
+      }
+      setVal("voice.tts.model", ttsModel);
+      const selectedVoice = cfg.voice?.tts?.voice || "mimo_default";
+      const voiceSelect = $("voice.tts.voice");
+      voiceSelect.querySelector("[data-voice-custom-option]")?.remove();
+      if (!VOICE_PRESET_IDS.includes(selectedVoice)) {
+        const option = document.createElement("option");
+        option.value = selectedVoice;
+        option.textContent = `${selectedVoice}（现有配置）`;
+        option.dataset.voiceCustomOption = "";
+        voiceSelect.appendChild(option);
+      }
+      setVal("voice.tts.voice", selectedVoice);
+      const allowedVoices = Array.isArray(cfg.voice?.tts?.allowedVoices) ? cfg.voice.tts.allowedVoices : VOICE_PRESET_IDS;
+      for (const checkbox of document.querySelectorAll("[data-voice-preset]")) checkbox.checked = allowedVoices.includes(checkbox.value);
+      const unknownVoices = allowedVoices.filter((id) => !VOICE_PRESET_IDS.includes(id));
+      $("voiceAllowedState").textContent = unknownVoices.length
+        ? `现有配置中有 ${unknownVoices.length} 个不在官方列表内的音色；保存时只保留上方勾选项。`
+        : "默认音色须在允许列表中，才可用于预设 TTS。";
+      setVal("voice.voiceDesign.enabled", ttsModel === "mimo-v2.5-tts-voicedesign");
+      setVal("voice.tts.voiceDescription", cfg.voice?.tts?.voiceDescription || "");
+      setVal("voice.tts.allowMemberVoiceDesign", cfg.voice?.tts?.allowMemberVoiceDesign === true);
+      setVal("voice.voiceClone.enabled", cfg.voice?.voiceClone?.enabled === true);
+      $("voiceCloneState").textContent = cfg.voice?.voiceClone?.enabled === true
+        ? "一次性本人语音克隆已开启；每次使用仍需本人二次确认。"
+        : "一次性本人语音克隆已关闭。";
+      setVal("voice.timeoutMs", cfg.voice?.timeoutMs ?? 60000);
+      setVal("voice.maxInputBytes", cfg.voice?.maxInputBytes ?? 5242880);
+      setVal("voice.maxOutputBytes", cfg.voice?.maxOutputBytes ?? 10485760);
+      $("voiceLoadState").textContent = cfg.voice?.apiKeyEnvPresent
+        ? "语音 API 凭据已就绪（环境变量或当前 Hermes 配置；密钥不会回显）。"
+        : `尚未找到 ${cfg.voice?.apiKeyEnv || "MIMO_API_KEY"} 或当前 Hermes 配置中的小米凭据；语音合成暂不可用。`;
+      for (const field of document.querySelectorAll("#page-automation input, #page-automation select, #page-automation textarea, #page-automation button, #page-voice input, #page-voice select, #page-voice textarea, #page-voice button")) field.disabled = false;
+      $("newAutomationRuleBtn").disabled = automationRulesDraft.length >= 100;
 
       setVal("vision.enabled", cfg.vision?.enabled);
       setVal("vision.onlyWhenMentionedOrAsked", cfg.vision?.onlyWhenMentionedOrAsked);
@@ -1733,6 +2516,8 @@
       setVal("taskMode.shadowMode", cfg.taskMode?.shadowMode === true);
       setVal("taskMode.ownerUserIds", cfg.taskMode?.ownerUserIds || []);
       setVal("taskMode.allowedGroupIds", cfg.taskMode?.allowedGroupIds || []);
+      setVal("taskMode.webResearchEnabled", cfg.taskMode?.webResearchEnabled === false ? "false" : "true");
+      setVal("taskMode.allowedWebDomains", cfg.taskMode?.allowedWebDomains || []);
       setVal("taskMode.maxConcurrentGlobal", cfg.taskMode?.maxConcurrentGlobal || 2);
       setVal("taskMode.maxConcurrentPerConversation", cfg.taskMode?.maxConcurrentPerConversation || 1);
       setVal("taskMode.progressHeartbeatMs", cfg.taskMode?.progressHeartbeatMs || 180000);
@@ -1754,6 +2539,7 @@
       setVal("memory.integrity.maxEntriesPerUser", cfg.memory?.integrity?.maxEntriesPerUser || 180);
       setVal("memory.integrity.maxConflictsPerUser", cfg.memory?.integrity?.maxConflictsPerUser || 40);
       setVal("accounts.primary.qq", cfg.accounts?.primary?.qq);
+      setVal("accounts.primary.enabled", cfg.accounts?.primary?.enabled === false ? "false" : "true");
       setVal("accounts.primary.protocol", cfg.accounts?.primary?.protocol || "napcat");
       setVal("accounts.primary.onebotPath", cfg.accounts?.primary?.onebotPath || "/onebot");
       setVal("accounts.primary.napcatContainer", cfg.accounts?.primary?.napcatContainer || "napcat");
@@ -1802,12 +2588,32 @@
       }
       for (const task of tasks.slice(0, 80)) {
         const item = document.createElement("div");
-        item.className = "list-item";
+        item.className = "list-item task-item";
+        const header = document.createElement("div");
+        header.className = "row";
+        const id = document.createElement("span");
+        id.className = "pill";
+        id.textContent = task.id;
+        const status = document.createElement("span");
+        status.className = `pill ${task.status === "completed" ? "good" : task.status === "failed" ? "bad" : "warn"}`;
+        status.textContent = task.status;
+        header.append(id, status);
         const title = document.createElement("strong");
-        title.textContent = `${task.id} · ${task.status}`;
+        title.className = "task-title";
+        title.textContent = task.summary || task.objective || "未命名任务";
         const detail = document.createElement("span");
-        detail.textContent = `${task.summary || task.objective || "未命名任务"}\n复杂度 ${task.complexity || "standard"} · 思考 ${task.reasoningEffort || "medium"}\n会话 ${task.conversationId || "-"} · 发起人 ${task.senderName || task.userId || "-"} · ${task.updatedAt ? new Date(task.updatedAt).toLocaleString() : ""}`;
-        item.append(title, detail);
+        detail.className = "task-meta";
+        detail.textContent = `复杂度 ${task.complexity || "standard"} · 思考 ${task.reasoningEffort || "medium"} · 会话 ${task.conversationId || "-"} · 发起人 ${task.senderName || task.userId || "-"} · ${task.updatedAt ? new Date(task.updatedAt).toLocaleString() : ""}`;
+        item.append(header, title, detail);
+        if (task.objective && task.objective !== task.summary) {
+          const more = document.createElement("details");
+          const label = document.createElement("summary");
+          label.textContent = "查看完整任务要求";
+          const content = document.createElement("p");
+          content.textContent = task.objective;
+          more.append(label, content);
+          item.appendChild(more);
+        }
         const actions = document.createElement("div");
         actions.className = "row";
         if (["interrupted", "offered"].includes(task.status)) {
@@ -1908,18 +2714,73 @@
       const result = await api(`/api/tasks/${encodeURIComponent(taskId)}/artifacts`);
       const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
       if (!artifacts.length) return toast("这个任务没有可下载产物", "bad");
-      const item = Array.from($("taskList").children).find((node) => node.querySelector?.(`[data-task-id="${CSS.escape(taskId)}"]`));
-      const box = document.createElement("div");
-      box.className = "row";
+      activeTaskArtifacts = artifacts;
+      activeArtifactTaskId = taskId;
+      $("taskArtifactTitle").textContent = `任务产物 · ${taskId}`;
+      const list = $("taskArtifactList");
+      list.replaceChildren();
       for (const artifact of artifacts) {
+        const row = document.createElement("div");
+        row.className = "list-item";
+        const name = document.createElement("strong");
+        name.textContent = artifact.name;
+        const size = document.createElement("span");
+        size.className = "hint";
+        size.textContent = `${Math.ceil(Number(artifact.size || 0) / 1024)} KB`;
+        const actions = document.createElement("div");
+        actions.className = "row";
+        const preview = document.createElement("button");
+        preview.className = "secondary";
+        preview.textContent = "预览";
+        preview.dataset.artifactId = artifact.id;
         const link = document.createElement("a");
         link.href = `/api/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(artifact.id)}`;
-        link.textContent = `下载 ${artifact.name} (${Math.ceil(Number(artifact.size || 0) / 1024)}KB)`;
-        link.target = "_blank";
-        link.rel = "noopener";
-        box.appendChild(link);
+        link.textContent = "下载";
+        link.setAttribute("download", artifact.name);
+        link.className = "pill";
+        actions.append(preview, link);
+        row.append(name, size, actions);
+        list.appendChild(row);
       }
-      item?.appendChild(box);
+      $("taskArtifactPanel").classList.remove("hidden");
+      $("taskArtifactPanel").scrollIntoView({ block: "nearest", behavior: "smooth" });
+      await previewTaskArtifact(artifacts[0]);
+    }
+
+    async function previewTaskArtifact(artifact) {
+      const revision = ++artifactPreviewRevision;
+      const preview = $("taskArtifactPreview");
+      preview.replaceChildren();
+      const ext = String(artifact.name || "").split(".").pop().toLowerCase();
+      const url = `/api/tasks/${encodeURIComponent(activeArtifactTaskId)}/artifacts/${encodeURIComponent(artifact.id)}?preview=1`;
+      if (["png", "jpg", "jpeg", "gif", "webp"].includes(ext)) {
+        const image = document.createElement("img");
+        image.alt = artifact.name;
+        image.src = url;
+        image.addEventListener("error", () => { preview.textContent = "图片预览失败，请下载查看。"; });
+        preview.appendChild(image);
+      } else if (ext === "pdf") {
+        const frame = document.createElement("iframe");
+        frame.title = `${artifact.name} PDF 预览`;
+        frame.setAttribute("sandbox", "");
+        frame.src = url;
+        preview.appendChild(frame);
+      } else if (["txt", "md", "json"].includes(ext) && Number(artifact.size || 0) <= 1024 * 1024) {
+        preview.textContent = "正在读取文本...";
+        try {
+          const response = await fetch(url, { cache: "no-store" });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const content = await response.text();
+          if (revision !== artifactPreviewRevision) return;
+          const text = document.createElement("pre");
+          text.textContent = content;
+          preview.replaceChildren(text);
+        } catch (error) {
+          if (revision === artifactPreviewRevision) preview.textContent = `预览失败：${error.message}`;
+        }
+      } else {
+        preview.textContent = "此文件不支持在线预览，或文本超过 1 MB；请使用左侧下载按钮。";
+      }
     }
 
     async function rebuildMemoryIntegrity(apply = false) {
@@ -2062,7 +2923,7 @@
         noVncPort: cfg?.accounts?.primary?.noVncPort || null,
         vncPort: cfg?.accounts?.primary?.vncPort || null,
         snowlumaImage: cfg?.accounts?.primary?.snowlumaImage || "",
-        enabled: true
+        enabled: cfg?.accounts?.primary?.enabled !== false
       };
       const standbys = (cfg?.accounts?.standbys || []).map((item, index) => ({
         id: item.id || `standby-${index + 1}`,
@@ -2120,6 +2981,7 @@
       const list = $("accountCards");
       if (!list) return;
       const rows = accountRows();
+      updateAccountManagerStatuses();
       if (!rows.length) {
         list.innerHTML = `<div class="hint">还没有账号配置。</div>`;
         return;
@@ -2138,7 +3000,8 @@
         const routeState = acc.routeState || diagnosis.routeState || "";
         const routeStateLabel = acc.routeStateLabel || diagnosis.routeStateLabel || statusText;
         const routingAction = acc.routingAction || diagnosis.routingAction || "";
-        const roleText = acc.role === "primary" ? "主账号" : "备用账号";
+        const independent = (cfg?.accounts?.topology || "failover") !== "failover";
+        const roleText = acc.role === "primary" ? "主账号" : independent ? "独立账号" : "备用账号";
         const protocol = normalizedProtocol(acc.protocol);
         const protocolLabel = acc.protocolLabel || (protocol === "snowluma" ? "SnowLuma" : "NapCat");
         const protocolContainer = acc.protocolContainer || acc.napcatContainer || "";
@@ -2176,7 +3039,7 @@
           ? `<div class="hint">${esc(name)}：${esc(cap.reason || cap.text || "")}${cap.at ? ` · ${fmtAgo(cap.at)}` : ""}${cap.evidence ? ` · ${esc(cap.evidence)}` : ""}</div>`
           : "";
         card.innerHTML = `
-          <h3>${esc(roleText)} <span class="pill ${active ? "good" : "secondary"}">${active ? "当前接管" : esc(id)}</span></h3>
+          <h3>${esc(roleText)} <span class="pill ${active ? "good" : "secondary"}">${active ? independent ? "默认发言" : "当前接管" : esc(id)}</span></h3>
           <div class="row" style="margin-bottom:8px">
             ${statusPill(statusLevel !== "bad", routeStateLabel)}
             ${statusPill(connected, connected ? "OneBot 已连接" : "OneBot 未连接")}
@@ -3044,15 +3907,74 @@
     function showFatalError(message) {
       toast(message, "bad");
       $("saveState").textContent = "加载失败";
+      if (!cfg) {
+        $("automationCount").textContent = "加载失败";
+        $("automationRuleList").textContent = "自动化配置加载失败，请刷新页面重试。";
+        $("voiceLoadState").textContent = "语音配置加载失败，请刷新页面重试。";
+      }
       const log = $("recentLog") || $("opsResult");
       if (log) log.textContent = message;
     }
 
+    function buildAutomationDays() {
+      const host = $("automationDays");
+      for (const [day, name] of ["周日", "周一", "周二", "周三", "周四", "周五", "周六"].entries()) {
+        const label = document.createElement("label");
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.value = String(day);
+        checkbox.dataset.automationDay = "";
+        label.append(checkbox, document.createTextNode(name));
+        host.appendChild(label);
+      }
+    }
+
+    function buildVoicePresets() {
+      const host = $("voiceAllowedVoices");
+      const select = $("voice.tts.voice");
+      for (const id of VOICE_PRESET_IDS) {
+        const label = document.createElement("label");
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.value = id;
+        checkbox.dataset.voicePreset = "";
+        label.append(checkbox, document.createTextNode(id));
+        host.appendChild(label);
+        const option = document.createElement("option");
+        option.value = id;
+        option.textContent = id;
+        select.appendChild(option);
+      }
+    }
+
     function wireEvents() {
+      buildAutomationDays();
+      buildVoicePresets();
+      for (const field of document.querySelectorAll("#page-automation input, #page-automation select, #page-automation textarea, #page-automation button, #page-voice input, #page-voice select, #page-voice textarea, #page-voice button")) field.disabled = true;
       $("refreshBtn").addEventListener("click", () => refreshAll().catch((e) => showFatalError(e.message)));
       $("saveBtn").addEventListener("click", () => saveConfig("saveBtn").catch(() => {}));
       for (const id of ["saveModelBtn", "saveSearchBtn", "saveVisionBtn", "savePromptBtn", "saveArchiveBtn", "saveTaskBtn", "saveReviewerBtn", "saveIntegrityBtn"]) $(id).addEventListener("click", () => saveConfig(id).catch(() => {}));
       $("saveAccountsBtn").addEventListener("click", () => saveConfig("saveAccountsBtn", { focusAccounts: true }).catch(() => {}));
+      $("saveFeatureModesBtn").addEventListener("click", () => saveConfig("saveFeatureModesBtn").catch(() => {}));
+      $("saveInterBotBtn").addEventListener("click", () => saveConfig("saveInterBotBtn").catch(() => {}));
+      $("editAccountStylesBtn").addEventListener("click", () => switchPage("prompt"));
+      $("accounts.topology").addEventListener("change", updateAccountTopologyHint);
+      for (const [technicalId, managerId] of [["accounts.primary.enabled", "primary"], ["accounts.standbys.0.enabled", "standby-a"]]) {
+        $(technicalId).addEventListener("change", () => {
+          const control = document.querySelector(`[data-account-enabled-id="${managerId}"]`);
+          if (control) control.checked = getVal(technicalId) === "true";
+        });
+      }
+      for (const [promptId, managerId] of [["accounts.primary.styleProfileId", "primary"], ["accounts.standbys.0.styleProfileId", "standby-a"]]) {
+        $(promptId).addEventListener("change", () => {
+          const control = document.querySelector(`[data-account-style-id="${managerId}"]`);
+          if (control) control.value = getVal(promptId) || "";
+        });
+      }
+      $("saveStyleProfilesBtn").addEventListener("click", () => saveConfig("saveStyleProfilesBtn").catch(() => {}));
+      $("saveAutomationBtn").addEventListener("click", () => saveConfig("saveAutomationBtn").catch(() => {}));
+      $("saveVoiceBtn").addEventListener("click", () => saveConfig("saveVoiceBtn").catch(() => {}));
+      $("saveLearningModeBtn").addEventListener("click", () => saveConfig("saveLearningModeBtn").catch(() => {}));
       $("refreshAccountsBtn").addEventListener("click", () => refreshAll().catch((e) => showFatalError(e.message)));
       $("refreshAccountsTopBtn").addEventListener("click", () => refreshAll().catch((e) => showFatalError(e.message)));
       $("autoRefreshBtn").addEventListener("click", () => {
@@ -3063,10 +3985,61 @@
       for (const btn of document.querySelectorAll("#nav button")) btn.addEventListener("click", () => switchPage(btn.dataset.page));
       for (const btn of document.querySelectorAll("[data-jump]")) btn.addEventListener("click", () => switchPage(btn.dataset.jump));
       for (const el of document.querySelectorAll("input, textarea, select")) {
-        if (el.id === "memorySearch" || el.id === "memoryDetailSearch" || el.id === "archiveSearch" || el.id === "send.groupSelect" || el.id === "modelPreset" || el.id === "aiProfileSelect" || el.id.startsWith("backup") || el.id.startsWith("desktop")) continue;
+        if (el.id === "memorySearch" || el.id === "memoryDetailSearch" || el.id === "archiveSearch" || el.id === "send.groupSelect" || el.id === "modelPreset" || el.id === "aiProfileSelect" || el.id === "styleProfileSelect" || el.id.startsWith("backup") || el.id.startsWith("desktop")) continue;
         el.addEventListener("input", markDirty);
         el.addEventListener("change", markDirty);
       }
+      $("automationRule.triggerType").addEventListener("change", toggleAutomationTriggerFields);
+      $("voice.tts.model").addEventListener("change", () => {
+        setVal("voice.voiceDesign.enabled", getVal("voice.tts.model") === "mimo-v2.5-tts-voicedesign");
+      });
+      $("voice.voiceDesign.enabled").addEventListener("change", () => {
+        setVal("voice.tts.model", getVal("voice.voiceDesign.enabled") ? "mimo-v2.5-tts-voicedesign" : "mimo-v2.5-tts");
+      });
+      $("page-voice").addEventListener("input", () => $("voiceConfigError").classList.add("hidden"));
+      $("page-voice").addEventListener("change", () => $("voiceConfigError").classList.add("hidden"));
+      $("automationRuleList").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-automation-action]");
+        if (!button) return;
+        const index = Number(button.dataset.automationIndex);
+        if (!Number.isInteger(index) || !automationRulesDraft[index]) return;
+        if (!syncAutomationEditor()) return;
+        if (button.dataset.automationAction === "toggle") {
+          automationRulesDraft[index].enabled = automationRulesDraft[index].enabled === false;
+          markDirty();
+        }
+        selectedAutomationRuleIndex = index;
+        loadAutomationEditor();
+      });
+      $("newAutomationRuleBtn").addEventListener("click", () => {
+        if (!syncAutomationEditor()) return;
+        if (automationRulesDraft.length >= 100) { toast("最多保留 100 条自动化规则", "warn"); return; }
+        let number = 1;
+        while (automationRulesDraft.some((rule) => rule.id === `rule_${number}`)) number++;
+        automationRulesDraft.push({
+          id: `rule_${number}`, enabled: false, timezone: "Asia/Shanghai",
+          scope: { conversationIds: [] },
+          trigger: { type: "schedule", time: "09:00", daysOfWeek: [0, 1, 2, 3, 4, 5, 6], windowMinutes: 3 },
+          action: { kind: "message" }, prompt: ""
+        });
+        selectedAutomationRuleIndex = automationRulesDraft.length - 1;
+        loadAutomationEditor();
+        markDirty();
+      });
+      $("applyAutomationRuleBtn").addEventListener("click", () => {
+        if (!syncAutomationEditor()) return;
+        renderAutomationRules();
+        markDirty();
+        toast("规则已应用到列表；点击保存自动化配置后才会写入后端");
+      });
+      $("deleteAutomationRuleBtn").addEventListener("click", () => {
+        const rule = automationRulesDraft[selectedAutomationRuleIndex];
+        if (!rule || !confirm(`删除规则“${rule.id}”？保存配置后生效。`)) return;
+        automationRulesDraft.splice(selectedAutomationRuleIndex, 1);
+        selectedAutomationRuleIndex = Math.min(selectedAutomationRuleIndex, automationRulesDraft.length - 1);
+        loadAutomationEditor();
+        markDirty();
+      });
       syncSlider("trigger.activeProbability", "trigger.activeProbability.slider");
       syncSlider("proactive.probability", "proactive.probability.slider");
       $("testAiBtn").addEventListener("click", () => testAi("testAiBtn").catch((e) => toast(e.message, "bad")));
@@ -3128,6 +4101,22 @@
         markDirty();
         saveConfig("activateAiProfileBtn").catch(() => {});
       });
+      $("styleProfileSelect").addEventListener("change", (event) => {
+        syncSelectedStyleProfileFromForm();
+        selectedStyleProfileId = event.target.value;
+        loadStyleProfileIntoForm();
+        renderStyleProfiles();
+      });
+      $("newStyleProfileBtn").addEventListener("click", () => createStyleProfile());
+      $("duplicateStyleProfileBtn").addEventListener("click", () => createStyleProfile({ duplicate: true }));
+      $("deleteStyleProfileBtn").addEventListener("click", deleteSelectedStyleProfile);
+      $("activateStyleProfileBtn").addEventListener("click", () => {
+        syncSelectedStyleProfileFromForm();
+        if (!selectedStyleProfile()) return;
+        styleProfilesDraft.activeId = selectedStyleProfileId;
+        renderStyleProfiles();
+        markDirty();
+      });
       $("accounts.primary.protocol").addEventListener("change", syncProtocolFields);
       $("accounts.standbys.0.protocol").addEventListener("change", syncProtocolFields);
       $("memorySearch").addEventListener("input", renderGroups);
@@ -3153,6 +4142,17 @@
         const taskId = btn.dataset.taskId || "";
         if (btn.dataset.taskAction === "artifacts") showTaskArtifacts(taskId).catch((e) => toast(e.message, "bad"));
         else taskAction(taskId, btn.dataset.taskAction).catch((e) => toast(e.message, "bad"));
+      });
+      $("taskArtifactList").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-artifact-id]");
+        if (!button) return;
+        const artifact = activeTaskArtifacts.find((item) => item.id === button.dataset.artifactId);
+        if (artifact) previewTaskArtifact(artifact).catch((error) => toast(error.message, "bad"));
+      });
+      $("closeTaskArtifactsBtn").addEventListener("click", () => {
+        artifactPreviewRevision += 1;
+        $("taskArtifactPanel").classList.add("hidden");
+        $("taskArtifactPreview").replaceChildren();
       });
       $("showMainLog").addEventListener("click", () => { currentLogKind = "main"; renderLogs(); });
       $("showErrorLog").addEventListener("click", () => { currentLogKind = "error"; renderLogs(); });

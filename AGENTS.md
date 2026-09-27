@@ -119,7 +119,7 @@ The bridge has a few important subsystems in `src/bridge.js`:
 - Continuous-message debounce/merge before reply generation.
 - Memory extraction, merge, compaction, and bot-self memory.
 - Evidence-bound canonical memory keyed by QQ user ID, with conflict and supersession tracking.
-- Adaptive reply reviewer that checks high-risk drafts without exposing reasoning traces.
+- Legacy reviewer configuration and historical metrics remain readable, but runtime reply review is disabled to avoid an extra model call.
 - Persistent background task runtime under `data/tasks/`, separated from the normal reply queue.
 - Multi-account routing/failover for primary and standby protocol clients.
 - Local control API and admin page endpoints.
@@ -280,7 +280,7 @@ Login status should be obvious when login is invalid. When login is valid, avoid
 
 ## Multi-account and SnowLuma notes
 
-The primary account is normally NapCat. Standby A can be NapCat or SnowLuma depending on `config.json`.
+The current intended primary and standby protocol clients are SnowLuma; NapCat remains supported as a legacy option. Read the actual `config.json` before operating either account.
 
 Current design expectations:
 
@@ -304,6 +304,18 @@ ws://127.0.0.1:6301
 ```
 
 For SnowLuma login, prefer opening its WebUI. Do not assume its QR code file path is the same as NapCat.
+
+## Feature modes, automation, learning, and voice
+
+- `botFeatures.defaultMode` and `botFeatures.accountModes` select `chat`, `task`, or `all`; `styleProfiles` holds named prompt presets without deleting the legacy prompt.
+- `accounts.topology` defaults to `failover`. `collaboration` and `function_split` are experimental and require isolated/live opt-in verification. An explicitly addressed account should answer through its own OneBot socket.
+- `automation.rules` are explicitly scoped by conversation; no implicit all-groups scheduling. Quiet mode suppresses scheduled and command-triggered group sends. A scheduled occurrence is claimed immediately before send to limit duplicates.
+- `learningMode` is opt-in per group or via an authorized `/bot learn` command; it may ask a limited number of genuine clarification questions.
+- Voice is disabled by default. `src/voice-service.js` uses MiMo ASR/TTS with `MIMO_API_KEY` (environment variable name only in config), and `src/voice-onebot.js` handles OneBot record segments. Never save real API keys in examples or logs.
+- VoiceClone is a one-shot, self-voice-only flow: a speaker must quote their own voice, request it, and confirm within two minutes. Do not add third-party imitation without an explicit consent and revocation design. Input and output audio files are temporary.
+- Member VoiceDesign is an opt-in, one-shot flow with a fixed trait allowlist, per-user cooldown, and no persistent sample or voice profile. Do not replace it with unrestricted instructions to impersonate people.
+- Inter-bot follow-up is opt-in only in collaboration topology, has a low probability and long group cooldown, and may follow only a bot's voluntary discussion reply. Peer bot events remain ignored to prevent loops.
+- Task web-domain limits apply to bridge-managed research evidence. When a domain allowlist is set, browser/computer tools that cannot enforce it are refused. Do not describe the allowlist as a global OS-level network firewall.
 
 ## Reply behavior expectations
 

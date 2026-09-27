@@ -17,6 +17,18 @@ import {
 import { publicTask, TaskRuntime } from "./task-runtime.js";
 import { ensureRequestedTaskArtifacts, taskRequestsPdf } from "./task-artifacts.js";
 import { ReplyCoordinator } from "./reply-coordinator.js";
+import { accountCanChat, accountCanOfferTask, accountTopology, botModeForAccount, botSelfSlot, systemPromptForAccount } from "./bot-capabilities.js";
+import { automationOccurrenceKey, dueAutomationRules, matchAutomationCommand, validateAutomationRules } from "./automation-rules.js";
+import { synthesizeSpeechFile, transcribeAudioFile } from "./voice-service.js";
+import { voiceApiEnvironment, voiceApiKeyAvailable } from "./voice-credentials.js";
+import { buildRecordMessage, extractRecordRefs, isPublicHttpUrl } from "./voice-onebot.js";
+import { OneShotVoiceConsent } from "./voice-consent.js";
+import { parseMemberVoiceDesign } from "./voice-design.js";
+import { detectVoiceReplyIntent, shouldJudgeVoiceReplyIntent } from "./voice-intent.js";
+import { normalizeVoiceReplyMode, voiceReplyMode, shouldSendVoiceReply } from "./voice-mode.js";
+import { audioFormat, decodeOneBotAudioBase64, trustedQqAudioUrl } from "./voice-audio.js";
+import { sanitizeChatReply } from "./reply-safety.js";
+import { normalizeTaskWebDomains, taskWebQuery, taskWebSourceAllowed } from "./task-web-policy.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1084,7 +1096,7 @@ async function judgeVisionWithAI({ imageRefs, text, mentioned, keyword, isPrivat
 }
 
 async function resolveQuotedMessages({ messages, message, config, getMessage, botIds = [] }) {
-  if (typeof getMessage !== "function") return { contexts: [], refs: [], texts: [], ids: [] };
+  if (typeof getMessage !== "function") return { contexts: [], refs: [], texts: [], ids: [], audioMessages: [] };
   const sourceMessages = messages?.length ? messages : [message];
   const maxQuoted = Math.max(0, Math.min(Number(config.history?.maxQuotedMessages || config.vision?.maxQuotedMessages || 4), 8));
   const ids = Array.from(new Set(sourceMessages.flatMap((item) => extractReplyMessageIds(item)))).slice(0, maxQuoted);
@@ -1092,12 +1104,18 @@ async function resolveQuotedMessages({ messages, message, config, getMessage, bo
   const contexts = [];
   const refs = [];
   const texts = [];
+  const audioMessages = [];
   for (const id of ids) {
     try {
       const data = await getMessage(id);
       const payload = data?.message || data?.raw_message || data?.message_body || "";
-      const quotedText = oneBotMessageToText(payload);
       const senderId = asStringId(data?.sender?.user_id || data?.sender?.userId || data?.user_id || data?.userId || data?.sender_id);
+      audioMessages.push({
+        message_id: asStringId(data?.message_id || id),
+        message: payload,
+        senderId
+      });
+      const quotedText = oneBotMessageToText(payload);
       const senderName = data?.sender?.card || data?.sender?.nickname || data?.sender?.name || senderId || "未知发送者";
       const context = {
         messageId: asStringId(data?.message_id || id),
@@ -1122,7 +1140,7 @@ async function resolveQuotedMessages({ messages, message, config, getMessage, bo
       warn(`failed to resolve quoted message id=${id}: ${err.message}`);
     }
   }
-  return { contexts, refs, texts, ids };
+  return { contexts, refs, texts, ids, audioMessages };
 }
 
 async function collectQuotedImageRefs({ message, config, getMessage }) {
@@ -1257,7 +1275,7 @@ function ensureUserMemory(gm, senderId, senderName = "") {
 
 function ensureBotSelfMemory(gm, config = {}) {
   const displayName = botDisplayName(config);
-  const bot = (gm.botSelf ||= {});
+  const bot = botSelfSlot(gm, config);
   bot.names ||= [displayName, "小跟班", "Hermes"];
   bot.identity ||= [
     `我是 ${displayName}，通过 Hermes 接入 QQ 的 AI 群友/小跟班。`,
@@ -1301,6 +1319,7 @@ function updateBotSelfMemoryFromMessage(memory, groupId, text, config, meta = {}
   const item = {
     text: message,
     at: now(),
+    accountId: config.__activeAccountId || config.accounts?.primary?.id || "primary",
     source: meta.source || "bot",
     replyToSender: meta.replyToSender || ""
   };
@@ -1334,7 +1353,7 @@ function normalizeMemorySchema(memory, config = {}) {
       botStances: gm.botSelf?.stances
     });
     groupMemory(memory, groupId);
-    ensureBotSelfMemory(gm, config);
+    ensureBotSelfMemory(gm, { ...config, __activeAccountId: config.accounts?.primary?.id || "primary", __activeAccountDisplayName: config.accounts?.primary?.displayName || config.persona?.displayName });
     for (const [userId, user] of Object.entries(gm.users || {})) {
       ensureUserMemory(gm, userId, user.lastName || user.names?.at(-1) || "");
     }
@@ -1419,7 +1438,7 @@ function addPendingMemoryMessage(memory, event, senderName, text, config) {
 }
 
 function memoryExtractionPrompt({ config, groupId, gm, messages }) {
-  const botSelf = ensureBotSelfMemory(gm, config);
+  const botSelf = ensureBotSelfMemory(gm, { ...config, __activeAccountId: config.accounts?.primary?.id || "primary", __activeAccountDisplayName: config.accounts?.primary?.displayName || config.persona?.displayName });
   const sampleUsers = Object.entries(gm.users || {})
     .slice(-12)
     .map(([id, user]) => `${user.lastName || id}(${id}) 外号:${(user.aliases || user.names || []).slice(-4).join("、") || "无"} 性格:${[...(user.personality || []), ...(user.style || [])].slice(-4).join("；") || "无"} 强梗:${[...(user.coreMemes || []), ...(user.memes || [])].slice(-4).join("；") || "无"} 雷点:${(user.boundaries || []).slice(-3).join("；") || "无"}`)
@@ -1452,7 +1471,7 @@ ${recentMessages || "（暂无）"}
 只记录“之后聊天还会用到”的内容；明显一次性玩笑可以记为低置信梗，不要当成稳定事实。
 正式任务的目标、临时参数、授权路径和一次性交付要求不属于长期人物记忆，不要写入 user_updates、group_facts 或 canonical_entries；只有用户明确表达的长期偏好或稳定事实才可记录。
 外号/称呼要单独写 aliases；强相关梗写 core_memes；普通梗写 memes；性格画像写 personality；雷点写 boundaries；相处建议写 interaction_tips。
-如果群友评价 bot 的性格、身份、能力、口癖、说过的话，写入 bot_self_update。
+${accountTopology(config) === "failover" ? "如果群友评价 bot 的性格、身份、能力、口癖、说过的话，写入 bot_self_update。" : "当前是独立多 bot 模式：这批群消息可能来自不同账号，不要填写 bot_self_update，避免串用身份。"}
 如果像玩笑/反话/一次性口嗨，把 confidence 降到 0.35 以下。
 
 JSON 结构：
@@ -1556,7 +1575,9 @@ function mergeMemoryPatch(memory, groupId, patch, config, context = {}) {
   }
 
   const botPatch = patch.bot_self_update || patch.botSelfUpdate || patch.self_update;
-  if (botPatch && typeof botPatch === "object") {
+  // A mixed group batch cannot safely attribute self-feedback to an
+  // independent bot. Preserve existing primary self-memory in failover mode.
+  if (botPatch && typeof botPatch === "object" && accountTopology(config) === "failover") {
     const bot = ensureBotSelfMemory(gm, config);
     const botConfidence = Number(botPatch.confidence ?? confidenceDefault);
     for (const item of asArray(botPatch.identity)) changed = dedupePush(bot.identity, redactSensitive(item, config), Number(config.memory?.botSelf?.maxIdentityItems || 10)) || changed;
@@ -2166,7 +2187,15 @@ function recordBotMessage({ historyByGroup, lastBotMessageByGroup, groupId, text
   while (history.length > Number(config.history?.rawMaxMessages || config.history?.maxMessages || 120)) history.shift();
   historyByGroup.set(asStringId(groupId), history);
   lastBotMessageByGroup.set(asStringId(groupId), item);
+  const botAccountId = config.__activeAccountId || config.accounts?.primary?.id || "primary";
+  item.accountId = botAccountId;
+  lastBotMessageByGroup.set(`${asStringId(groupId)}:account:${botAccountId}`, item);
   if (updateBotSelfMemoryFromMessage(memory, groupId, message, config, meta)) saveMemory(memory);
+}
+
+function lastBotMessageForAccount(lastBotMessageByGroup, groupId, accountId, config) {
+  if (accountTopology(config) === "failover") return lastBotMessageByGroup.get(asStringId(groupId));
+  return lastBotMessageByGroup.get(`${asStringId(groupId)}:account:${accountId}`);
 }
 
 function lastNonBotMessagesSince(history, sinceAt) {
@@ -3371,21 +3400,27 @@ function webSearchPreReply(decision, config) {
   return trimForGroup(template.replace(/\{query\}/g, decision?.query || ""), config);
 }
 
-function buildPrompt({ config, history, current, mode, memoryText = "", contextBundle = null, webSearchContext = "", archiveContext = "" }) {
-  const system = config.prompt?.system || "";
+function buildPrompt({ config, history, current, mode, memoryText = "", contextBundle = null, webSearchContext = "", archiveContext = "", learningPrompt = "" }) {
+  const system = systemPromptForAccount(config, config.__activeAccountId || "primary");
   const displayName = botDisplayName(config);
   const accountCfg = accountFailoverConfig(config);
+  const independentBots = accountTopology(config) !== "failover";
   const accountMappings = accountCfg.all
-    .map((account) => `${account.role === "primary" ? "主账号" : "备用账号"} ${account.id}：${account.displayName || account.id}${account.qq ? `（QQ ${account.qq}）` : ""}`)
+    .map((account) => `${account.role === "primary" ? "主账号" : independentBots ? "独立账号" : "备用账号"} ${account.id}：${account.displayName || account.id}${account.qq ? `（QQ ${account.qq}）` : ""}`)
     .join("\n") || "（未配置）";
   const accountIdentity = [
     `当前发言账号：${displayName}`,
     `账号ID：${config.__activeAccountId || "primary"}`,
     `账号角色：${config.__activeAccountRole || "primary"}`,
     `账号映射：\n${accountMappings}`,
-    "重要：回复时要知道自己当前就是这个账号；不要把主账号和备用账号混为一谈。"
+    independentBots
+      ? "重要：你是当前账号对应的独立 bot。群友和群聊事实可共享，但不要把另一个 bot 的身份、说过的话或人格当成自己。"
+      : "重要：主备是同一个 bot 的不同登录账号；回复时要知道当前发言账号，不要混淆 QQ 身份。"
   ].join("\n");
   const recent = contextBundle?.recentMessages || compactHistory(history.slice(-Math.max(1, config.history?.promptRecentMessages ?? config.history?.maxMessages ?? 40)));
+  const voiceCapability = config.voice?.enabled === true && config.voice?.tts?.enabled !== false
+    ? "已配置可发送 QQ 语音条；发送是否成功只能以桥接回执为准，不要自行声称声卡坏了或语音发不出。"
+    : "当前未启用语音发送；不要臆测设备故障。";
   const socialDecision = current?.socialDecision;
   const socialDecisionText = socialDecision
     ? `意图:${socialDecision.intent}；语气:${socialDecision.tone}；长度:${socialDecision.length}；目标:${asArray(socialDecision.targetUserIds).join("、") || asStringId(current?.user_id)}；理由:${socialDecision.reason || "无"}`
@@ -3413,6 +3448,9 @@ ${recent || "（暂无）"}
 【当前账号身份】
 ${accountIdentity}
 
+【语音能力】
+${voiceCapability}
+
 【这个私聊里的相关记忆】
 ${memoryText || contextBundle?.selectedMemory || "（暂无）"}
 
@@ -3432,7 +3470,7 @@ ${currentTimeContext}
 ${formatReplyContextsForPrompt(current?.replyContexts) || "（无明确引用）"}
 
 【回复要求】
-把这条消息当作私聊指令/请求来处理。能按要求做的就明确响应；不能做的说明限制和下一步。不要把它当群聊接梗，不要输出 __SKIP__。不要重复最近 bot 回复的固定开头或模板句，直接承接当前语境。只输出要发给对方的内容。`;
+把这条消息当作私聊指令/请求来处理。能按要求做的就明确响应；不能做的说明限制和下一步。不要把它当群聊接梗，不要输出 __SKIP__。语音请求由桥接的语音通道处理；不要自行调用语音工具，不要输出 MEDIA: 本机文件路径，也不要臆测声卡或合成状态。[record] 或 [语音] 只是未转写的占位符，绝不代表你听到了内容；没有明确的语音转写文本，就不要描述声音、语音内容或声称听到杂音。不要重复最近 bot 回复的固定开头或模板句，直接承接当前语境。只输出要发给对方的内容。`;
   }
   const instruction = {
     proactive: "你正在主动插话。先判断有没有必要说；如果没有很好的接话点，只输出 __SKIP__。如果要说，只接最近上下文，不要把很久以前的话硬拽回来，不超过2句。",
@@ -3450,6 +3488,9 @@ ${formatReplyContextsForPrompt(current?.replyContexts) || "（无明确引用）
 
 【当前账号身份】
 ${accountIdentity}
+
+【语音能力】
+${voiceCapability}
 
 【更早群聊摘要】
 ${contextBundle?.rollingSummary || "（暂无）"}
@@ -3492,10 +3533,33 @@ ${socialDecisionText}
 
 【要求】
 ${instruction}
+${learningPrompt ? `【学习模式】\n${learningPrompt}\n` : ""}
 回答时优先遵守【bot 自我记忆】：知道自己是谁、自己的性格、能力边界、最近说过什么；如果群友问“你是谁/你刚才说了什么/你能不能看图”，要基于这里和最近原文回答。
 历史和引用片段都带有原消息时间。必须区分当前消息、刚才的连续消息和很久以前检索出的内容；不能把旧事件说成刚发生，也不能把记忆中的不同 QQ 号混为同一人。
 你当前对外昵称是“${displayName}”。如果你是备用账号，不要自称主账号；如果被问为什么换号/是谁，可以简短说明这是备用号在接管。
-像真实群友一样短句输出。根据【社交判断】控制语气和长度，但不要在回复中提到这些内部标签。不要重复最近 bot 回复的固定开头、口头禅或模板句，直接承接当前语境。不会的事就承认不会；不要承诺转账、充值、@群主、管理群或发图。可以基于【最近群聊原文】里的图片识别结果聊图片；如果没有图片识别结果，就不要假装看到了图片细节。不要乱报底层模型；被问模型时说“我是 Hermes 接进 QQ 的 AI 群友，具体底层模型我不乱报”。最多 1 个 emoji。只输出要发到群里的内容，不要解释。`;
+像真实群友一样短句输出。根据【社交判断】控制语气和长度，但不要在回复中提到这些内部标签。不要重复最近 bot 回复的固定开头、口头禅或模板句，直接承接当前语境。不会的事就承认不会；不要承诺未验证的转账、充值、管理群或媒体能力。语音请求由桥接的语音通道处理；不要自行调用语音工具，不要输出 MEDIA: 本机文件路径，也不要臆测声卡或合成状态。[record] 或 [语音] 只是未转写的占位符，绝不代表你听到了内容；没有明确的语音转写文本，就不要描述声音、语音内容或声称听到杂音。可以基于【最近群聊原文】里的图片识别结果聊图片；如果没有图片识别结果，就不要假装看到了图片细节。不要乱报底层模型；被问模型时说“我是 Hermes 接进 QQ 的 AI 群友，具体底层模型我不乱报”。最多 1 个 emoji。只输出要发到群里的内容，不要解释。`;
+}
+
+async function judgeVoiceReplyIntentWithAI(text, { history = [], config }) {
+  const voice = config.voice || {};
+  if (voice.aiJudge?.enabled === false || voice.enabled !== true || voice.tts?.enabled === false) return null;
+  const timeoutMs = Math.max(2000, Math.min(12000, Number(voice.aiJudge?.timeoutMs || 7000)));
+  const judgeConfig = {
+    ...config,
+    ai: { ...config.ai, reasoningEffort: "none", timeoutMs }
+  };
+  const recent = history.slice(-4).map(shortMessageForPrompt).join("\n");
+  const prompt = `你是 QQ 机器人语音发送意图裁判。只判断用户是否真的要求机器人这次发送可播放的 QQ 语音条，而不是讨论语音功能、询问能否发语音、转写别人语音或普通聊天。\n明确要求用声音说、念、讲或“说给我听”时可以判 true；拿不准判 false。不要执行工具，不要写回复。只输出 JSON：{"should_send_voice":false,"confidence":0.0}。\n最近消息：\n${recent || "（无）"}\n当前消息：${JSON.stringify(text)}`;
+  try {
+    const result = extractJsonObject(await callHermes(prompt, judgeConfig));
+    if (result?.should_send_voice !== true) return null;
+    const confidence = Number(result.confidence);
+    if (!Number.isFinite(confidence) || confidence < Number(voice.aiJudge?.minConfidence ?? 0.7)) return null;
+    return { kind: "answer", text: clampText(text, 350) };
+  } catch (error) {
+    warn(`voice intent judge unavailable (${error?.name || "error"})`);
+    return null;
+  }
 }
 
 function reviewerConfig(config = {}) {
@@ -4314,6 +4378,7 @@ function hydrateRuntimeContextFromArchives({ config, historyByGroup, lastBotMess
           receivedAt: record.receivedAt || "",
           processedAt: record.processedAt || "",
           isBot: record.type === "bot_reply",
+          accountId: record.accountId || configuredAccountDefinitions(config).find((account) => account.qq && account.qq === asStringId(record.senderId))?.id || "primary",
           source: record.source || "archive-hydrated",
           messageId: asStringId(record.messageId),
           replyContexts,
@@ -4327,6 +4392,9 @@ function hydrateRuntimeContextFromArchives({ config, historyByGroup, lastBotMess
       historyByGroup.set(groupId, ordered);
       const lastBot = [...ordered].reverse().find((item) => item.isBot);
       if (lastBot) lastBotMessageByGroup.set(groupId, lastBot);
+      for (const bot of ordered.filter((item) => item.isBot)) {
+        lastBotMessageByGroup.set(`${groupId}:account:${bot.accountId}`, bot);
+      }
       conversations += 1;
       messages += ordered.length;
     }
@@ -5232,7 +5300,7 @@ async function resetNapcatLoginStateForAccount(account, currentConfig) {
 
 function trimForGroup(text, config, maxLength = null) {
   const max = Number(maxLength || config.send?.maxLength || 420);
-  let cleaned = String(text || "")
+  let cleaned = sanitizeChatReply(text)
     .replace(/^["“]|["”]$/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
@@ -5528,6 +5596,7 @@ function configuredAccountDefinitions(config) {
     qq: asStringId(primaryRaw.qq || primaryRaw.uin || ""),
     role: "primary",
     displayName: stringValue(primaryRaw.displayName || primaryRaw.name || config.persona?.displayName || "Hermes小跟班").trim() || "Hermes小跟班",
+    styleProfileId: stringValue(primaryRaw.styleProfileId || "").trim(),
     protocol: accountProtocol(primaryRaw),
     onebotPath: String(primaryRaw.onebotPath || config.listen?.path || "/onebot"),
     napcatContainer: String(primaryRaw.napcatContainer || "napcat"),
@@ -5547,6 +5616,7 @@ function configuredAccountDefinitions(config) {
       qq: asStringId(item.qq || item.uin || ""),
       role: "standby",
       displayName: stringValue(item.displayName || item.name || `Hermes小跟班${index + 2}`).trim() || `Hermes小跟班${index + 2}`,
+      styleProfileId: stringValue(item.styleProfileId || "").trim(),
       protocol: accountProtocol(item),
       onebotPath: String(item.onebotPath || primary.onebotPath),
       napcatContainer: String(item.napcatContainer || `napcat-standby-${index + 1}`),
@@ -5570,7 +5640,7 @@ function accountFailoverConfig(config) {
   const standbys = allConfigured.filter((item) => item.role === "standby" && item.enabled !== false);
   const failover = accounts.failover || {};
   return {
-    enabled: failover.enabled !== false && standbys.length > 0,
+    enabled: accountTopology(config) === "failover" && failover.enabled !== false && standbys.length > 0,
     primary,
     standbys,
     all: [primary, ...standbys],
@@ -6138,10 +6208,10 @@ function repairInvalidQuietUntil(memory, groupId) {
   return true;
 }
 
-function markDailySent(memory, groupId, key, dateKey) {
+function markDailySent(memory, groupId, key, dateKey, status = "sent") {
   const gm = groupMemory(memory, groupId);
   gm.dailySent[dateKey] ||= {};
-  gm.dailySent[dateKey][key] = true;
+  gm.dailySent[dateKey][key] = { status, at: now() };
 }
 
 function wasDailySent(memory, groupId, key, dateKey) {
@@ -6176,20 +6246,20 @@ function isWithinScheduleWindow(timeText, windowMinutes, date = new Date()) {
   return diff >= 0 && diff < Math.max(1, Number(windowMinutes || 3));
 }
 
-async function handleBotCommand({ ws, event, text, config, memory }) {
+async function handleBotCommand({ ws, event, text, config, memory, onVoiceCommand }) {
   if (config.commands?.enabled === false) return false;
-  const trimmed = String(text || "").trim();
+  const trimmed = String(text || "").trim().replace(/^(?:\[引用消息\]\s*)+/u, "").trim();
   if (!trimmed.startsWith("/bot")) return false;
-  if (event.message_type !== "group") {
+  const args = trimmed.split(/\s+/).slice(1);
+  const command = String(args[0] || "help").toLowerCase();
+  const isPrivate = event.message_type === "private";
+  if (isPrivate && (!["voice", "语音"].includes(command) || !isPrivateOwner(event.user_id, config))) {
     sendGroupMessage(ws, event, "私聊里先不处理 /bot 管理命令，你直接跟我说就行。", config, { reply: true });
     return true;
   }
-
-  const groupId = asStringId(event.group_id);
-  const args = trimmed.split(/\s+/).slice(1);
-  const command = String(args[0] || "help").toLowerCase();
-  const adminOnly = ["quiet", "mute", "安静", "shutup", "resume", "unquiet", "unmute", "醒醒", "remember", "forget", "archive", "存档", "mode", "模式", "style", "风格", "lively", "活泼", "活跃", "normal", "正常", "restrained", "克制"];
-  const admin = isGroupAdmin(event, config);
+  const groupId = isPrivate ? `private:${asStringId(event.user_id)}` : asStringId(event.group_id);
+  const adminOnly = ["quiet", "mute", "安静", "shutup", "resume", "unquiet", "unmute", "醒醒", "remember", "forget", "archive", "存档", "learn", "学习", "mode", "模式", "style", "风格", "lively", "活泼", "活跃", "normal", "正常", "restrained", "克制"];
+  const admin = isPrivate ? isPrivateOwner(event.user_id, config) : isGroupAdmin(event, config);
   const resumeCommands = ["resume", "unquiet", "unmute", "醒醒"];
   if (isQuiet(memory, groupId) && (!resumeCommands.includes(command) || !admin)) {
     log(`command ignored while quiet group=${groupId} command=${command || "help"} admin=${admin}`);
@@ -6201,6 +6271,50 @@ async function handleBotCommand({ ws, event, text, config, memory }) {
   }
 
   const gm = groupMemory(memory, groupId);
+  if (command === "voice" || command === "语音") {
+    const sub = String(args[1] || "status").toLowerCase();
+    const requestedMode = normalizeVoiceReplyMode(sub === "mode" ? args[2] : sub);
+    if (requestedMode) {
+      if (!admin) {
+        sendGroupMessage(ws, event, "语音模式要群主或管理员来切换。", config, { reply: true });
+        return true;
+      }
+      if (requestedMode !== "off" && (config.voice?.enabled !== true || config.voice?.tts?.enabled === false)) {
+        sendGroupMessage(ws, event, "语音总开关或 TTS 还没开启，请先在控制台配置。", config, { reply: true });
+        return true;
+      }
+      gm.settings.voiceReplyMode = requestedMode;
+      saveMemory(memory);
+      sendGroupMessage(ws, event, `本会话语音模式已设为${{ off: "关闭", mixed: "混合", force: "强制" }[requestedMode]}。${requestedMode === "off" ? "仍可按 ASR 设置识别收到的语音。" : ""}`, config, { reply: true });
+      return true;
+    }
+    if (["status", "状态", "mode"].includes(sub)) {
+      const mode = voiceReplyMode(gm.settings, config.voice);
+      const preset = gm.settings.voicePreset || config.voice?.tts?.voice || "mimo_default";
+      sendGroupMessage(ws, event, `本会话语音模式：${{ off: "关闭", mixed: "混合", force: "强制" }[mode]}；音色：${preset}。\n关闭=只发文字；混合=按请求或对收到的语音酌情回语音；强制=聊天回复优先发语音。\n用法：/bot voice off|mixed|force；/bot voice preset list|音色ID；/bot voice synth 要说的话；/bot voice design 年轻 清亮 | 要说的话；/bot voice clone self 要说的话（须引用本人语音并确认）。`, config, { reply: true });
+      return true;
+    }
+    if (!onVoiceCommand) return true;
+    const alias = { synth: "say", 合成: "say", 音色: "preset", 设计: "design", 模仿: "clone", 克隆: "clone" }[sub] || sub;
+    if (!["say", "preset", "design", "clone", "test"].includes(alias)) {
+      sendGroupMessage(ws, event, "用法：/bot voice status|off|mixed|force|preset|synth|design|clone", config, { reply: true });
+      return true;
+    }
+    await onVoiceCommand(`/voice ${alias}${args.length > 2 ? ` ${args.slice(2).join(" ")}` : ""}`);
+    return true;
+  }
+  if (command === "learn" || command === "学习") {
+    const sub = String(args[1] || "status").toLowerCase();
+    if (["on", "开启"].includes(sub)) gm.settings.learningMode = true;
+    else if (["off", "关闭"].includes(sub)) gm.settings.learningMode = false;
+    else if (!["status", "状态"].includes(sub)) {
+      sendGroupMessage(ws, event, "用法：/bot learn on | off | status", config, { reply: true });
+      return true;
+    }
+    saveMemory(memory);
+    sendGroupMessage(ws, event, `本群学习模式：${gm.settings.learningMode === true ? "开启" : "关闭"}。我只会在真的不懂群内称呼/梗时偶尔问一句。`, config, { reply: true });
+    return true;
+  }
   if (command === "archive" || command === "存档") {
     const sub = String(args[1] || "status").toLowerCase();
     const meta = archiveConversationMetaFromEvent(event, config);
@@ -6327,6 +6441,11 @@ async function handleBotCommand({ ws, event, text, config, memory }) {
       "/bot resume  恢复说话",
       "/bot status  看状态",
       "/bot mode lively|normal|restrained  切换活跃/正常/克制",
+      "/bot voice off|mixed|force  切换本群语音模式",
+      "/bot voice preset list|音色ID  查看或切换音色",
+      "/bot voice synth <文字>  合成语音",
+      "/bot voice design 特征 | 文字  临时设计原创音色",
+      "/bot voice clone self <文字>  引用本人语音后确认克隆",
       "/bot remember <内容>  记住群梗/偏好",
       "/bot memory  查看你在本群的记忆",
       "/bot memory @某人  查看指定群友记忆",
@@ -6683,12 +6802,16 @@ function taskResearchQueries(task) {
 async function buildTaskResearchContext(task, config) {
   const requestedWeb = asArray(task?.requestedTools).includes("web");
   if (!requestedWeb) return { text: "", queries: [], sources: [], errors: [] };
+  if (config.taskMode?.webResearchEnabled === false) {
+    return { text: "任务联网资料已在管理页关闭。", queries: [], sources: [], errors: ["task web research disabled"] };
+  }
   if (config.webSearch?.enabled === false) {
     return { text: "联网搜索已关闭；不能把实时开放时间、票价或政策写成确定事实。", queries: [], sources: [], errors: ["web search disabled"] };
   }
   const queries = taskResearchQueries(task);
   if (!queries.length) return { text: "", queries: [], sources: [], errors: [] };
-  const settled = await Promise.allSettled(queries.map((query) => webSearch(query, config)));
+  const allowedDomains = normalizeTaskWebDomains(config.taskMode?.allowedWebDomains || []);
+  const settled = await Promise.allSettled(queries.map((query) => webSearch(taskWebQuery(query, allowedDomains), config)));
   const sources = [];
   const errors = [];
   const sections = [];
@@ -6705,6 +6828,7 @@ async function buildTaskResearchContext(task, config) {
     const genericTerms = new Set(["旅游", "旅游景点", "景点", "开放时间", "门票", "停车", "攻略", "路线", "驾车时间", "自驾"]);
     const specificTerms = searchCoreTerms(query).filter((term) => !genericTerms.has(term));
     const usableResults = asArray(search.results).filter((item) => {
+      if (!taskWebSourceAllowed(item.link, allowedDomains)) return false;
       if (!specificTerms.length) return true;
       const text = `${item.title || ""} ${item.snippet || ""} ${item.link || ""}`.toLowerCase();
       return specificTerms.some((term) => text.includes(String(term).toLowerCase()));
@@ -6732,6 +6856,10 @@ async function buildTaskResearchContext(task, config) {
 
 async function runHermesAgentTask(task, { signal, outputsDir, config: runtimeConfig }, config) {
   const grants = asArray(task.grants);
+  const restrictedWebDomains = normalizeTaskWebDomains(config.taskMode?.allowedWebDomains || []);
+  if (restrictedWebDomains.length && (task.requiresComputer || task.requiresAuthenticatedBrowser || grants.some((grant) => ["computer", "authenticated_browser"].includes(grant.type)))) {
+    return { ok: false, waitingPermission: true, summary: "当前任务设置了网站域名白名单，不能使用无法按域名约束的电脑或登录态浏览器工具。请改用受控搜索，或由主人调整任务配置后再恢复。" };
+  }
   if (task.requiresComputer && !grants.some((grant) => grant.type === "computer")) {
     return { ok: false, waitingPermission: true, summary: "需要主人使用 /task grant computer <用途> 授权电脑控制。" };
   }
@@ -6754,13 +6882,22 @@ async function runHermesAgentTask(task, { signal, outputsDir, config: runtimeCon
   // granted interactive tools in the Hermes process.
   const allowedToolsets = new Set();
   if (task.permissionTier === "owner") {
-    if (task.requestedTools.includes("browser") && !task.requiresAuthenticatedBrowser) allowedToolsets.add("browser");
+    // A Hermes browser cannot be constrained to hostnames by the current sandbox.
+    // Disable it whenever a domain allowlist is configured; bridge search enforces it.
+    if (task.requestedTools.includes("browser") && !task.requiresAuthenticatedBrowser
+      && !restrictedWebDomains.length) allowedToolsets.add("browser");
     if (grants.some((grant) => grant.type === "computer")) allowedToolsets.add("computer_use");
   }
   const fileContext = taskGrantedFileContext(task, config);
+  const taskAccount = accountById(config, task.accountId) || accountById(config, config.accounts?.primary?.id || "primary");
+  const taskStyle = accountTopology(config) !== "failover" && taskAccount?.styleProfileId
+    ? systemPromptForAccount(config, taskAccount.id).trim().slice(0, 3000)
+    : "";
   const prompt = `你正在执行一个由 QQ Bot 正式确认的后台任务。保持 Hermes Agent 的规划和工具能力，但严格遵守权限。
 
 任务号：${task.id}
+当前 bot：${taskAccount?.displayName || "Hermes QQ Bot"}（${taskAccount?.id || "primary"}）
+${taskStyle ? `表达风格：${taskStyle}\n此风格仅影响自然语言措辞，不改变任务权限、工具限制或结果真实性。` : ""}
 目标：${task.objective}
 任务复杂度：${task.complexity || "standard"}；思考强度：${task.reasoningEffort || "medium"}
 期望产物：${asArray(task.expectedArtifacts).join("、") || "按任务需要生成"}
@@ -6892,7 +7029,7 @@ async function runHourlyChat({ ws, config }) {
   }
 }
 
-async function runDailyMessages({ ws, config, memory, historyByGroup, lastEventByGroup, lastBotMessageByGroup }) {
+async function runDailyMessages({ ws, config, memory, historyByGroup, lastEventByGroup, lastBotMessageByGroup, activeSocket, sendMessage }) {
   const daily = config.dailyMessages;
   if (daily?.enabled === false) return;
   if (ws.readyState !== 1) return;
@@ -6913,6 +7050,7 @@ async function runDailyMessages({ ws, config, memory, historyByGroup, lastEventB
 
     for (const groupIdRaw of groups) {
       const groupId = asStringId(groupIdRaw);
+      if (activeSocket() !== ws || ws.readyState !== 1) return;
       if (!groupId || wasDailySent(memory, groupId, key, dateKey) || isQuiet(memory, groupId)) continue;
 
       const history = historyByGroup.get(groupId) || [];
@@ -6940,7 +7078,20 @@ async function runDailyMessages({ ws, config, memory, historyByGroup, lastEventB
         });
         const response = trimForGroup(await callHermes(prompt, config), config);
         if (!response) continue;
-        sendGroupMessageToGroup(ws, groupId, response, config);
+        if (activeSocket() !== ws || ws.readyState !== 1) return;
+        if (isQuiet(memory, groupId) || wasDailySent(memory, groupId, key, dateKey)) continue;
+        // Claim before sending: a lost OneBot acknowledgement must not trigger a duplicate summary.
+        markDailySent(memory, groupId, key, dateKey, "sending");
+        saveMemory(memory);
+        try {
+          await sendMessage(ws, groupId, response);
+        } catch (sendError) {
+          markDailySent(memory, groupId, key, dateKey, "unconfirmed");
+          saveMemory(memory);
+          throw sendError;
+        }
+        markDailySent(memory, groupId, key, dateKey);
+        saveMemory(memory);
         recordBotMessage({
           historyByGroup,
           lastBotMessageByGroup,
@@ -6959,7 +7110,6 @@ async function runDailyMessages({ ws, config, memory, historyByGroup, lastEventB
           gm.summaries.push({ date: dateKey, text: response, at: now() });
           while (gm.summaries.length > Number(config.memory?.maxSummaries || 14)) gm.summaries.shift();
         }
-        markDailySent(memory, groupId, key, dateKey);
         saveMemory(memory);
         log(`daily message sent group=${groupId} key=${key}`);
       } catch (err) {
@@ -6970,7 +7120,43 @@ async function runDailyMessages({ ws, config, memory, historyByGroup, lastEventB
 }
 
 function publicConfig(config) {
+  const rawVoiceEnvName = String(config.voice?.apiKeyEnv || "MIMO_API_KEY");
+  const voiceEnvName = /^[A-Za-z_][A-Za-z0-9_]*$/.test(rawVoiceEnvName) ? rawVoiceEnvName : "MIMO_API_KEY";
   return {
+    botFeatures: deepClone(config.botFeatures || {}),
+    styleProfiles: deepClone(config.styleProfiles || {}),
+    automation: deepClone(config.automation || { enabled: false, rules: [] }),
+    learningMode: deepClone(config.learningMode || { enabled: true, groupIds: [] }),
+    voice: {
+      enabled: config.voice?.enabled === true,
+      replyMode: voiceReplyMode({}, config.voice),
+      apiKeyEnv: voiceEnvName,
+      apiKeyEnvPresent: voiceApiKeyAvailable(config.voice, config.ai),
+      timeoutMs: config.voice?.timeoutMs,
+      maxInputBytes: config.voice?.maxInputBytes,
+      maxOutputBytes: config.voice?.maxOutputBytes,
+      aiJudge: {
+        enabled: config.voice?.aiJudge?.enabled !== false,
+        timeoutMs: config.voice?.aiJudge?.timeoutMs ?? 7000,
+        minConfidence: config.voice?.aiJudge?.minConfidence ?? 0.7
+      },
+      asr: {
+        enabled: config.voice?.asr?.enabled !== false,
+        autoTranscribe: config.voice?.asr?.autoTranscribe === true
+      },
+      tts: {
+        enabled: config.voice?.tts?.enabled !== false,
+        model: config.voice?.tts?.model,
+        voice: config.voice?.tts?.voice,
+        allowedVoices: asArray(config.voice?.tts?.allowedVoices).slice(0, 20),
+        voiceDescription: config.voice?.tts?.voiceDescription,
+        allowMemberVoiceDesign: config.voice?.tts?.allowMemberVoiceDesign === true
+      },
+      voiceClone: {
+        enabled: config.voice?.voiceClone?.enabled === true,
+        requireConsent: true
+      }
+    },
     ai: aiSettingsFromConfig(config),
     aiProfiles: publicAiProfiles(config),
     vision: deepClone(config.vision || {}),
@@ -7110,6 +7296,107 @@ function sanitizeConfigPatch(patch, currentConfig) {
     next.prompt ||= {};
     setIfPresent(next.prompt, patch.prompt, "system", (x) => stringValue(x).slice(0, 12000));
   }
+  if (isPlainObject(patch.botFeatures)) {
+    next.botFeatures ||= {};
+    setIfPresent(next.botFeatures, patch.botFeatures, "defaultMode", (x) => ["all", "chat", "task"].includes(x) ? x : "all");
+    if (isPlainObject(patch.botFeatures.interBot)) {
+      next.botFeatures.interBot ||= {};
+      setIfPresent(next.botFeatures.interBot, patch.botFeatures.interBot, "enabled", (x) => booleanValue(x, false));
+      setIfPresent(next.botFeatures.interBot, patch.botFeatures.interBot, "probability", (x) => numberInRange(x, 0.03, 0, 0.1));
+      setIfPresent(next.botFeatures.interBot, patch.botFeatures.interBot, "cooldownMs", (x) => Math.round(numberInRange(x, 1800000, 300000, 86400000)));
+    }
+    if (isPlainObject(patch.botFeatures.accountModes)) {
+      next.botFeatures.accountModes = Object.fromEntries(
+        Object.entries(patch.botFeatures.accountModes)
+          .filter(([id, mode]) => /^[a-zA-Z0-9_-]{1,40}$/.test(id) && ["all", "chat", "task"].includes(mode))
+          .slice(0, 8)
+      );
+    }
+  }
+  if (isPlainObject(patch.styleProfiles)) {
+    next.styleProfiles ||= {};
+    if (Array.isArray(patch.styleProfiles.profiles)) {
+      const seen = new Set();
+      next.styleProfiles.profiles = patch.styleProfiles.profiles.slice(0, 12).filter((item) => {
+        const id = String(item?.id || "");
+        if (!/^[a-zA-Z0-9_-]{1,40}$/.test(id) || seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      }).map((item) => ({
+        id: String(item.id),
+        name: stringValue(item.name || item.id).trim().slice(0, 60),
+        systemPrompt: stringValue(item.systemPrompt || "").slice(0, 12000)
+      }));
+    }
+    setIfPresent(next.styleProfiles, patch.styleProfiles, "activeId", (x) => stringValue(x).trim().slice(0, 40));
+    if (!next.styleProfiles.profiles?.some((item) => item.id === next.styleProfiles.activeId)) {
+      next.styleProfiles.activeId = next.styleProfiles.profiles?.[0]?.id || "legacy";
+    }
+  }
+  if (isPlainObject(patch.automation)) {
+    next.automation ||= { enabled: false, rules: [] };
+    setIfPresent(next.automation, patch.automation, "enabled", (x) => booleanValue(x, false));
+    if (patch.automation.rules !== undefined) {
+      const validated = validateAutomationRules(patch.automation.rules);
+      if (!validated.valid) throw new Error(`invalid automation rules: ${validated.errors.map((item) => item.message).join("; ")}`);
+      next.automation.rules = validated.rules;
+    }
+  }
+  if (isPlainObject(patch.learningMode)) {
+    next.learningMode ||= {};
+    setIfPresent(next.learningMode, patch.learningMode, "enabled", (x) => booleanValue(x, true));
+    setIfPresent(next.learningMode, patch.learningMode, "groupIds", (x) => asArray(x).map(asStringId).filter((id) => /^\d{1,20}$/.test(id)).slice(0, 100));
+    setIfPresent(next.learningMode, patch.learningMode, "minIntervalMs", (x) => Math.round(numberInRange(x, 1800000, 60000, 86400000)));
+    setIfPresent(next.learningMode, patch.learningMode, "maxQuestionsPerDay", (x) => Math.round(numberInRange(x, 3, 1, 20)));
+  }
+  if (isPlainObject(patch.voice)) {
+    next.voice ||= {};
+    setIfPresent(next.voice, patch.voice, "enabled", (x) => booleanValue(x, false));
+    setIfPresent(next.voice, patch.voice, "replyMode", (x) => {
+      const mode = normalizeVoiceReplyMode(x);
+      if (!mode) throw new Error("voice.replyMode must be off, mixed or force");
+      return mode;
+    });
+    setIfPresent(next.voice, patch.voice, "apiKeyEnv", (x) => {
+      if (typeof x !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(x)) throw new Error("voice.apiKeyEnv must be an environment variable name, not a key");
+      return x;
+    });
+    setIfPresent(next.voice, patch.voice, "timeoutMs", (x) => Math.round(numberInRange(x, 60000, 2000, 300000)));
+    setIfPresent(next.voice, patch.voice, "maxInputBytes", (x) => Math.round(numberInRange(x, 5 * 1024 * 1024, 1024, 7 * 1024 * 1024)));
+    setIfPresent(next.voice, patch.voice, "maxOutputBytes", (x) => Math.round(numberInRange(x, 10 * 1024 * 1024, 1024, 20 * 1024 * 1024)));
+    if (isPlainObject(patch.voice.aiJudge)) {
+      next.voice.aiJudge ||= {};
+      setIfPresent(next.voice.aiJudge, patch.voice.aiJudge, "enabled", (x) => booleanValue(x, true));
+      setIfPresent(next.voice.aiJudge, patch.voice.aiJudge, "timeoutMs", (x) => Math.round(numberInRange(x, 7000, 2000, 12000)));
+      setIfPresent(next.voice.aiJudge, patch.voice.aiJudge, "minConfidence", (x) => numberInRange(x, 0.7, 0.5, 1));
+    }
+    if (isPlainObject(patch.voice.asr)) {
+      next.voice.asr ||= {};
+      setIfPresent(next.voice.asr, patch.voice.asr, "enabled", (x) => booleanValue(x, true));
+      setIfPresent(next.voice.asr, patch.voice.asr, "autoTranscribe", (x) => booleanValue(x, false));
+    }
+    if (isPlainObject(patch.voice.tts)) {
+      next.voice.tts ||= {};
+      setIfPresent(next.voice.tts, patch.voice.tts, "enabled", (x) => booleanValue(x, true));
+      setIfPresent(next.voice.tts, patch.voice.tts, "model", (x) => {
+        if (!["mimo-v2.5-tts", "mimo-v2.5-tts-voicedesign"].includes(x)) throw new Error("voice.tts.model is not supported for automatic replies");
+        return x;
+      });
+      setIfPresent(next.voice.tts, patch.voice.tts, "voice", (x) => stringValue(x).trim().slice(0, 100));
+      setIfPresent(next.voice.tts, patch.voice.tts, "allowedVoices", (x) => {
+        const known = new Set(["mimo_default", "冰糖", "茉莉", "苏打", "白桦", "Mia", "Chloe", "Milo", "Dean"]);
+        if (!Array.isArray(x) || !x.length || x.some((item) => !known.has(item))) throw new Error("voice.tts.allowedVoices contains unsupported voice IDs");
+        return [...new Set(x)];
+      });
+      setIfPresent(next.voice.tts, patch.voice.tts, "voiceDescription", (x) => stringValue(x).trim().slice(0, 1000));
+      setIfPresent(next.voice.tts, patch.voice.tts, "allowMemberVoiceDesign", (x) => booleanValue(x, false));
+    }
+    if (isPlainObject(patch.voice.voiceClone)) {
+      next.voice.voiceClone ||= {};
+      setIfPresent(next.voice.voiceClone, patch.voice.voiceClone, "enabled", (x) => booleanValue(x, false));
+      next.voice.voiceClone.requireConsent = true;
+    }
+  }
   if (isPlainObject(patch.behaviorModes)) {
     next.behaviorModes ||= {};
     setIfPresent(next.behaviorModes, patch.behaviorModes, "default", (x) => normalizeBehaviorMode(x) || "normal");
@@ -7237,6 +7524,8 @@ function sanitizeConfigPatch(patch, currentConfig) {
     setIfPresent(next.taskMode, patch.taskMode, "enabled", (x) => booleanValue(x, true));
     setIfPresent(next.taskMode, patch.taskMode, "shadowMode", (x) => booleanValue(x, false));
     setIfPresent(next.taskMode, patch.taskMode, "allowedGroupIds", (x) => asArray(x).map(asStringId).filter(Boolean).slice(0, 100));
+    setIfPresent(next.taskMode, patch.taskMode, "webResearchEnabled", (x) => booleanValue(x, true));
+    setIfPresent(next.taskMode, patch.taskMode, "allowedWebDomains", (x) => normalizeTaskWebDomains(x));
     setIfPresent(next.taskMode, patch.taskMode, "ownerUserIds", (x) => asArray(x).map(asStringId).filter(Boolean).slice(0, 20));
     setIfPresent(next.taskMode, patch.taskMode, "maxConcurrentGlobal", (x) => Math.round(numberInRange(x, 2, 1, 8)));
     setIfPresent(next.taskMode, patch.taskMode, "maxConcurrentPerConversation", (x) => Math.round(numberInRange(x, 1, 1, 3)));
@@ -7320,11 +7609,14 @@ function sanitizeConfigPatch(patch, currentConfig) {
   }
   if (isPlainObject(patch.accounts)) {
     next.accounts ||= {};
+    setIfPresent(next.accounts, patch.accounts, "topology", (x) => ["failover", "collaboration", "function_split"].includes(x) ? x : "failover");
     if (isPlainObject(patch.accounts.primary)) {
       next.accounts.primary ||= {};
       setIfPresent(next.accounts.primary, patch.accounts.primary, "id", (x) => asStringId(x) || "primary");
       setIfPresent(next.accounts.primary, patch.accounts.primary, "qq", (x) => asStringId(x));
       setIfPresent(next.accounts.primary, patch.accounts.primary, "displayName", (x) => stringValue(x, "Hermes小跟班").trim() || "Hermes小跟班");
+      setIfPresent(next.accounts.primary, patch.accounts.primary, "styleProfileId", (x) => stringValue(x).trim().slice(0, 40));
+      setIfPresent(next.accounts.primary, patch.accounts.primary, "enabled", (x) => booleanValue(x, true));
       setIfPresent(next.accounts.primary, patch.accounts.primary, "protocol", (x) => accountProtocol({ protocol: x }));
       setIfPresent(next.accounts.primary, patch.accounts.primary, "onebotPath", (x) => stringValue(x, "/onebot").trim() || "/onebot");
       setIfPresent(next.accounts.primary, patch.accounts.primary, "napcatContainer", (x) => stringValue(x, "napcat").trim() || "napcat");
@@ -7346,6 +7638,7 @@ function sanitizeConfigPatch(patch, currentConfig) {
           qq: asStringId(merged.qq || ""),
           role: "standby",
           displayName: stringValue(merged.displayName || merged.name || `Hermes小跟班${index + 2}`).trim() || `Hermes小跟班${index + 2}`,
+          styleProfileId: stringValue(merged.styleProfileId || "").trim().slice(0, 40),
           protocol: accountProtocol(merged),
           onebotPath: stringValue(merged.onebotPath || next.accounts.primary?.onebotPath || "/onebot").trim() || "/onebot",
           napcatContainer: stringValue(merged.napcatContainer || `napcat-standby-${index + 1}`).trim() || `napcat-standby-${index + 1}`,
@@ -7550,6 +7843,13 @@ async function runSocialSelfTest() {
     tests += 1;
     if (!condition) failures.push(name);
   };
+  const dailyMemory = { groups: {} };
+  check(!wasDailySent(dailyMemory, "123", "summary", "2026-09-25"), "daily summary starts unclaimed");
+  markDailySent(dailyMemory, "123", "summary", "2026-09-25", "sending");
+  check(wasDailySent(dailyMemory, "123", "summary", "2026-09-25"), "pending send blocks duplicate schedule");
+  check(!wasDailySent(dailyMemory, "123", "summary", "2026-09-26"), "next day remains eligible");
+  dailyMemory.groups["123"].dailySent["2026-09-24"] = { summary: true };
+  check(wasDailySent(dailyMemory, "123", "summary", "2026-09-24"), "legacy daily sent flag remains compatible");
   check(JSON.stringify(extractReplyMessageIds("[CQ:reply,id=123]hello")) === JSON.stringify(["123"]), "CQ reply id extraction");
   check(JSON.stringify(extractReplyMessageIds([{ type: "reply", data: { id: "456" } }])) === JSON.stringify(["456"]), "segment reply id extraction");
   const low = normalizeSocialDecision({ action: "reply", confidence: 0.2 }, { socialPlanner: { minConfidence: 0.55 } });
@@ -7592,6 +7892,7 @@ async function runSocialSelfTest() {
     })
   });
   check(resolved.contexts[0]?.isBot === true && resolved.contexts[0]?.text === "前一条机器人消息", "quoted bot context resolves sender and text");
+  check(resolved.audioMessages[0]?.senderId === "90001", "quoted audio retains protocol-verified sender id");
   const explicitQuote = detectImplicitReplyToBot({
     history: [],
     current: { user_id: "10001", text: "继续", replyContexts: resolved.contexts },
@@ -7639,6 +7940,7 @@ async function runSocialSelfTest() {
   const hydrateDir = path.join(archiveDir, "hydrate", "groups", "456");
   fs.mkdirSync(hydrateDir, { recursive: true });
   appendJsonl(path.join(hydrateDir, "messages.jsonl"), { type: "bot_reply", time: "2026-01-01T00:00:02.000Z", senderId: "90001", senderName: "bot", text: "后写但时间晚" });
+  appendJsonl(path.join(hydrateDir, "messages.jsonl"), { type: "bot_reply", time: "2026-01-01T00:00:03.000Z", senderId: "90002", senderName: "独立 bot", accountId: "standby-a", text: "另一个 bot 的话" });
   appendJsonl(path.join(hydrateDir, "messages.jsonl"), { type: "user_message", time: "2026-01-01T00:00:01.000Z", senderId: "10001", senderName: "甲", text: "先发生" });
   const hydratedHistory = new Map();
   const hydratedBot = new Map();
@@ -7647,7 +7949,8 @@ async function runSocialSelfTest() {
     historyByGroup: hydratedHistory,
     lastBotMessageByGroup: hydratedBot
   });
-  check(hydrated.messages === 2 && hydratedHistory.get("456")?.[0]?.text === "先发生" && hydratedBot.get("456")?.isBot === true, "runtime context hydrates and sorts archive records");
+  check(hydrated.messages === 3 && hydratedHistory.get("456")?.[0]?.text === "先发生" && hydratedBot.get("456")?.isBot === true, "runtime context hydrates and sorts archive records");
+  check(hydratedBot.get("456:account:primary")?.text === "后写但时间晚" && hydratedBot.get("456:account:standby-a")?.text === "另一个 bot 的话", "archive hydration keeps independent bot replies separate");
   fs.rmSync(archiveDir, { recursive: true, force: true });
   if (failures.length) throw new Error(`social self-test failed: ${failures.join(", ")}`);
   console.log(JSON.stringify({ ok: true, tests }, null, 2));
@@ -7730,6 +8033,11 @@ async function main() {
   const wsAccountIds = new Map();
   let activeAccountId = accountFailoverConfig(config).primary.id;
   let activeOneBotWs = null;
+  let dailyMessagesRunning = false;
+  let automationRunning = false;
+  const automationCommandSeen = new Set();
+  const automationCommandLastRun = new Map();
+  const interBotLastAt = new Map();
   {
     const activeAccount = accountById(config, activeAccountId);
     config.__activeAccountId = activeAccount?.id || activeAccountId;
@@ -7899,12 +8207,106 @@ async function main() {
     });
   }
 
+  function connectedAccountForRole(role, { preferAccountId = "", strictPreferred = false, allowCollaborationShare = false } = {}) {
+    const topology = accountTopology(config);
+    const definitions = configuredAccountDefinitions(config);
+    const eligible = definitions.filter((account) => {
+      if (account.enabled === false) return false;
+      if (role === "task" ? !accountCanOfferTask(config, account.id) : !accountCanChat(config, account.id)) return false;
+      return oneBotAccounts.get(account.id)?.ws?.readyState === 1;
+    });
+    if (topology === "failover") {
+      const account = eligible.find((item) => item.id === activeAccountId);
+      return account ? { ...account, ws: oneBotAccounts.get(account.id).ws } : null;
+    }
+    if (!eligible.length) return null;
+    const preferred = eligible.find((item) => item.id === preferAccountId);
+    if (strictPreferred && !preferred) return null;
+    const active = eligible.find((item) => item.id === activeAccountId);
+    const standby = eligible.find((item) => item.id !== activeAccountId);
+    const selected = topology === "collaboration" && allowCollaborationShare && standby && Math.random() < 0.2
+      ? standby : preferred || active || eligible[0];
+    return { ...selected, ws: oneBotAccounts.get(selected.id).ws };
+  }
+
+  function configForReplyAccount(account) {
+    if (!account) return config;
+    return {
+      ...config,
+      __activeAccountId: account.id,
+      __activeAccountRole: account.role,
+      __activeAccountDisplayName: account.displayName
+    };
+  }
+
+  async function maybeInterBotFollowup({ groupId, event, speakerAccount, previousText }) {
+    const options = config.botFeatures?.interBot || {};
+    if (accountTopology(config) !== "collaboration" || options.enabled !== true || isQuiet(memory, groupId)) return;
+    const probability = Math.max(0, Math.min(0.1, Number(options.probability ?? 0.03)));
+    const cooldownMs = Math.max(300_000, Number(options.cooldownMs || 1_800_000));
+    if (Math.random() >= probability || Date.now() - Number(interBotLastAt.get(groupId) || 0) < cooldownMs) return;
+    const otherAccount = configuredAccountDefinitions(config).find((item) => item.id !== speakerAccount.id
+      && item.enabled !== false && accountCanChat(config, item.id)
+      && oneBotAccounts.get(item.id)?.ws?.readyState === 1);
+    if (!otherAccount) return;
+    interBotLastAt.set(groupId, Date.now());
+    const originalMessageId = asStringId(event.message_id);
+    const stillSameConversation = () => !isQuiet(memory, groupId)
+      && oneBotAccounts.get(otherAccount.id)?.ws?.readyState === 1
+      && (!originalMessageId || asStringId(lastEventByGroup.get(groupId)?.message_id) === originalMessageId);
+    await sleep(1_500);
+    if (!stillSameConversation()) return;
+    const otherConfig = configForReplyAccount(otherAccount);
+    const history = (historyByGroup.get(groupId) || []).slice(-10);
+    const current = { sender: speakerAccount.displayName, user_id: speakerAccount.qq || speakerAccount.id, text: previousText, at: Date.now(), isBot: true };
+    const prompt = `${buildPrompt({ config: otherConfig, history, current, mode: "implicit",
+      memoryText: compactMemory(memory, groupId, otherConfig) })}
+
+你是另一个账号「${otherAccount.displayName}」，刚说话的是「${speakerAccount.displayName}」，不要把对方说过的话当成自己说的。只有能自然接上一句时才回复；不抢用户的问题，不互相抬杠，不发起第二轮机器人对话。最多 50 字；没有好接的就只输出 __SKIP__。`;
+    const response = trimForGroup(await callHermes(prompt, otherConfig), otherConfig, 80);
+    if (!response || response === "__SKIP__" || !stillSameConversation()) return;
+    const ws = oneBotAccounts.get(otherAccount.id).ws;
+    await oneBotRequest(ws, "send_group_msg", { group_id: groupId, message: response }, { timeoutMs: 30_000 });
+    archiveBotReply({ event, config: otherConfig, memory, text: response,
+      meta: { source: "inter-bot", user_id: otherAccount.qq || otherAccount.id } });
+    recordBotMessage({ historyByGroup, lastBotMessageByGroup, groupId, text: response, config: otherConfig, memory,
+      meta: { source: "inter-bot", user_id: otherAccount.qq || otherAccount.id } });
+  }
+
+  function learningPromptForConversation(conversationId) {
+    if (conversationId.startsWith("private:") || config.learningMode?.enabled === false) return "";
+    const gm = groupMemory(memory, conversationId);
+    const enabled = gm.settings?.learningMode === true
+      || asArray(config.learningMode?.groupIds).map(asStringId).includes(conversationId);
+    if (!enabled) return "";
+    const date = localDateKey();
+    const count = Number(gm.settings?.learningQuestions?.[date] || 0);
+    if (count >= Number(config.learningMode?.maxQuestionsPerDay || 3)) return "";
+    if (Date.now() - Number(gm.settings?.lastLearningQuestionAt || 0) < Number(config.learningMode?.minIntervalMs || 1800000)) return "";
+    return "仅当你真的不懂本群特有称呼、梗或事件，且现有上下文/记忆无法解答时，可以自然地问一个简短具体的问题。提问的回复最前面加 __LEARN__ 标记供系统计数；其他回复绝不能加。不要为了学习而打断讨论，不要把别人玩笑当事实。";
+  }
+
+  function markLearningQuestion(conversationId) {
+    const gm = groupMemory(memory, conversationId);
+    gm.settings.learningQuestions ||= {};
+    const date = localDateKey();
+    gm.settings.learningQuestions[date] = Number(gm.settings.learningQuestions[date] || 0) + 1;
+    gm.settings.lastLearningQuestionAt = Date.now();
+    for (const oldDate of Object.keys(gm.settings.learningQuestions)) {
+      if (oldDate !== date) delete gm.settings.learningQuestions[oldDate];
+    }
+    saveMemory(memory);
+  }
+
   async function sendTaskArtifact(task, artifact) {
-    const ws = activeOneBotWs;
+    const ws = oneBotAccounts.get(task.accountId)?.ws?.readyState === 1
+      ? oneBotAccounts.get(task.accountId).ws : activeOneBotWs;
     if (!ws || ws.readyState !== 1 || !artifact?.filePath || !fs.existsSync(artifact.filePath)) return false;
     const ext = path.extname(artifact.name || artifact.filePath).toLowerCase();
     const image = [".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(ext);
-    const activeAccount = accountById(config, activeAccountId);
+    const record = [".wav", ".mp3", ".amr"].includes(ext);
+    const video = [".mp4"].includes(ext);
+    const activeAccount = accountById(config, ws?.__hermesAccountId || activeAccountId);
     let protocolFilePath = path.resolve(artifact.filePath);
     if (activeAccount && accountProtocol(activeAccount) === "snowluma") {
       const uploadDir = path.join(snowlumaStateDirForAccount(activeAccount), "data", "hermes-task-uploads", safePathSegment(task.id));
@@ -7914,11 +8316,17 @@ async function main() {
       protocolFilePath = `/app/data/hermes-task-uploads/${safePathSegment(task.id)}/${path.basename(hostCopy)}`;
     }
     try {
-      if (image) {
-        const message = [{ type: "image", data: { file: `file://${protocolFilePath}` } }];
-        if (task.messageType === "private") await oneBotRequest(ws, "send_private_msg", { user_id: task.userId, message }, { timeoutMs: 30_000 });
-        else await oneBotRequest(ws, "send_group_msg", { group_id: task.groupId, message }, { timeoutMs: 30_000 });
-        return true;
+      if (image || record || video) {
+        const type = image ? "image" : record ? "record" : "video";
+        const message = [{ type, data: { file: `file://${protocolFilePath}` } }];
+        try {
+          if (task.messageType === "private") await oneBotRequest(ws, "send_private_msg", { user_id: task.userId, message }, { timeoutMs: 30_000 });
+          else await oneBotRequest(ws, "send_group_msg", { group_id: task.groupId, message }, { timeoutMs: 30_000 });
+          return true;
+        } catch (mediaError) {
+          if (image) throw mediaError;
+          warn(`task ${type} segment unsupported; falling back to file upload task=${task.id}: ${mediaError.message}`);
+        }
       }
       if (task.messageType === "private") {
         await oneBotRequest(ws, "upload_private_file", { user_id: task.userId, file: protocolFilePath, name: artifact.name }, { timeoutMs: 45_000 });
@@ -7933,19 +8341,21 @@ async function main() {
   }
 
   async function notifyTask(task, notice = {}) {
-    if (!activeOneBotWs || activeOneBotWs.readyState !== 1) return false;
+    const ws = oneBotAccounts.get(task.accountId)?.ws?.readyState === 1
+      ? oneBotAccounts.get(task.accountId).ws : activeOneBotWs;
+    if (!ws || ws.readyState !== 1) return false;
     if (task.messageType === "group" && isQuiet(memory, task.groupId)) {
       log(`task notification suppressed by quiet task=${task.id} type=${notice.type}`);
       return false;
     }
     const event = task.messageType === "private"
-      ? { message_type: "private", user_id: task.userId, self_id: config.__activeAccountId || "bot" }
-      : { message_type: "group", group_id: task.groupId, user_id: task.userId, self_id: config.__activeAccountId || "bot" };
+      ? { message_type: "private", user_id: task.userId, self_id: ws.__hermesAccountId || "bot" }
+      : { message_type: "group", group_id: task.groupId, user_id: task.userId, self_id: ws.__hermesAccountId || "bot" };
     const text = trimForGroup(notice.text || "", config, task.messageType === "private" ? 1200 : 700);
     if (text) {
-      if (task.messageType === "private") await oneBotRequest(activeOneBotWs, "send_private_msg", { user_id: task.userId, message: text }, { timeoutMs: 20_000 });
-      else await oneBotRequest(activeOneBotWs, "send_group_msg", { group_id: task.groupId, message: text }, { timeoutMs: 20_000 });
-      archiveBotReply({ event, config, memory, text, meta: { source: `task-${notice.type || "progress"}`, user_id: event.self_id, replyToUserId: task.userId, replyToSender: task.senderName } });
+      if (task.messageType === "private") await oneBotRequest(ws, "send_private_msg", { user_id: task.userId, message: text }, { timeoutMs: 20_000 });
+      else await oneBotRequest(ws, "send_group_msg", { group_id: task.groupId, message: text }, { timeoutMs: 20_000 });
+      archiveBotReply({ event, config: configForReplyAccount(accountById(config, ws.__hermesAccountId)), memory, text, meta: { source: `task-${notice.type || "progress"}`, user_id: event.self_id, replyToUserId: task.userId, replyToSender: task.senderName } });
     }
     let delivered = 0;
     for (const artifact of asArray(notice.artifacts)) {
@@ -7953,8 +8363,8 @@ async function main() {
     }
     if (asArray(notice.artifacts).length && delivered < asArray(notice.artifacts).length) {
       const fallback = `有 ${asArray(notice.artifacts).length - delivered} 个任务产物未能通过 OneBot 上传，可在本机管理页“任务 / Agent”中下载。`;
-      if (task.messageType === "private") sendPrivateMessageToUser(activeOneBotWs, task.userId, fallback, config);
-      else sendGroupMessageToGroup(activeOneBotWs, task.groupId, fallback, config);
+      if (task.messageType === "private") sendPrivateMessageToUser(ws, task.userId, fallback, config);
+      else sendGroupMessageToGroup(ws, task.groupId, fallback, config);
     }
     return true;
   }
@@ -9387,6 +9797,7 @@ async function main() {
   }
 
   function switchActiveAccount(accountId, reason = "", { force = false } = {}) {
+    if (accountTopology(config) !== "failover" && !force) return false;
     const account = accountById(config, accountId);
     if (!account) return false;
     if (account.enabled === false) {
@@ -9424,7 +9835,8 @@ async function main() {
       } else if (account.id === cfg.primary.id) {
         primaryUnhealthySince = 0;
       }
-      log(`account failover switched ${previous} -> ${account.id}${reason ? ` reason=${reason}` : ""}`);
+      log(`account route switched ${previous} -> ${account.id}${reason ? ` reason=${reason}` : ""}`);
+      if (accountTopology(config) !== "failover") return true;
       if (account.role === "standby" && cfg.announceTakeover) {
         queueAdminNotification(`【小跟班账号接管】\n主账号暂不可用，已切到备用账号 ${account.id}${state.selfId ? `（${state.selfId}）` : ""}。\n原因：${clampText(reason || "主账号异常", 240)}`);
       } else if (account.role === "primary") {
@@ -9446,6 +9858,13 @@ async function main() {
   function selectActiveAccount({ primaryHealthy = false, reason = "" } = {}) {
     const cfg = accountFailoverConfig(config);
     const primaryId = cfg.primary.id;
+    if (accountTopology(config) !== "failover") {
+      if (accountById(config, activeAccountId)?.enabled === false) {
+        const replacement = configuredAccountDefinitions(config).find((item) => item.enabled !== false && accountConnected(item.id));
+        if (replacement) switchActiveAccount(replacement.id, "configured active account disabled", { force: true });
+      }
+      return activeAccountId;
+    }
     const nowMs = Date.now();
     const primaryReceiveStalled = primaryReceiveStalledReason(cfg, nowMs);
     const primaryRecoveryBlocked = primaryRecoveryBlockedReason(cfg, nowMs);
@@ -10189,8 +10608,23 @@ async function main() {
         if (req.method === "PATCH" && url.pathname === "/api/config") {
           const patch = await readBody();
           const next = sanitizeConfigPatch(patch, config);
+          const enabledAccounts = configuredAccountDefinitions(next).filter((item) => item.enabled !== false);
           saveConfig(next);
           replaceConfigInPlace(config, loadConfig());
+          for (const [id, state] of oneBotAccounts) {
+            const definition = accountById(config, id);
+            state.enabled = Boolean(definition && definition.enabled !== false);
+          }
+          const active = accountById(config, activeAccountId);
+          const replacement = enabledAccounts.find((item) => oneBotAccounts.get(item.id)?.ws?.readyState === 1);
+          if (active?.enabled === false && replacement) switchActiveAccount(replacement.id, "configured active account disabled", { force: true });
+          else {
+            if (active?.enabled === false) activeOneBotWs = null;
+            else if (active) activeOneBotWs = oneBotAccounts.get(active.id)?.ws?.readyState === 1 ? oneBotAccounts.get(active.id).ws : null;
+            config.__activeAccountId = active?.id || activeAccountId;
+            config.__activeAccountRole = active?.role || "primary";
+            config.__activeAccountDisplayName = active?.displayName || botDisplayName(config);
+          }
           log("admin config saved and hot reloaded");
           return replyJson(200, { ok: true, config: publicConfig(config), restartRequired: false });
         }
@@ -10275,8 +10709,22 @@ async function main() {
           const filePath = taskRuntime.artifactPath(taskId, artifactId);
           if (!filePath) return replyJson(404, { ok: false, error: "artifact not found" });
           const ext = path.extname(filePath).toLowerCase();
-          const type = ext === ".png" ? "image/png" : ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : ext === ".json" ? "application/json; charset=utf-8" : ext === ".html" ? "text/html; charset=utf-8" : "application/octet-stream";
-          return replyFile(filePath, type);
+          const previewTypes = {
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
+            ".pdf": "application/pdf", ".txt": "text/plain; charset=utf-8", ".md": "text/plain; charset=utf-8", ".json": "text/plain; charset=utf-8"
+          };
+          const preview = url.searchParams.get("preview") === "1" && Boolean(previewTypes[ext]);
+          const body = fs.readFileSync(filePath);
+          const encodedName = encodeURIComponent(path.basename(filePath));
+          res.writeHead(200, {
+            "content-type": preview ? previewTypes[ext] : "application/octet-stream",
+            "content-disposition": `${preview ? "inline" : "attachment"}; filename*=UTF-8''${encodedName}`,
+            "content-length": body.length,
+            "cache-control": "no-store",
+            "x-content-type-options": "nosniff",
+            "content-security-policy": "sandbox; default-src 'none'"
+          });
+          return res.end(body);
         }
 
         if (req.method === "GET" && url.pathname === "/api/archive/status") {
@@ -10591,7 +11039,7 @@ async function main() {
             oneBotSendRuntime.lastSendOkAt = Date.now();
             oneBotSendRuntime.lastSendAction = "send_group_msg";
             oneBotSendRuntime.lastSendFailure = "";
-            log(`manual send group=${groupId} text=${JSON.stringify(message).slice(0, 160)}`);
+            log(`manual send group=${groupId} text=${/base64:\/\/|\[CQ:(?:record|image|video),/i.test(message) ? "[media omitted]" : JSON.stringify(message).slice(0, 160)}`);
             return replyJson(200, { ok: true, group_id: groupId });
           } catch (err) {
             oneBotSendRuntime.lastSendAttemptAt = Date.now();
@@ -10618,7 +11066,7 @@ async function main() {
             oneBotSendRuntime.lastSendOkAt = Date.now();
             oneBotSendRuntime.lastSendAction = "send_private_msg";
             oneBotSendRuntime.lastSendFailure = "";
-            log(`manual send_private user=${userId} text=${JSON.stringify(message).slice(0, 160)}`);
+            log(`manual send_private user=${userId} text=${/base64:\/\/|\[CQ:(?:record|image|video),/i.test(message) ? "[media omitted]" : JSON.stringify(message).slice(0, 160)}`);
             return replyJson(200, { ok: true, user_id: userId });
           } catch (err) {
             oneBotSendRuntime.lastSendAttemptAt = Date.now();
@@ -10655,6 +11103,7 @@ async function main() {
       checkAdminStatusNotification({ force: true });
       flushAdminNotifications();
     }
+    void runScheduledDailyMessages().catch((err) => warn(`daily scheduler failed: ${err.message}`));
 
     ws.on("message", async (raw) => {
       runtimeStatus.lastOneBotFrameAt = Date.now();
@@ -10666,6 +11115,7 @@ async function main() {
       }
       event.__receivedAt = Date.now();
       const accountState = identifyOneBotAccount(ws, event);
+      event.__accountId = accountState.id;
       accountState.lastFrameAt = runtimeStatus.lastOneBotFrameAt;
       if (event.status || event.retcode != null) {
         const pending = event.echo ? pendingOneBotActions.get(event.echo) : null;
@@ -10740,12 +11190,41 @@ async function main() {
       }
       accountState.lastRawMessageAt = Date.now();
       let mentioned = config.trigger?.replyToAt !== false && messageMentionsSelf(event, text0);
+      const quotedMessageCache = new Map();
+      let quotedBotAccountId = "";
+      if (!isPrivate && accountTopology(config) !== "failover" && !mentioned) {
+        const quotedId = extractReplyMessageIds(rawMessagePayload)[0];
+        if (quotedId) {
+          try {
+            const data = await oneBotRequest(ws, "get_msg", { message_id: Number(quotedId) || quotedId }, { timeoutMs: 3000 });
+            quotedMessageCache.set(asStringId(quotedId), data);
+            const quotedSenderId = asStringId(data?.sender?.user_id || data?.sender?.userId || data?.user_id || data?.sender_id);
+            quotedBotAccountId = quotedSenderId && configuredAccountDefinitions(config).find((account) => (
+              asStringId(account.qq || oneBotAccounts.get(account.id)?.selfId) === quotedSenderId
+            ))?.id || "";
+          } catch { /* unresolved quotes retain the default account route */ }
+        }
+      }
+      if (!isPrivate && accountTopology(config) !== "failover") {
+        const mentionedOtherBot = [...botIds].some((botId) => botId !== selfId && messageMentionsSelf({ ...event, self_id: botId }, text0));
+        if (mentionedOtherBot && !mentioned) {
+          logIncomingMessage({ accountState, event, text0, senderName, disposition: "ignored-other-bot-mention", reason: "another configured account was addressed" });
+          return;
+        }
+        if (quotedBotAccountId && quotedBotAccountId !== accountState.id && !mentioned) {
+          logIncomingMessage({ accountState, event, text0, senderName, disposition: "ignored-other-bot-quote", reason: `quoted ${quotedBotAccountId}` });
+          return;
+        }
+      }
       const inboundKey = stableMessageFingerprint(event, text0);
       let activeMessageAccount = accountState.id === activeAccountId;
       let sendWs = ws;
+      if (isPrivate && accountTopology(config) !== "failover") activeMessageAccount = true;
+      if (!isPrivate && mentioned && accountTopology(config) !== "failover") activeMessageAccount = true;
+      if (!isPrivate && quotedBotAccountId === accountState.id) activeMessageAccount = true;
 
       if (!activeMessageAccount) {
-        if (!isPrivate && activeOneBotWs?.readyState !== 1) {
+        if (!isPrivate && accountTopology(config) === "failover" && activeOneBotWs?.readyState !== 1) {
           const previousActiveAccountId = activeAccountId;
           if (switchActiveAccount(accountState.id, `active account ${previousActiveAccountId} websocket unavailable; ${accountState.id} received message`, { force: true })) {
             activeMessageAccount = true;
@@ -10869,7 +11348,15 @@ async function main() {
 
       if (await handleOwnerPrivateControlCommand({ ws: sendWs, event, text })) return;
 
-      if (await handleBotCommand({ ws: sendWs, event, text, config, memory })) return;
+      if (await handleBotCommand({ ws: sendWs, event, text, config, memory, onVoiceCommand: async (voiceText) => {
+        const quoted = /\bclone\s+self\b/i.test(voiceText)
+          ? await resolveQuotedMessages({
+              messages: [rawMessagePayload], config, botIds: [...botIds, selfId],
+              getMessage: async (messageId) => oneBotRequest(ws, "get_msg", { message_id: Number(messageId) || messageId }, { timeoutMs: 15000 })
+            })
+          : { audioMessages: [] };
+        await handleVoiceCommand({ event, text: voiceText, conversationId: groupId, senderId, senderName, quotedAudio: quoted.audioMessages });
+      } })) return;
 
       if (await handleTaskControl({ taskRuntime, ws: sendWs, event, text, config, memory })) return;
 
@@ -10952,8 +11439,35 @@ async function main() {
         messages: sourcePayloads,
         config,
         botIds: [...botIds, selfId],
-        getMessage: async (messageId) => oneBotRequest(ws, "get_msg", { message_id: Number(messageId) || messageId }, { timeoutMs: Number(config.vision?.downloadTimeoutMs || 15000) })
+        getMessage: async (messageId) => quotedMessageCache.get(asStringId(messageId))
+          || oneBotRequest(ws, "get_msg", { message_id: Number(messageId) || messageId }, { timeoutMs: Number(config.vision?.downloadTimeoutMs || 15000) })
       });
+      let voiceRefsSeen = 0;
+      let voiceTranscriptsSeen = 0;
+      if (config.voice?.enabled === true && config.voice?.asr?.enabled !== false
+        && (isPrivate || mentioned || config.voice.asr.autoTranscribe === true || /语音|说了什么|说的啥|听一下|转写|识别声音/.test(text))) {
+        const refs = sourcePayloads.flatMap((payload) => extractRecordRefs(payload, {
+          quotedMessages: quotedMessages.audioMessages,
+          isVerifiedProtocolFile: (value) => /^[A-Za-z0-9_.-]{1,180}\.(?:silk|amr|mp3|wav|ogg)$/i.test(value)
+        })).slice(0, 2);
+        voiceRefsSeen = refs.length;
+        const transcripts = [];
+        for (const ref of refs) {
+          try {
+            const transcription = await transcribeOneBotRecord(ref, ws, accountState);
+            if (transcription) {
+              voiceTranscriptsSeen += 1;
+              transcripts.push(`${ref.source === "quoted" ? "引用" : "当前"}语音转写：${transcription}`);
+            }
+          } catch (error) {
+            warn(`voice ASR failed source=${ref.source} account=${accountState.id}: ${error.message}`);
+          }
+        }
+        if (transcripts.length) {
+          text = `${text}\n[${transcripts.join("；")}]`.trim();
+          sourceMessages[sourceMessages.length - 1].text = text;
+        }
+      }
       const imageRefs = normalizeImageRefIndexes([...currentImageRefs, ...quotedMessages.refs]);
       const quotedBot = quotedMessages.contexts.some((ctx) => ctx.isBot);
       if (quotedBot) mentioned = true;
@@ -10980,7 +11494,7 @@ async function main() {
         ? detectVisionConversationContext({
             history,
             current: provisionalCurrent,
-            lastBotMessage: lastBotMessageByGroup.get(groupId),
+            lastBotMessage: lastBotMessageForAccount(lastBotMessageByGroup, groupId, accountState.id, config),
             config
           })
         : { matched: false, strong: false, reason: "no images", messagesAfterBot: 999 };
@@ -11069,6 +11583,69 @@ async function main() {
         return;
       }
 
+      if (voiceRefsSeen > 0 && voiceTranscriptsSeen === 0) {
+        if (isPrivate || mentioned || quotedBot) {
+          sendGroupMessage(sendWs, event, "这条语音我没能转写出来，不能假装听懂了。可以重发一条语音，或把内容打成文字吗？", config, { reply: true });
+        }
+        return;
+      }
+
+      const voiceNames = [...asArray(config.botNames), ...configuredAccountDefinitions(config).flatMap((account) => [account.displayName, account.qq])];
+      const standaloneVoiceRequest = detectVoiceReplyIntent(text0, { addressed: true, addressNames: voiceNames });
+      const priorUserMessage = [...history].reverse().find((item) => item !== current && !item.isBot
+        && asStringId(item.user_id) === senderId && Date.now() - Number(item.at || 0) < 30_000
+        && !/^(?:用语音|语音回复|发语音)(?:吧|呀|啊)?[。！!\s]*$/u.test(String(item.text || "")));
+      const latestBotMessage = lastBotMessageForAccount(lastBotMessageByGroup, groupId, accountState.id, config);
+      const botRecentlyRepliedToSender = latestBotMessage && asStringId(latestBotMessage.replyToUserId) === senderId
+        && Date.now() - Number(latestBotMessage.at || 0) < 2 * 60_000;
+      const priorUserAddressedBot = priorUserMessage && new RegExp(`@(?:${[selfId, ...voiceNames].filter(Boolean).map((name) => String(name).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "u").test(String(priorUserMessage.text || ""));
+      const voiceFollowup = ["followup", "repeat"].includes(standaloneVoiceRequest?.kind)
+        && Boolean(priorUserAddressedBot || botRecentlyRepliedToSender);
+      const voiceAddressed = isPrivate || mentioned || quotedBot || hasKeyword(text, config) || voiceFollowup;
+      const voiceRequest = voiceReplyMode(groupMemory(memory, groupId).settings, config.voice) === "off" ? null : detectVoiceReplyIntent(text0, {
+        addressed: voiceAddressed,
+        addressNames: voiceNames
+      }) || (shouldJudgeVoiceReplyIntent(text0, { addressed: voiceAddressed })
+        ? await judgeVoiceReplyIntentWithAI(text0, { history, config })
+        : null);
+      if (/^\/voice(?:\s|$)/i.test(text) || voiceRequest) {
+        replyCoordinator.dropSenderJobs(groupId, senderId, "voice-request-replaces-text-reply");
+        let resolvedVoiceRequest = voiceRequest;
+        if (voiceRequest && ["followup", "repeat"].includes(voiceRequest.kind)) {
+          const quotedBotText = quotedMessages.contexts.find((item) => item.isBot && item.text)?.text || "";
+          const recentBotText = botRecentlyRepliedToSender ? latestBotMessage.text : "";
+          const repeatText = sanitizeChatReply(quotedBotText || recentBotText).trim();
+          if (repeatText) resolvedVoiceRequest = { kind: "speak", text: clampText(repeatText, 350) };
+          else if (priorUserMessage) resolvedVoiceRequest = { kind: "answer", text: clampText(priorUserMessage.text, 350) };
+          else resolvedVoiceRequest = { kind: "missing-context", text: "" };
+        }
+        void handleVoiceCommand({ event, text, conversationId: groupId, senderId, senderName, quotedAudio: quotedMessages.audioMessages, voiceRequest: resolvedVoiceRequest })
+          .catch((error) => warn(`voice command failed conversation=${groupId}: ${error.message}`));
+        return;
+      }
+
+      if (config.automation?.enabled === true && Array.isArray(config.automation.rules)) {
+        const matchedRules = matchAutomationCommand(text, config.automation.rules, groupId);
+        if (matchedRules.length) {
+          const eventId = asStringId(event.message_id) || stableMessageFingerprint(event, text);
+          for (const rule of matchedRules) {
+            if (rule.action.kind === "task" && !taskModeConfig(config).ownerUserIds.includes(senderId)
+              && !taskModeConfig(config).allowedGroupIds.includes(asStringId(groupId))) continue;
+            const dedupeKey = `${rule.id}:${groupId}:${eventId}`;
+            if (automationCommandSeen.has(dedupeKey)) continue;
+            const cooldownKey = `${rule.id}:${groupId}`;
+            if (Date.now() - Number(automationCommandLastRun.get(cooldownKey) || 0) < 60_000) continue;
+            automationCommandSeen.add(dedupeKey);
+            automationCommandLastRun.set(cooldownKey, Date.now());
+            if (automationCommandSeen.size > 1000) automationCommandSeen.delete(automationCommandSeen.values().next().value);
+            if (automationCommandLastRun.size > 1000) automationCommandLastRun.delete(automationCommandLastRun.keys().next().value);
+            void executeAutomationRule(rule, groupId, { event, senderId, senderName, source: "command" })
+              .catch((error) => warn(`automation command failed rule=${rule.id}: ${error.message}`));
+          }
+          return;
+        }
+      }
+
       const observedReply = replyCoordinator.observeMessage({
         conversationId: groupId,
         senderId,
@@ -11091,7 +11668,11 @@ async function main() {
         ...history,
         ...pendingDebouncedContext(groupId, senderId)
       ]);
-      const taskDecision = await judgeTaskIntent({ text: current.text, event, history: decisionHistory, config });
+      const directAccountId = (isPrivate || mentioned) ? accountState.id : "";
+      const taskAccount = connectedAccountForRole("task", { preferAccountId: directAccountId, strictPreferred: Boolean(directAccountId) });
+      const taskDecision = taskAccount
+        ? await judgeTaskIntent({ text: current.text, event, history: decisionHistory, config })
+        : { matched: false };
       if (taskDecision.matched) {
         const actor = taskActorFromEvent(event, config);
         const existingTask = taskRuntime.activeForConversation(groupId);
@@ -11100,6 +11681,7 @@ async function main() {
           log(`task shadow decision group=${groupId} confidence=${taskDecision.confidence.toFixed(2)} summary=${JSON.stringify(taskDecision.summary)}`);
         } else if (!existingTask) {
           const task = taskRuntime.createOffer({
+            accountId: taskAccount.id,
             conversationId: groupId,
             messageType: event.message_type,
             groupId: event.message_type === "group" ? event.group_id : "",
@@ -11118,14 +11700,26 @@ async function main() {
           });
           log(`task offer group=${groupId} task=${task.id} confidence=${taskDecision.confidence.toFixed(2)} shadow=false`);
           const offer = taskOfferText(task);
-          sendGroupMessage(sendWs, event, offer, config, { reply: true });
-          archiveBotReply({ event, config, memory, text: offer, meta: { source: "task-offer", user_id: selfId || "bot", replyToUserId: senderId, replyToSender: senderName } });
+          const taskConfig = configForReplyAccount(taskAccount);
+          sendGroupMessage(taskAccount.ws, event, offer, taskConfig, { reply: true });
+          archiveBotReply({ event, config: taskConfig, memory, text: offer, meta: { source: "task-offer", user_id: taskAccount.qq || "bot", replyToUserId: senderId, replyToSender: senderName } });
           return;
         }
       }
+      const chatAccount = connectedAccountForRole("chat", {
+        preferAccountId: directAccountId,
+        strictPreferred: Boolean(directAccountId),
+        allowCollaborationShare: !isPrivate && !mentioned && keyword
+      });
+      if (!chatAccount) {
+        logIncomingMessage({ accountState, event, text0, senderName, disposition: "collected-task-only", reason: "account is task-only; no task offer matched" });
+        return;
+      }
+      sendWs = chatAccount.ws;
+      const replyConfig = configForReplyAccount(chatAccount);
       const decisionContextBundle = config.reply?.useContextBundle === false
         ? null
-        : buildContextBundle({ memory, groupId, history: decisionHistory, current, config });
+        : buildContextBundle({ memory, groupId, history: decisionHistory, current, config: replyConfig });
       const decisionArchiveContext = buildArchiveContext({
         event,
         current,
@@ -11156,7 +11750,7 @@ async function main() {
         ? detectImplicitReplyToBot({
             history: decisionHistory,
             current,
-            lastBotMessage: lastBotMessageByGroup.get(groupId),
+            lastBotMessage: lastBotMessageForAccount(lastBotMessageByGroup, groupId, chatAccount.id, config),
             config: behaviorConfig
           })
         : { matched: false, confidence: 0, reason: "" };
@@ -11182,7 +11776,7 @@ async function main() {
           socialDecision = await judgeSocialActionWithAI({
             history: decisionHistory,
             current,
-            lastBotMessage: lastBotMessageByGroup.get(groupId),
+            lastBotMessage: lastBotMessageForAccount(lastBotMessageByGroup, groupId, chatAccount.id, config),
             implicitDecision,
             discussionDecision,
             memory,
@@ -11329,45 +11923,105 @@ async function main() {
             if (effectiveWebSearch && !job.preReplySent) {
               const preReply = webSearchPreReply(effectiveSearchDecision, config);
               if (preReply) {
-                sendGroupMessage(sendWs, effectiveEvent, preReply, config, { reply: config.webSearch?.preReply?.replyToMessage !== false });
-                archiveBotReply({ event: effectiveEvent, config, memory, text: preReply, meta: { source: "web-pre-reply", user_id: selfId || "bot", replyToUserId: senderId, replyToSender: effectiveSenderName } });
+                sendGroupMessage(sendWs, effectiveEvent, preReply, replyConfig, { reply: config.webSearch?.preReply?.replyToMessage !== false });
+                archiveBotReply({ event: effectiveEvent, config: replyConfig, memory, text: preReply, meta: { source: "web-pre-reply", user_id: chatAccount.qq || "bot", replyToUserId: senderId, replyToSender: effectiveSenderName } });
                 recordBotMessage({
                   historyByGroup,
                   lastBotMessageByGroup,
                   groupId,
                   text: preReply,
-                  config,
+                  config: replyConfig,
                   memory,
-                  meta: { source: "web-pre-reply", user_id: selfId || "bot", replyToUserId: senderId, replyToSender: effectiveSenderName }
+                  meta: { source: "web-pre-reply", user_id: chatAccount.qq || "bot", replyToUserId: senderId, replyToSender: effectiveSenderName }
                 });
               }
               job.preReplySent = true;
             }
             const contextBundle = config.reply?.useContextBundle === false
               ? null
-              : buildContextBundle({ memory, groupId, history: latestHistory, current: effectiveCurrent, config });
-            const memoryText = compactMemory(memory, groupId, config, senderId);
+              : buildContextBundle({ memory, groupId, history: latestHistory, current: effectiveCurrent, config: replyConfig });
+            const memoryText = compactMemory(memory, groupId, replyConfig, senderId);
             const archiveContext = buildArchiveContext({ event: effectiveEvent, current: effectiveCurrent, history: latestHistory, memory, groupId, config, mode: effectiveWebSearch ? "web" : job.mode });
             const webSearchBuilt = effectiveWebSearch ? await buildWebSearchContext(effectiveSearchDecision, config) : { text: "", result: null };
             if (signal.aborted || Number(job.contextRevision || 0) !== revision) return { retry: true };
             const webSearchContext = webSearchBuilt.text || "";
             const prompt = buildPrompt({
-              config,
+              config: replyConfig,
               history: latestHistory,
               current: effectiveCurrent,
               mode: effectiveWebSearch ? "web" : isPrivate ? "private" : job.mode === "active" ? "proactive" : job.mode === "implicit" ? "implicit" : "reply",
               memoryText,
               contextBundle,
               webSearchContext,
-              archiveContext: archiveContext.text || ""
+              archiveContext: archiveContext.text || "",
+              learningPrompt: learningPromptForConversation(groupId)
             });
-            const response = trimForGroup(await callHermes(prompt, config, { signal }), config);
+            const rawResponse = await callHermes(prompt, replyConfig, { signal });
+            const learningQuestion = /^\s*__LEARN__/.test(rawResponse) && Boolean(learningPromptForConversation(groupId));
+            const response = trimForGroup(String(rawResponse || "").replace(/^\s*__LEARN__\s*/, ""), replyConfig);
             if (signal.aborted || Number(job.contextRevision || 0) !== revision) return { retry: true };
             if (isQuiet(memory, groupId) || sendWs.readyState !== 1) return { sent: false, skipped: true };
             if (response === "__SKIP__" && config.reply?.allowSkip !== false) return { sent: false, skipped: true };
             if (!response) return { sent: false, skipped: true };
-            sendGroupMessage(sendWs, effectiveEvent, response, config, { reply: job.direct || (job.mode === "implicit" && behaviorConfig.implicitReply?.replyToMessage !== false) });
-            archiveBotReply({ event: effectiveEvent, config, memory, text: response, meta: { source: effectiveWebSearch ? "web" : job.mode, user_id: selfId || "bot", replyToUserId: senderId, replyToSender: effectiveSenderName, coveredMessageIds: job.messageIds, mentionedUserIds: relatedUserIdsFromText(response, groupMemory(memory, groupId)) } });
+            const deliveryMode = voiceReplyMode(groupMemory(memory, groupId).settings, config.voice);
+            const sendAsVoice = shouldSendVoiceReply({
+              mode: deliveryMode, incomingVoice: voiceTranscriptsSeen > 0,
+              direct: job.direct || isPrivate, text: response,
+              enabled: config.voice?.enabled === true && config.voice?.tts?.enabled !== false
+            });
+            let voiceDelivered = false;
+            if (sendAsVoice) {
+              const outputDir = path.join(dataDir, "voice-output");
+              fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 });
+              const outputPath = path.join(outputDir, `reply-${Date.now()}-${randomBytes(4).toString("hex")}.wav`);
+              try {
+                const ttsModel = config.voice.tts?.model || "mimo-v2.5-tts";
+                const selectedPreset = groupMemory(memory, groupId).settings?.voicePreset;
+                const allowed = asArray(config.voice.tts?.allowedVoices);
+                const preset = allowed.includes(selectedPreset) ? selectedPreset : (config.voice.tts?.voice || "mimo_default");
+                await synthesizeSpeechFile({
+                  text: response, outputPath, model: ttsModel, signal,
+                  ...(ttsModel === "mimo-v2.5-tts-voicedesign"
+                    ? { voiceDescription: config.voice.tts?.voiceDescription }
+                    : { voice: preset }),
+                  config: { ...config.voice, timeoutMs: Math.min(25_000, Number(config.voice.timeoutMs || 60_000)), outputDir },
+                  env: voiceApiEnvironment(config.voice, config.ai)
+                });
+              } catch (error) {
+                if (signal.aborted || Number(job.contextRevision || 0) !== revision) return { retry: true };
+                warn(`automatic voice synthesis failed conversation=${groupId}: ${error.message}`);
+              }
+              try {
+                if (signal.aborted || Number(job.contextRevision || 0) !== revision) return { retry: true };
+                if (isQuiet(memory, groupId) || sendWs.readyState !== 1) return { sent: false, skipped: true };
+                if (fs.existsSync(outputPath)) {
+                  let recordMessage;
+                  try { recordMessage = [buildRecordMessage(fs.readFileSync(outputPath))]; }
+                  catch (error) { warn(`automatic voice encode failed conversation=${groupId}: ${error.message}`); }
+                  if (recordMessage) {
+                    try {
+                      await oneBotRequest(sendWs, isPrivate ? "send_private_msg" : "send_group_msg", {
+                        [isPrivate ? "user_id" : "group_id"]: isPrivate ? senderId : groupId,
+                        message: recordMessage
+                      }, { timeoutMs: 30_000 });
+                      voiceDelivered = true;
+                    } catch (error) {
+                      // A timeout may mean QQ received the record but the acknowledgement was lost.
+                      warn(`automatic voice send unconfirmed conversation=${groupId}: ${error.message}`);
+                      return { sent: false, unconfirmed: true };
+                    }
+                  }
+                }
+              } finally {
+                try { fs.unlinkSync(outputPath); } catch {}
+              }
+            }
+            if (!voiceDelivered) {
+              if (signal.aborted || Number(job.contextRevision || 0) !== revision) return { retry: true };
+              sendGroupMessage(sendWs, effectiveEvent, response, replyConfig, { reply: job.direct || (job.mode === "implicit" && behaviorConfig.implicitReply?.replyToMessage !== false) });
+            }
+            if (learningQuestion) markLearningQuestion(groupId);
+            archiveBotReply({ event: effectiveEvent, config: replyConfig, memory, text: response, meta: { source: voiceDelivered ? "voice-reply" : effectiveWebSearch ? "web" : job.mode, user_id: chatAccount.qq || "bot", replyToUserId: senderId, replyToSender: effectiveSenderName, coveredMessageIds: job.messageIds, mentionedUserIds: relatedUserIdsFromText(response, groupMemory(memory, groupId)) } });
             if (effectiveWebSearch) {
               archiveWebSearchResult({ event: effectiveEvent, config, memory, decision: effectiveSearchDecision, searchResult: webSearchBuilt.result || {}, contextText: webSearchContext, usedConclusion: response });
             }
@@ -11376,10 +12030,14 @@ async function main() {
               lastBotMessageByGroup,
               groupId,
               text: response,
-              config,
+              config: replyConfig,
               memory,
-              meta: { source: effectiveWebSearch ? "web" : job.mode, user_id: selfId || "bot", replyToUserId: senderId, replyToSender: effectiveSenderName, coveredMessageIds: job.messageIds, mentionedUserIds: relatedUserIdsFromText(response, groupMemory(memory, groupId)) }
+              meta: { source: effectiveWebSearch ? "web" : job.mode, user_id: chatAccount.qq || "bot", replyToUserId: senderId, replyToSender: effectiveSenderName, coveredMessageIds: job.messageIds, mentionedUserIds: relatedUserIdsFromText(response, groupMemory(memory, groupId)) }
             });
+            if (!isPrivate && job.mode === "active") {
+              void maybeInterBotFollowup({ groupId, event: effectiveEvent, speakerAccount: chatAccount, previousText: response })
+                .catch((error) => warn(`inter-bot followup failed group=${groupId}: ${error.message}`));
+            }
             return { sent: true, coveredMessageIds: job.messageIds };
           } catch (err) {
             if (signal.aborted || err?.name === "AbortError") throw err;
@@ -11427,6 +12085,7 @@ async function main() {
     if (config.proactive?.enabled) {
       const intervalMs = Number(config.proactive.intervalMs || 900000);
       const timer = setInterval(async () => {
+        if (!accountCanChat(config, activeAccountId)) return;
         if (ws.readyState !== 1 || !withinActiveHours(config)) return;
         const groupsForProactive = handlesAllGroups(config)
           ? Array.from(lastEventByGroup.keys()).filter((id) => !String(id).startsWith("private:"))
@@ -11474,7 +12133,7 @@ async function main() {
             const socialDecision = await judgeSocialActionWithAI({
               history,
               current,
-              lastBotMessage: lastBotMessageByGroup.get(String(groupId)),
+              lastBotMessage: lastBotMessageForAccount(lastBotMessageByGroup, groupId, activeAccountId, config),
               implicitDecision: { matched: false, confidence: 0, reason: "scheduled proactive check" },
               discussionDecision: discussion,
               memory,
@@ -11537,20 +12196,495 @@ async function main() {
       ws.on("close", () => clearInterval(timer));
     }
 
-    if (config.dailyMessages?.enabled) {
-      const timer = setInterval(() => {
-        runDailyMessages({ ws, config, memory, historyByGroup, lastEventByGroup, lastBotMessageByGroup });
-      }, Number(config.dailyMessages.checkIntervalMs || 60_000));
-      runDailyMessages({ ws, config, memory, historyByGroup, lastEventByGroup, lastBotMessageByGroup });
-      ws.on("close", () => clearInterval(timer));
-    }
-
     // Hourly chat — send periodic private messages to bot owner
     const hourlyTimer = setInterval(() => {
       runHourlyChat({ ws, config });
     }, Number(config.hourlyChat?.checkIntervalMs || 60_000));
     ws.on("close", () => clearInterval(hourlyTimer));
   }
+
+  function trustedAudioUrl(value) {
+    return isPublicHttpUrl(value) && trustedQqAudioUrl(value);
+  }
+
+  async function runAudioTool(command, args, timeoutMs = 30_000) {
+    await new Promise((resolve, reject) => {
+      const child = spawn(command, args, { stdio: "ignore" });
+      const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+      child.once("error", (error) => { clearTimeout(timer); reject(error); });
+      child.once("close", (code) => {
+        clearTimeout(timer);
+        if (code === 0) resolve();
+        else reject(new Error(`audio conversion command failed (${code ?? "timeout"})`));
+      });
+    });
+  }
+
+  async function convertIncomingAudio(inputPath, outputPath, accountState) {
+    const ffmpegArgs = ["-nostdin", "-loglevel", "error", "-y", "-i", inputPath,
+      "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", outputPath];
+    const hostFfmpeg = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"].find((candidate) => fs.existsSync(candidate));
+    if (hostFfmpeg) return runAudioTool(hostFfmpeg, ffmpegArgs);
+    const container = accountById(config, accountState.id)?.protocolContainer;
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/.test(String(container || ""))) throw new Error("audio conversion unavailable");
+    const stem = `hermes-asr-${randomBytes(8).toString("hex")}`;
+    const remoteInput = `/tmp/${stem}${path.extname(inputPath)}`;
+    const remoteOutput = `/tmp/${stem}.mp3`;
+    try {
+      await runAudioTool("docker", ["cp", inputPath, `${container}:${remoteInput}`]);
+      await runAudioTool("docker", ["exec", container, "ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", remoteInput,
+        "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", remoteOutput]);
+      await runAudioTool("docker", ["cp", `${container}:${remoteOutput}`, outputPath]);
+    } finally {
+      try { await runAudioTool("docker", ["exec", container, "rm", "-f", remoteInput, remoteOutput], 5000); } catch {}
+    }
+  }
+
+  async function downloadOneBotRecord(ref, ws, accountState) {
+    if (!ref) throw new Error("missing record reference");
+    const voiceDir = path.join(dataDir, "voice-input");
+    fs.mkdirSync(voiceDir, { recursive: true, mode: 0o700 });
+    const stem = `record-${Date.now()}-${randomBytes(4).toString("hex")}`;
+    const filePath = path.join(voiceDir, `${stem}.mp3`);
+    let rawPath = "";
+    const maxBytes = Math.min(Number(config.voice?.maxInputBytes || 5 * 1024 * 1024), 7 * 1024 * 1024);
+    try {
+      let source = "";
+      let audioBuffer = null;
+      if (ref.file) {
+        try {
+          const result = await oneBotRequest(ws, "get_record", { file: ref.file, out_format: "mp3" }, { timeoutMs: 30_000 });
+          audioBuffer = decodeOneBotAudioBase64(result?.base64, maxBytes);
+          source = String(result?.url || result?.file || "");
+          if (!audioBuffer && !source) throw new Error("get_record returned no audio");
+        } catch (error) {
+          if (!trustedAudioUrl(ref.url)) throw error;
+        }
+      }
+      if (!audioBuffer && !source && trustedAudioUrl(ref.url)) source = ref.url;
+      if (!audioBuffer && trustedAudioUrl(source)) {
+        const { buffer } = await downloadUrlToBuffer(source, { timeoutMs: 15_000, maxBytes, redirects: 0 });
+        audioBuffer = buffer;
+      } else if (!audioBuffer && /^\/app\/[A-Za-z0-9_./-]+\.(?:mp3|wav|amr|ogg)$/i.test(source) && !source.split("/").includes("..")) {
+        const container = accountById(config, accountState.id)?.protocolContainer;
+        if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/.test(String(container || ""))) throw new Error("invalid protocol container");
+        rawPath = path.join(voiceDir, `${stem}${path.extname(source).toLowerCase()}`);
+        await runAudioTool("docker", ["cp", `${container}:${source}`, rawPath]);
+        audioBuffer = fs.readFileSync(rawPath);
+      }
+      if (!audioBuffer && source) audioBuffer = decodeOneBotAudioBase64(source, maxBytes);
+      if (!audioBuffer) {
+        throw new Error("protocol did not provide a supported audio source");
+      }
+      const format = audioFormat(audioBuffer);
+      if (!format) throw new Error("protocol returned an unrecognized audio format");
+      if (audioBuffer.length > maxBytes) throw new Error("audio exceeds configured size limit");
+      if (format === "silk") throw new Error("protocol supplied Silk audio without a decoded record; get_record conversion failed");
+      if (format === "mp3") {
+        fs.writeFileSync(filePath, audioBuffer, { flag: "wx", mode: 0o600 });
+      } else {
+        if (!rawPath) {
+          rawPath = path.join(voiceDir, `${stem}.${format}`);
+          fs.writeFileSync(rawPath, audioBuffer, { flag: "wx", mode: 0o600 });
+        }
+        await convertIncomingAudio(rawPath, filePath, accountState);
+      }
+      const stat = fs.statSync(filePath);
+      if (stat.size < 4 || stat.size > maxBytes || audioFormat(fs.readFileSync(filePath)) !== "mp3") {
+        throw new Error("converted audio is invalid or exceeds configured size limit");
+      }
+      return filePath;
+    } catch (error) {
+      try { fs.unlinkSync(filePath); } catch {}
+      throw error;
+    } finally {
+      if (rawPath) try { fs.unlinkSync(rawPath); } catch {}
+    }
+  }
+
+  async function transcribeOneBotRecord(ref, ws, accountState) {
+    if (!ref || config.voice?.enabled !== true || config.voice?.asr?.enabled === false) return "";
+    const filePath = await downloadOneBotRecord(ref, ws, accountState);
+    try {
+      return String(await transcribeAudioFile({ inputPath: filePath, config: config.voice,
+        env: voiceApiEnvironment(config.voice, config.ai) })).trim().slice(0, 1000);
+    } finally {
+      try { fs.unlinkSync(filePath); } catch {}
+    }
+  }
+
+  const voiceCloneConsent = new OneShotVoiceConsent();
+  const memberVoiceDesignAt = new Map();
+
+  async function handleVoiceCommand({ event, text, conversationId, senderId, senderName, quotedAudio = [], voiceRequest = null }) {
+    const isPrivate = event.message_type === "private";
+    const addressedAccountId = isPrivate || messageMentionsSelf(event, text)
+      ? asStringId(event.__accountId) : "";
+    const chatAccount = connectedAccountForRole("chat", {
+      preferAccountId: addressedAccountId,
+      strictPreferred: Boolean(addressedAccountId)
+    });
+    const ws = chatAccount?.ws;
+    if (!ws || ws.readyState !== 1) return false;
+    const replyConfig = configForReplyAccount(chatAccount);
+    const targetId = isPrivate ? asStringId(event.user_id) : asStringId(event.group_id);
+    const voice = config.voice || {};
+    const say = async (message) => {
+      if (ws.readyState !== 1 || (!isPrivate && isQuiet(memory, targetId))) return null;
+      return oneBotRequest(ws, isPrivate ? "send_private_msg" : "send_group_msg", {
+        [isPrivate ? "user_id" : "group_id"]: targetId,
+        message
+      }, { timeoutMs: 30_000 });
+    };
+    if (voice.enabled !== true || voice.tts?.enabled === false) {
+      await say("语音功能还没开启；请在控制台配置 MiMo API 和语音开关。");
+      return false;
+    }
+    const utterance = voiceRequest?.text || text.replace(/^\/voice\s*/i, "").trim();
+    log(`voice request conversation=${conversationId} kind=${voiceRequest?.kind || "command"} account=${chatAccount.id}`);
+    if (voiceReplyMode(groupMemory(memory, conversationId).settings, voice) === "off" && !/^preset(?:\s|$)/i.test(utterance)) {
+      await say("这个会话的语音模式已关闭；请让管理员发送 /bot voice mixed 或 /bot voice force。收到的语音仍可按 ASR 设置转写。");
+      return false;
+    }
+    if (voiceRequest?.kind === "missing-context") {
+      await say("你想让我用语音读哪句话？引用那条消息再说‘用语音发一遍’就行。");
+      return false;
+    }
+    if (voiceRequest?.kind === "speak" && redactSensitive(utterance, config) !== utterance) {
+      await say("要读的内容可能包含敏感信息，这条我就不念啦。");
+      return false;
+    }
+    if (/^design(?:\s|$)/i.test(utterance)) {
+      if (voice.tts?.allowMemberVoiceDesign !== true) {
+        await say("群友临时设计音色尚未开启；管理员可在语音设置里启用。");
+        return false;
+      }
+      let design;
+      try { design = parseMemberVoiceDesign(utterance); }
+      catch (error) { await say(error.message); return false; }
+      if (redactSensitive(design.speech, config) !== design.speech) {
+        await say("要合成的话里可能有敏感信息，这条就先不读出来啦。");
+        return false;
+      }
+      const cooldownKey = `${conversationId}:${senderId}`;
+      if (Date.now() - Number(memberVoiceDesignAt.get(cooldownKey) || 0) < 5 * 60_000) {
+        await say("刚设计过音色，等五分钟再试吧。");
+        return false;
+      }
+      const claimedAt = Date.now();
+      memberVoiceDesignAt.set(cooldownKey, claimedAt);
+      if (memberVoiceDesignAt.size > 1000) memberVoiceDesignAt.delete(memberVoiceDesignAt.keys().next().value);
+      const outputDir = path.join(dataDir, "voice-output");
+      fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 });
+      const outputPath = path.join(outputDir, `design-${claimedAt}-${randomBytes(4).toString("hex")}.wav`);
+      try {
+        await synthesizeSpeechFile({ text: design.speech, outputPath,
+          model: "mimo-v2.5-tts-voicedesign", voiceDescription: design.voiceDescription,
+          config: { ...voice, outputDir }, env: voiceApiEnvironment(voice, config.ai) });
+        await say([buildRecordMessage(fs.readFileSync(outputPath))]);
+        const replyConfig = configForReplyAccount(chatAccount);
+        recordBotMessage({ historyByGroup, lastBotMessageByGroup, groupId: conversationId, text: design.speech, config: replyConfig, memory,
+          meta: { source: "voice-design-one-shot", replyToUserId: senderId, replyToSender: senderName } });
+        archiveBotReply({ event, config: replyConfig, memory, text: design.speech,
+          meta: { source: "voice-design-one-shot", replyToUserId: senderId, replyToSender: senderName } });
+        return true;
+      } catch (error) {
+        if (memberVoiceDesignAt.get(cooldownKey) === claimedAt) memberVoiceDesignAt.delete(cooldownKey);
+        warn(`one-shot voice design failed: ${error.message}`);
+        await say("刚才音色设计失败了，稍后可以再试。");
+        return false;
+      } finally {
+        try { fs.unlinkSync(outputPath); } catch {}
+      }
+    }
+    if (/^clone(?:\s|$)/i.test(utterance)) {
+      if (voice.voiceClone?.enabled !== true) {
+        await say("声音克隆尚未开启；管理员可在控制台启用本人语音的一次性克隆。");
+        return false;
+      }
+      const confirmation = utterance.match(/^clone\s+confirm\s+([A-F0-9]{8})$/i);
+      if (confirmation) {
+        const pending = voiceCloneConsent.confirm({
+          conversationId, senderId, accountId: chatAccount.id, code: confirmation[1]
+        });
+        if (!pending) {
+          await say("确认码无效或已过期，请重新引用自己的语音发起请求。");
+          return false;
+        }
+        const accountState = oneBotAccounts.get(chatAccount.id);
+        const outputDir = path.join(dataDir, "voice-output");
+        fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 });
+        const outputPath = path.join(outputDir, `clone-${Date.now()}-${randomBytes(4).toString("hex")}.wav`);
+        let inputPath = "";
+        try {
+          inputPath = await downloadOneBotRecord(pending.ref, ws, accountState);
+          await synthesizeSpeechFile({
+            text: pending.speech,
+            outputPath,
+            model: "mimo-v2.5-tts-voiceclone",
+            referenceAudioPath: inputPath,
+            consentToVoiceClone: true,
+            config: { ...voice, outputDir },
+            env: voiceApiEnvironment(voice, config.ai)
+          });
+          await say([buildRecordMessage(fs.readFileSync(outputPath))]);
+          const replyConfig = configForReplyAccount(chatAccount);
+          recordBotMessage({ historyByGroup, lastBotMessageByGroup, groupId: conversationId, text: pending.speech, config: replyConfig, memory,
+            meta: { source: "voice-clone-one-shot", replyToUserId: senderId, replyToSender: senderName } });
+          archiveBotReply({ event, config: replyConfig, memory, text: pending.speech,
+            meta: { source: "voice-clone-one-shot", replyToUserId: senderId, replyToSender: senderName } });
+          return true;
+        } catch (error) {
+          warn(`one-shot voice clone failed: ${error.message}`);
+          await say("这次语音合成失败了，确认已失效；可以稍后重新引用自己的语音再试。");
+          return false;
+        } finally {
+          if (inputPath) try { fs.unlinkSync(inputPath); } catch {}
+          try { fs.unlinkSync(outputPath); } catch {}
+        }
+      }
+      const request = utterance.match(/^clone\s+self\s+(.{1,200})$/is);
+      if (!request) {
+        await say("仅支持克隆自己的语音：引用自己发过的语音，发送 /bot voice clone self 要说的话，再按提示确认。每次只合成一条，不保存音色样本。");
+        return false;
+      }
+      const refs = extractRecordRefs(event.message || event.raw_message || "", {
+        quotedMessages: quotedAudio,
+        isVerifiedProtocolFile: (value) => /^[A-Za-z0-9_.-]{1,180}\.(?:silk|amr|mp3|wav|ogg)$/i.test(value)
+      });
+      const ownQuotedRef = refs.find((ref) => ref.source === "quoted" && ref.senderId === senderId);
+      if (!ownQuotedRef) {
+        await say("请引用你自己发的语音条。机器人不会克隆其他群友的声音。");
+        return false;
+      }
+      const code = voiceCloneConsent.request({
+        conversationId, senderId, accountId: chatAccount.id, ref: ownQuotedRef,
+        speech: request[1].trim()
+      });
+      await say(`确认：只把你引用的本人语音用于本次合成「${request[1].trim()}」，不保存声音样本。若同意，请在 2 分钟内发送 /bot voice clone confirm ${code}。`);
+      return true;
+    }
+    const presetCommand = utterance.match(/^preset(?:\s+(.+))?$/i);
+    if (presetCommand) {
+      const allowed = asArray(voice.tts?.allowedVoices?.length ? voice.tts.allowedVoices : ["mimo_default"]);
+      const requested = String(presetCommand[1] || "").trim();
+      if (!requested || requested === "list") {
+        await say(`可选音色：${allowed.join("、")}。用 /bot voice preset 音色ID 切换。`);
+        return true;
+      }
+      if (voice.tts?.model !== "mimo-v2.5-tts" || !allowed.includes(requested)) {
+        await say("这个音色尚未开放；请从 /bot voice preset list 中选择。");
+        return false;
+      }
+      const gm = groupMemory(memory, conversationId);
+      const lastChangedAt = Number(gm.settings?.voicePresetUpdatedAt || 0);
+      if (Date.now() - lastChangedAt < 60_000 && !taskModeConfig(config).ownerUserIds.includes(senderId)) {
+        await say("刚换过音色，等一分钟再切，免得大家听晕。");
+        return false;
+      }
+      gm.settings.voicePreset = requested;
+      gm.settings.voicePresetUpdatedAt = Date.now();
+      saveMemory(memory);
+      await say(`好，这个会话的语音音色换成「${requested}」了。`);
+      return true;
+    }
+    const directSpeech = ["test", "speak", "joke", "greeting"].includes(voiceRequest?.kind)
+      ? utterance
+      : /^say\s+(.{1,350})$/is.exec(utterance)?.[1]?.trim();
+    if (!utterance || utterance.length > 350) {
+      await say("用法：/voice 想问我的话（最多 350 字）。我会用语音回答。");
+      return false;
+    }
+    let response = directSpeech;
+    if (!response) {
+      const history = historyByGroup.get(conversationId) || [];
+      const current = { sender: senderName, user_id: senderId, text: utterance, at: Date.now() };
+      const prompt = buildPrompt({
+        config: replyConfig, history, current, mode: "direct",
+        memoryText: compactMemory(memory, conversationId, replyConfig),
+        contextBundle: config.reply?.useContextBundle === false ? null
+          : buildContextBundle({ memory, groupId: conversationId, history, current, config: replyConfig })
+      });
+      try {
+        const voiceAiConfig = {
+          ...replyConfig,
+          ai: { ...replyConfig.ai, timeoutMs: Math.min(25_000, Number(replyConfig.ai?.timeoutMs || 120_000)) }
+        };
+        response = trimForGroup(await callHermes(prompt, voiceAiConfig), replyConfig, 350);
+      } catch (error) {
+        warn(`voice reply draft failed conversation=${conversationId}: ${error.message}`);
+      }
+      if (!response || response === "__SKIP__") response = "这句我暂时没想好怎么答，先用语音回你一声。";
+    }
+    try {
+      const outputDir = path.join(dataDir, "voice-output");
+      fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 });
+      const outputPath = path.join(outputDir, `speech-${Date.now()}-${randomBytes(4).toString("hex")}.wav`);
+      const ttsModel = voice.tts?.model || "mimo-v2.5-tts";
+      const selectedPreset = groupMemory(memory, conversationId).settings?.voicePreset;
+      const effectivePreset = asArray(voice.tts?.allowedVoices).includes(selectedPreset) ? selectedPreset : (voice.tts?.voice || "mimo_default");
+      try {
+        await synthesizeSpeechFile({
+          text: response, outputPath,
+          model: ttsModel,
+          ...(ttsModel === "mimo-v2.5-tts-voicedesign"
+            ? { voiceDescription: voice.tts?.voiceDescription }
+            : { voice: effectivePreset }),
+          config: { ...voice, outputDir },
+          env: voiceApiEnvironment(voice, config.ai)
+        });
+        const audio = fs.readFileSync(outputPath);
+        const sent = await say([buildRecordMessage(audio)]);
+        if (!sent) return false;
+        log(`voice reply sent conversation=${conversationId} account=${chatAccount.id} bytes=${audio.length}`);
+      } finally {
+        try { fs.unlinkSync(outputPath); } catch {}
+      }
+      recordBotMessage({ historyByGroup, lastBotMessageByGroup, groupId: conversationId, text: response, config: replyConfig, memory,
+        meta: { source: "voice-reply", replyToUserId: senderId, replyToSender: senderName } });
+      archiveBotReply({ event, config: replyConfig, memory, text: response,
+        meta: { source: "voice-reply", replyToUserId: senderId, replyToSender: senderName } });
+      return true;
+    } catch (error) {
+      warn(`voice generation or send failed: ${error.message}`);
+      await say(response ? `语音发送失败，先用文字回你：${response}` : "刚才语音回复失败了，请稍后重试。");
+      return false;
+    }
+  }
+
+  async function executeAutomationRule(rule, conversationId, { event = null, senderId = "", senderName = "", source = "schedule" } = {}) {
+    const selectedAccount = rule.accountId
+      ? configuredAccountDefinitions(config).find((item) => item.id === rule.accountId && item.enabled !== false && oneBotAccounts.get(item.id)?.ws?.readyState === 1)
+      : connectedAccountForRole(rule.action.kind === "task" ? "task" : "chat");
+    const ws = selectedAccount ? oneBotAccounts.get(selectedAccount.id)?.ws : null;
+    if (!ws || ws.readyState !== 1 || config.automation?.enabled !== true) return false;
+    const replyConfig = configForReplyAccount(selectedAccount);
+    const isPrivate = conversationId.startsWith("private:");
+    const recipientId = conversationId.split(":")[1];
+    if (!recipientId || (!isPrivate && (isQuiet(memory, recipientId) || !shouldHandleGroup(recipientId, config)))) return false;
+    if (rule.action.kind === "task" ? !accountCanOfferTask(config, selectedAccount.id) : !accountCanChat(config, selectedAccount.id)) return false;
+    const occurrenceDay = source === "schedule"
+      ? JSON.parse(automationOccurrenceKey(rule, conversationId, new Date()))[2] : "";
+    if (source === "schedule" && wasDailySent(memory, conversationId, `automation:${rule.id}`, occurrenceDay)) return false;
+    const outboundEvent = event || (isPrivate
+      ? { message_type: "private", user_id: recipientId }
+      : { message_type: "group", group_id: recipientId, user_id: "system" });
+    let response = "";
+    if (rule.action.kind === "task") {
+      if (taskRuntime.activeForConversation(conversationId)) return false;
+      const task = taskRuntime.createOffer({
+        accountId: selectedAccount.id,
+        conversationId,
+        messageType: isPrivate ? "private" : "group",
+        groupId: isPrivate ? "" : recipientId,
+        userId: senderId || "automation",
+        senderName: senderName || "自动化",
+        objective: rule.prompt,
+        summary: rule.prompt,
+        requestedTools: ["web", "todo"],
+        expectedArtifacts: [],
+        complexity: "standard",
+        reasoningEffort: "medium",
+        permissionTier: "isolated"
+      });
+      response = `自动化任务「${rule.id}」已准备好，确认后才执行。\n${taskOfferText(task)}`;
+    } else {
+      const history = historyByGroup.get(conversationId) || [];
+      const current = { sender: "自动化", user_id: "system", text: rule.prompt };
+      const contextBundle = config.reply?.useContextBundle === false
+        ? null
+        : buildContextBundle({ memory, groupId: conversationId, history, current, config: replyConfig });
+      const prompt = buildPrompt({
+        config: replyConfig, history, current,
+        mode: rule.action.kind === "summary" ? "summary" : "automation",
+        memoryText: compactMemory(memory, conversationId, replyConfig),
+        contextBundle
+      });
+      response = trimForGroup(await callHermes(prompt, replyConfig), replyConfig);
+    }
+    if (!response || response === "__SKIP__" || ws.readyState !== 1) return false;
+    if (!isPrivate && isQuiet(memory, recipientId)) return false;
+    if (source === "schedule") {
+      // Claim immediately before the irreversible send. AI generation failures remain retryable.
+      markDailySent(memory, conversationId, `automation:${rule.id}`, occurrenceDay, "sending");
+      saveMemory(memory);
+    }
+    try {
+      await oneBotRequest(ws, isPrivate ? "send_private_msg" : "send_group_msg", {
+        [isPrivate ? "user_id" : "group_id"]: recipientId,
+        message: response
+      }, { timeoutMs: 30_000 });
+    } catch (error) {
+      if (source === "schedule") {
+        markDailySent(memory, conversationId, `automation:${rule.id}`, occurrenceDay, "unconfirmed");
+        saveMemory(memory);
+      }
+      throw error;
+    }
+    recordBotMessage({ historyByGroup, lastBotMessageByGroup, groupId: conversationId, text: response, config: replyConfig, memory,
+      meta: { source: `automation:${rule.id}`, replyToUserId: senderId, replyToSender: senderName } });
+    archiveBotReply({ event: outboundEvent, config: replyConfig, memory, text: response,
+      meta: { source: `automation:${rule.id}`, replyToUserId: senderId, replyToSender: senderName } });
+    if (source === "schedule") {
+      markDailySent(memory, conversationId, `automation:${rule.id}`, occurrenceDay);
+      saveMemory(memory);
+    }
+    log(`automation sent rule=${rule.id} conversation=${conversationId} source=${source}`);
+    return true;
+  }
+
+  async function runScheduledAutomation() {
+    if (automationRunning || config.automation?.enabled !== true) return;
+    const result = validateAutomationRules(config.automation.rules || []);
+    if (!result.valid) {
+      warn(`automation config invalid: ${result.errors.map((error) => error.message).join("; ")}`);
+      return;
+    }
+    automationRunning = true;
+    try {
+      const date = new Date();
+      for (const rule of result.rules) {
+        if (rule.trigger.type !== "schedule") continue;
+        for (const conversationId of rule.scope.conversationIds) {
+          if (!dueAutomationRules(date, [rule], conversationId).length) continue;
+          try {
+            await executeAutomationRule(rule, conversationId);
+          } catch (error) {
+            warn(`automation schedule failed rule=${rule.id} conversation=${conversationId}: ${error.message}`);
+          }
+        }
+      }
+    } finally {
+      automationRunning = false;
+    }
+  }
+
+  async function runScheduledDailyMessages() {
+    if (dailyMessagesRunning || config.dailyMessages?.enabled === false || !accountCanChat(config, activeAccountId)) return;
+    const ws = activeOneBotWs;
+    if (!ws || ws.readyState !== 1) return;
+    dailyMessagesRunning = true;
+    try {
+      await runDailyMessages({
+        ws, config, memory, historyByGroup, lastEventByGroup, lastBotMessageByGroup,
+        activeSocket: () => activeOneBotWs,
+        sendMessage: (socket, groupId, response) => oneBotRequest(socket, "send_group_msg", {
+          group_id: groupId,
+          message: response
+        }, { timeoutMs: 30_000 })
+      });
+    } finally {
+      dailyMessagesRunning = false;
+    }
+  }
+
+  // One scheduler per bridge process, not one scheduler per connected QQ account.
+  setInterval(() => {
+    void runScheduledDailyMessages().catch((err) => warn(`daily scheduler failed: ${err.message}`));
+  }, Number(config.dailyMessages?.checkIntervalMs || 60_000));
+  setInterval(() => {
+    void runScheduledAutomation().catch((err) => warn(`automation scheduler failed: ${err.message}`));
+  }, 30_000);
 
   wss.on("connection", (ws, req) => registerOneBotConnection(ws, req));
 
@@ -11574,8 +12708,8 @@ async function main() {
     const wanted = new Set();
     for (const account of configuredAccountDefinitions(config)) {
       if (accountProtocol(account) !== "snowluma") continue;
-      wanted.add(account.id);
       if (account.enabled === false) continue;
+      wanted.add(account.id);
       const existing = forwardOneBotRuntime.get(account.id) || {};
       if (existing.ws && [WebSocket.CONNECTING, WebSocket.OPEN].includes(existing.ws.readyState)) continue;
       const nowMs = Date.now();

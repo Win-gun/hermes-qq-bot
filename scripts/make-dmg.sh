@@ -3,8 +3,13 @@ set -euo pipefail
 
 project_dir="${0:A:h:h}"
 build_dir="${HERMES_QQ_BUILD_OUT:-out}"
-app_path="$project_dir/$build_dir/Hermes QQ Bot-darwin-arm64/Hermes QQ Bot.app"
-output_dir="$project_dir/$build_dir/make/dmg/arm64"
+if [[ "$build_dir" = /* ]]; then
+  build_root="$build_dir"
+else
+  build_root="$project_dir/$build_dir"
+fi
+app_path="$build_root/Hermes QQ Bot-darwin-arm64/Hermes QQ Bot.app"
+output_dir="$build_root/make/dmg/arm64"
 output_path="$output_dir/Hermes-QQ-Bot-1.0.0-beta.4-arm64.dmg"
 stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/hermesqq-dmg.XXXXXX")"
 

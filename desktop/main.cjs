@@ -17,6 +17,10 @@ let bridge = null;
 let bridgeIntentionalStop = false;
 let quitting = false;
 let restartTimer = null;
+let dockerRecoveryTimer = null;
+let dockerRecoveryInFlight = false;
+let dockerDownSince = 0;
+let dockerLastLaunchAt = 0;
 let lastBridgeExit = null;
 let bridgeInstanceId = "";
 let externalHost = false;
@@ -262,6 +266,35 @@ function execCapture(command, args = [], timeoutMs = 10_000) {
       resolve({ ok: code === 0, code, stdout: Buffer.concat(stdout).toString("utf8").trim(), stderr: Buffer.concat(stderr).toString("utf8").trim() });
     });
   });
+}
+
+async function recoverDockerIfNeeded() {
+  if (dockerRecoveryInFlight || quitting || bridgeIntentionalStop || !bridge || !setupComplete()) return;
+  dockerRecoveryInFlight = true;
+  try {
+    const docker = await execCapture(resolveExecutable("docker"), ["info", "--format", "{{.ServerVersion}}"], 8000);
+    if (docker.ok) {
+      if (dockerDownSince) appendDesktopLog("Docker recovered; SnowLuma containers can reconnect");
+      dockerDownSince = 0;
+      return;
+    }
+    const now = Date.now();
+    if (!dockerDownSince) dockerDownSince = now;
+    if (now - dockerDownSince < 20_000 || now - dockerLastLaunchAt < 5 * 60_000) return;
+    if (!fs.existsSync("/Applications/Docker.app")) {
+      appendDesktopLog("Docker unavailable; Docker Desktop is not installed in Applications");
+      dockerLastLaunchAt = now;
+      return;
+    }
+    dockerLastLaunchAt = now;
+    appendDesktopLog("Docker unavailable while bot is running; opening Docker Desktop once");
+    const started = await execCapture("open", ["-a", "Docker"], 10_000);
+    if (!started.ok) appendDesktopLog(`Docker Desktop open failed: ${started.error || started.stderr || started.code}`);
+  } catch (error) {
+    appendDesktopLog(`Docker recovery check failed: ${error.message}`);
+  } finally {
+    dockerRecoveryInFlight = false;
+  }
 }
 
 function portAvailable(port) {
@@ -715,6 +748,8 @@ else {
     ensureRuntimeDirectories();
     registerIpc();
     await startBridgeWhenPortsFree().catch((error) => appendDesktopLog(`bridge startup failed: ${error.message}`));
+    dockerRecoveryTimer = setInterval(() => { void recoverDockerIfNeeded(); }, 20_000);
+    void recoverDockerIfNeeded();
     createTray();
     createWindow();
   }).catch((error) => appendDesktopLog(`desktop startup failed: ${error.stack || error.message}`));
@@ -722,4 +757,4 @@ else {
 
 app.on("activate", showWindow);
 app.on("window-all-closed", () => { /* tray application: keep running */ });
-app.on("before-quit", () => { quitting = true; bridgeIntentionalStop = true; clearTimeout(restartTimer); if (bridge) bridge.kill(); });
+app.on("before-quit", () => { quitting = true; bridgeIntentionalStop = true; clearTimeout(restartTimer); clearInterval(dockerRecoveryTimer); if (bridge) bridge.kill(); });

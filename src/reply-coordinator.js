@@ -174,6 +174,26 @@ export class ReplyCoordinator {
     job.controller?.abort(reason);
   }
 
+  dropSenderJobs(conversationId, senderId, reason = "direct-media-request") {
+    const state = this.states.get(String(conversationId || "unknown"));
+    if (!state) return 0;
+    const sender = String(senderId || "");
+    let dropped = 0;
+    if (state.active && !state.active.dropped && state.active.senderId === sender) {
+      this.cancelActive(state.active, reason, { drop: true });
+      dropped += 1;
+    }
+    state.pending = state.pending.filter((job) => {
+      if (job.senderId !== sender || job.dropped) return true;
+      job.dropped = true;
+      job.resolve?.({ ok: true, skipped: true, reason });
+      this.metrics.dropped += 1;
+      dropped += 1;
+      return false;
+    });
+    return dropped;
+  }
+
   enqueue(input = {}) {
     const cfg = this.config();
     const job = {

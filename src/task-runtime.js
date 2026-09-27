@@ -115,6 +115,7 @@ export class TaskRuntime {
       status: "offered",
       conversationId: String(input.conversationId || ""),
       messageType: input.messageType || "group",
+      accountId: String(input.accountId || ""),
       groupId: input.groupId ? String(input.groupId) : "",
       userId: String(input.userId || ""),
       senderName: input.senderName || input.userId || "",
