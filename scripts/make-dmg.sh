@@ -10,7 +10,8 @@ else
 fi
 app_path="$build_root/Hermes QQ Bot-darwin-arm64/Hermes QQ Bot.app"
 output_dir="$build_root/make/dmg/arm64"
-output_path="$output_dir/Hermes-QQ-Bot-1.0.0-beta.4-arm64.dmg"
+app_version="$(node -p 'require(process.argv[1]).version' "$project_dir/package.json")"
+output_path="$output_dir/Hermes-QQ-Bot-${app_version}-arm64.dmg"
 stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/hermesqq-dmg.XXXXXX")"
 
 cleanup() {

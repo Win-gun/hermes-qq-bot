@@ -5,7 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
 import {
   applyCanonicalCorrections,
@@ -21,6 +21,10 @@ import { accountCanChat, accountCanOfferTask, accountTopology, botModeForAccount
 import { automationOccurrenceKey, dueAutomationRules, matchAutomationCommand, validateAutomationRules } from "./automation-rules.js";
 import { synthesizeSpeechFile, transcribeAudioFile } from "./voice-service.js";
 import { voiceApiEnvironment, voiceApiKeyAvailable } from "./voice-credentials.js";
+import { getVoiceSecret, setVoiceSecret, deleteVoiceSecret } from "./voice-secret-store.js";
+import { getApiSecret, setApiSecret, deleteApiSecret } from "./api-secret-store.js";
+import { normalizeApiCenter, validateApiCenter, applyApiCenterBindings, resolveApiCapability, syncLegacyApiPatch } from "./api-center.js";
+import { searchWithMimoPlugin } from "./mimo-web-search.js";
 import { buildRecordMessage, extractRecordRefs, isPublicHttpUrl } from "./voice-onebot.js";
 import { OneShotVoiceConsent } from "./voice-consent.js";
 import { parseMemberVoiceDesign } from "./voice-design.js";
@@ -318,6 +322,7 @@ function loadConfig() {
   const chosen = fs.existsSync(configPath) ? configPath : fallbackConfigPath;
   const raw = fs.readFileSync(chosen, "utf8");
   const cfg = JSON.parse(raw);
+  if (cfg.apiCenter?.connections?.length) applyApiCenterBindings(cfg, normalizeApiCenter(cfg));
   cfg.__path = chosen;
   return cfg;
 }
@@ -3304,6 +3309,22 @@ function rankSearchResults(results, query, config) {
 
 async function webSearch(query, config) {
   const provider = String(config.webSearch?.provider || "google").toLowerCase();
+  if (provider === "mimo-web-search") {
+    const center = normalizeApiCenter(config);
+    const selected = center.searchProfiles.find((item) => item.id === center.searchBinding);
+    if (selected?.provider !== "mimo-web-search") throw new Error("MiMo 联网方案未绑定");
+    const connection = center.connections.find((item) => item.id === selected.connectionId);
+    if (!connection) throw new Error("MiMo 联网连接不存在");
+    const credentialEnv = connection.apiKeyEnv || "MIMO_API_KEY";
+    const apiKey = connection.credentialSource === "keychain" ? getApiSecret(connection.credentialRef)
+      : connection.credentialSource === "legacy-voice-keychain" ? getVoiceSecret()
+        : voiceApiEnvironment({ apiKeyEnv: credentialEnv, credentialSource: "existing" }, config.ai)[credentialEnv]
+          || (["MIMO_API_KEY", "XIAOMI_API_KEY"].includes(credentialEnv)
+            ? voiceApiEnvironment({ apiKeyEnv: "MIMO_API_KEY", credentialSource: "existing" }, config.ai).MIMO_API_KEY : "");
+    return searchWithMimoPlugin({ query, model: selected.model, baseUrl: connection.baseUrl, apiKey,
+      maxKeyword: selected.maxKeyword, limit: selected.maxResults, timeoutMs: selected.timeoutMs,
+      forceSearch: selected.forceSearch });
+  }
   const configuredOrder = asArray(config.webSearch?.providerOrder || config.webSearch?.providers).map((x) => String(x).toLowerCase()).filter(Boolean);
   const providers = configuredOrder.length
     ? configuredOrder
@@ -3362,7 +3383,7 @@ async function buildWebSearchContext(decision, config) {
   if (!decision?.matched) return { text: "", result: null };
   const query = clampText(decision.query, Number(config.webSearch?.maxQueryLength || 120));
   try {
-    if (decision.kind === "weather" || isWeatherQuery(query)) {
+    if (config.webSearch?.provider !== "mimo-web-search" && (decision.kind === "weather" || isWeatherQuery(query))) {
       const location = decision.location || extractWeatherLocation(query, config);
       if (location) {
         try {
@@ -3375,6 +3396,11 @@ async function buildWebSearchContext(decision, config) {
       return { text: `查询：${query}\n类型：天气直查\n结果：没有识别到城市/地点。\n回答要求：请反问用户要查哪个城市，不要硬编天气。`, result: { provider: "weather", results: [], error: "missing location" } };
     }
     const search = await webSearch(query, config);
+    if (search.provider === "mimo-web-search") {
+      if (!search.searched) return { text: `查询：${query}\n搜索源：MiMo 官方联网插件\n结果：模型没有触发联网搜索。回答要求：不要声称已查到实时信息。`, result: { ...search, error: "plugin not invoked" } };
+      const sources = search.results.map((item, index) => `${index + 1}. ${item.title}\n   链接：${item.link}${item.snippet ? `\n   摘要：${item.snippet}` : ""}`);
+      return { text: `查询：${query}\n搜索源：MiMo 官方联网插件\n搜索时间：${localNowText()}\n插件摘要：${search.answer || "（无摘要）"}\n来源：${sources.join("\n") || "（未返回来源链接）"}\n回答要求：自然整理插件摘要；只引用实际返回的来源。来源不足时说明未能独立核对，不要编造链接。`, result: search };
+    }
     if (!search.results.length) return { text: `查询：${query}\n搜索源：${search.provider}\n结果：没有搜到可用结果。${search.error ? `\n错误：${search.error}` : ""}`, result: search };
     const lines = search.results.map((item, index) => {
       const snippet = item.snippet ? `\n   摘要：${item.snippet}` : "";
@@ -3384,7 +3410,9 @@ async function buildWebSearchContext(decision, config) {
     });
     return { text: `查询：${query}\n搜索源：${search.provider}\n搜索时间：${localNowText()}\n核心关键词：${searchCoreTerms(query).join("、") || "（无）"}\n结果：\n${lines.join("\n")}\n回答要求：只基于标题/摘要/链接中和核心关键词直接相关的结果回答；如果结果不够相关或互相矛盾，先说明“搜到的结果不够准/不确定”，不要硬编。`, result: search };
   } catch (err) {
-    return { text: `查询：${query}\n搜索失败：${err.message}`, result: { provider: "unknown", results: [], error: err.message } };
+    const reason = config.webSearch?.provider === "mimo-web-search" && ["AbortError", "TimeoutError"].includes(err?.name)
+      ? "MiMo 联网插件请求超时" : err.message;
+    return { text: `查询：${query}\n搜索失败：${reason}`, result: { provider: config.webSearch?.provider || "unknown", results: [], error: reason } };
   }
 }
 
@@ -3821,11 +3849,21 @@ function callHermesWithImage(prompt, imagePath, config) {
   if (provider) args.push("--provider", provider);
   if (toolsets) args.push("-t", toolsets);
   const timeoutMs = Number(config.vision?.timeoutMs || config.ai?.timeoutMs || 120000);
+  const visionConfig = {
+    ...config,
+    ai: {
+      ...config.ai, provider, model,
+      baseUrl: config.vision?.baseUrl ?? config.ai?.baseUrl ?? "",
+      apiKeyEnv: config.vision?.apiKeyEnv ?? config.ai?.apiKeyEnv ?? "",
+      credentialSource: config.vision?.credentialSource || "existing",
+      credentialRef: config.vision?.credentialRef || ""
+    }
+  };
 
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: commandCwd,
-      env: process.env,
+      env: hermesRuntimeEnv(visionConfig),
       stdio: ["ignore", "pipe", "pipe"]
     });
     let stdout = "";
@@ -4572,6 +4610,8 @@ function aiSettingsFromConfig(config) {
     model: ai.model || valueAfter("-m", "--model") || "",
     baseUrl: ai.baseUrl || ai.baseURL || "",
     apiKeyEnv: normalizeApiKeyEnvName(ai.apiKeyEnv || "", ai.provider || valueAfter("--provider") || ""),
+    credentialSource: ai.credentialSource || "existing",
+    credentialRef: ai.credentialRef || "",
     reasoningEffort: ai.reasoningEffort || ai.reasoning || "",
     timeoutMs: Number(ai.timeoutMs || 120000),
     apiKeyEnvPresent: ai.apiKeyEnv ? Boolean(process.env[ai.apiKeyEnv]) : false
@@ -4698,12 +4738,25 @@ function hermesRuntimeEnv(config) {
     HERMES_REASONING_EFFORT: String(ai.reasoningEffort || "")
   };
   const provider = String(ai.provider || "").trim().toLowerCase();
-  const sourceKey = ai.apiKeyEnv ? process.env[ai.apiKeyEnv] : "";
+  let sourceKey = ai.apiKeyEnv ? process.env[ai.apiKeyEnv] : "";
+  const keyEnv = provider === "custom" || provider === "openai-api" ? "OPENAI_API_KEY"
+    : provider === "xiaomi" || provider === "mimo" ? "XIAOMI_API_KEY"
+    : provider === "deepseek" ? "DEEPSEEK_API_KEY"
+      : provider.includes("minimax-cn") || provider.includes("minimax-china") ? "MINIMAX_CN_API_KEY"
+        : provider.includes("minimax") ? "MINIMAX_API_KEY" : "";
+  if (ai.credentialSource === "keychain" || ai.credentialSource === "legacy-voice-keychain") {
+    if (keyEnv) delete env[keyEnv];
+    if (ai.apiKeyEnv) delete env[ai.apiKeyEnv];
+    sourceKey = ai.credentialSource === "keychain" ? getApiSecret(ai.credentialRef) : getVoiceSecret();
+    if (!sourceKey) throw new Error("所选 Keychain 凭据不可用，请在 API 管理中重新配置");
+  }
+  if (sourceKey && ai.apiKeyEnv) env[ai.apiKeyEnv] = sourceKey;
   if (sourceKey) {
     if (provider === "custom") env.OPENAI_API_KEY = sourceKey;
     else if (provider === "openai-api") env.OPENAI_API_KEY = sourceKey;
     else if (provider === "xiaomi" || provider === "mimo") env.XIAOMI_API_KEY = sourceKey;
     else if (provider === "deepseek") env.DEEPSEEK_API_KEY = sourceKey;
+    else if (keyEnv) env[keyEnv] = sourceKey;
   }
   if (ai.baseUrl) {
     if (provider === "custom") {
@@ -4714,6 +4767,27 @@ function hermesRuntimeEnv(config) {
     else if (provider === "deepseek") env.DEEPSEEK_BASE_URL = ai.baseUrl;
   }
   return env;
+}
+
+function aiConfigForCapability(config, capability) {
+  const selected = resolveApiCapability(config, capability);
+  if (!selected || capability === "chat") return config;
+  const { profile, connection } = selected;
+  const ai = normalizeAiPatch({
+    command: profile.command || config.ai?.command || "hermesqq2",
+    args: profile.args || ["-z"], provider: connection.provider,
+    model: profile.model, baseUrl: connection.baseUrl || "",
+    apiKeyEnv: connection.apiKeyEnv || "", timeoutMs: profile.timeoutMs || 120000,
+    reasoningEffort: profile.reasoningEffort || "none"
+  }, config);
+  ai.credentialSource = connection.credentialSource || "existing";
+  ai.credentialRef = connection.credentialRef || "";
+  return { ...config, ai };
+}
+
+function voiceConfigForCapability(config, capability) {
+  const slot = capability === "asr" ? config.voice?.asrApi : config.voice?.ttsApi;
+  return slot ? { ...config.voice, ...slot } : config.voice;
 }
 
 function runCommand(command, args = [], { timeoutMs = 30000, killGraceMs = 1500 } = {}) {
@@ -5597,6 +5671,7 @@ function configuredAccountDefinitions(config) {
     role: "primary",
     displayName: stringValue(primaryRaw.displayName || primaryRaw.name || config.persona?.displayName || "Hermes小跟班").trim() || "Hermes小跟班",
     styleProfileId: stringValue(primaryRaw.styleProfileId || "").trim(),
+    promptOverride: stringValue(primaryRaw.promptOverride || ""),
     protocol: accountProtocol(primaryRaw),
     onebotPath: String(primaryRaw.onebotPath || config.listen?.path || "/onebot"),
     napcatContainer: String(primaryRaw.napcatContainer || "napcat"),
@@ -5617,6 +5692,7 @@ function configuredAccountDefinitions(config) {
       role: "standby",
       displayName: stringValue(item.displayName || item.name || `Hermes小跟班${index + 2}`).trim() || `Hermes小跟班${index + 2}`,
       styleProfileId: stringValue(item.styleProfileId || "").trim(),
+      promptOverride: stringValue(item.promptOverride || ""),
       protocol: accountProtocol(item),
       onebotPath: String(item.onebotPath || primary.onebotPath),
       napcatContainer: String(item.napcatContainer || `napcat-standby-${index + 1}`),
@@ -6890,7 +6966,7 @@ async function runHermesAgentTask(task, { signal, outputsDir, config: runtimeCon
   }
   const fileContext = taskGrantedFileContext(task, config);
   const taskAccount = accountById(config, task.accountId) || accountById(config, config.accounts?.primary?.id || "primary");
-  const taskStyle = accountTopology(config) !== "failover" && taskAccount?.styleProfileId
+  const taskStyle = accountTopology(config) !== "failover" && (taskAccount?.styleProfileId || taskAccount?.promptOverride)
     ? systemPromptForAccount(config, taskAccount.id).trim().slice(0, 3000)
     : "";
   const prompt = `你正在执行一个由 QQ Bot 正式确认的后台任务。保持 Hermes Agent 的规划和工具能力，但严格遵守权限。
@@ -6918,9 +6994,10 @@ ${research.text ? `\n联网检索证据：\n${research.text}` : ""}
   ]
 }
 产物最多 8 个。若用户要求 PDF，请把完整、详细、可直接排版的正文放进一个 .md 产物，桥接层会把它可靠转换成真正的 PDF；不要把普通文本伪装成 .pdf。不要声称没有证据的操作成功；如果工具失败，把 ok 设为 false 并在 summary 说明。`;
-  const ai = aiSettingsFromConfig(config);
-  const command = config.ai?.command || "hermesqq2";
-  const args = [...hermesProfileArgPrefix(config), "chat", "-q", prompt, "-Q"];
+  const taskConfig = aiConfigForCapability(config, "task");
+  const ai = aiSettingsFromConfig(taskConfig);
+  const command = taskConfig.ai?.command || "hermesqq2";
+  const args = [...hermesProfileArgPrefix(taskConfig), "chat", "-q", prompt, "-Q"];
   if (ai.model) args.push("-m", ai.model);
   if (ai.provider) args.push("--provider", ai.provider);
   if (allowedToolsets.size) args.push("-t", Array.from(allowedToolsets).join(","));
@@ -6938,7 +7015,7 @@ ${research.text ? `\n联网检索证据：\n${research.text}` : ""}
     }
     const child = spawn(spawnCommand, spawnArgs, {
       cwd: outputsDir,
-      env: { ...process.env, HERMES_REASONING_EFFORT: String(task.reasoningEffort || "medium") },
+      env: { ...hermesRuntimeEnv(taskConfig), HERMES_REASONING_EFFORT: String(task.reasoningEffort || "medium") },
       stdio: ["ignore", "pipe", "pipe"]
     });
     let stdout = "";
@@ -7122,6 +7199,12 @@ async function runDailyMessages({ ws, config, memory, historyByGroup, lastEventB
 function publicConfig(config) {
   const rawVoiceEnvName = String(config.voice?.apiKeyEnv || "MIMO_API_KEY");
   const voiceEnvName = /^[A-Za-z_][A-Za-z0-9_]*$/.test(rawVoiceEnvName) ? rawVoiceEnvName : "MIMO_API_KEY";
+  let voiceKeyAvailable = false;
+  let keychainStored = false;
+  try {
+    voiceKeyAvailable = voiceApiKeyAvailable(config.voice, config.ai);
+    if (config.voice?.credentialSource === "keychain") keychainStored = voiceKeyAvailable;
+  } catch { /* Keychain can be locked or unavailable; keep the admin page usable. */ }
   return {
     botFeatures: deepClone(config.botFeatures || {}),
     styleProfiles: deepClone(config.styleProfiles || {}),
@@ -7130,8 +7213,10 @@ function publicConfig(config) {
     voice: {
       enabled: config.voice?.enabled === true,
       replyMode: voiceReplyMode({}, config.voice),
+      credentialSource: config.voice?.credentialSource === "keychain" ? "keychain" : "existing",
       apiKeyEnv: voiceEnvName,
-      apiKeyEnvPresent: voiceApiKeyAvailable(config.voice, config.ai),
+      apiKeyEnvPresent: voiceKeyAvailable,
+      keychainStored,
       timeoutMs: config.voice?.timeoutMs,
       maxInputBytes: config.voice?.maxInputBytes,
       maxOutputBytes: config.voice?.maxOutputBytes,
@@ -7189,6 +7274,36 @@ function publicConfig(config) {
       configPath: config.__path || configPath
     }
   };
+}
+
+function apiCenterRevision(center) {
+  return createHash("sha256").update(JSON.stringify(center)).digest("hex");
+}
+
+function publicApiCenter(config) {
+  const center = normalizeApiCenter(config);
+  const credentialStatus = Object.fromEntries(center.connections.map((connection) => {
+    let status = "external";
+    if (connection.credentialSource === "keychain" || connection.credentialSource === "legacy-voice-keychain") {
+      try {
+        const secret = connection.credentialSource === "keychain"
+          ? getApiSecret(connection.credentialRef) : getVoiceSecret();
+        status = secret ? "configured" : "missing";
+      } catch { status = "unavailable"; }
+    } else if (connection.apiKeyEnv && process.env[connection.apiKeyEnv]) status = "configured";
+    return [connection.id, status];
+  }));
+  return { ok: true, center, revision: apiCenterRevision(center), credentialStatus };
+}
+
+function apiCenterTestError(error) {
+  const message = String(error?.message || "");
+  if (/联网服务插件尚未开通/.test(message)) return "MiMo 密钥无效或官方联网服务插件尚未开通；请检查小米控制台插件管理";
+  if (/插件没有触发|plugin not invoked/.test(message)) return "MiMo 本次没有调用联网插件；请确认模型、插件开通状态与强制搜索设置";
+  if (/401|403|unauthori[sz]ed|api.?key|credential|凭据|Keychain/i.test(message)) return "凭据无效、缺失或没有访问权限";
+  if (/timeout|timed out|aborted|超时/i.test(message)) return "测试请求超时";
+  if (/fetch|network|ECONN|连接/i.test(message)) return "无法连接所选服务";
+  return "测试失败，请检查连接、模型与本机服务状态";
 }
 
 function sanitizeVisionPatch(value, current) {
@@ -7352,6 +7467,10 @@ function sanitizeConfigPatch(patch, currentConfig) {
   if (isPlainObject(patch.voice)) {
     next.voice ||= {};
     setIfPresent(next.voice, patch.voice, "enabled", (x) => booleanValue(x, false));
+    setIfPresent(next.voice, patch.voice, "credentialSource", (x) => {
+      if (x !== "existing" && x !== "keychain") throw new Error("voice.credentialSource must be existing or keychain");
+      return x;
+    });
     setIfPresent(next.voice, patch.voice, "replyMode", (x) => {
       const mode = normalizeVoiceReplyMode(x);
       if (!mode) throw new Error("voice.replyMode must be off, mixed or force");
@@ -7616,6 +7735,7 @@ function sanitizeConfigPatch(patch, currentConfig) {
       setIfPresent(next.accounts.primary, patch.accounts.primary, "qq", (x) => asStringId(x));
       setIfPresent(next.accounts.primary, patch.accounts.primary, "displayName", (x) => stringValue(x, "Hermes小跟班").trim() || "Hermes小跟班");
       setIfPresent(next.accounts.primary, patch.accounts.primary, "styleProfileId", (x) => stringValue(x).trim().slice(0, 40));
+      setIfPresent(next.accounts.primary, patch.accounts.primary, "promptOverride", (x) => stringValue(x).slice(0, 12000));
       setIfPresent(next.accounts.primary, patch.accounts.primary, "enabled", (x) => booleanValue(x, true));
       setIfPresent(next.accounts.primary, patch.accounts.primary, "protocol", (x) => accountProtocol({ protocol: x }));
       setIfPresent(next.accounts.primary, patch.accounts.primary, "onebotPath", (x) => stringValue(x, "/onebot").trim() || "/onebot");
@@ -7639,6 +7759,7 @@ function sanitizeConfigPatch(patch, currentConfig) {
           role: "standby",
           displayName: stringValue(merged.displayName || merged.name || `Hermes小跟班${index + 2}`).trim() || `Hermes小跟班${index + 2}`,
           styleProfileId: stringValue(merged.styleProfileId || "").trim().slice(0, 40),
+          promptOverride: stringValue(merged.promptOverride || "").slice(0, 12000),
           protocol: accountProtocol(merged),
           onebotPath: stringValue(merged.onebotPath || next.accounts.primary?.onebotPath || "/onebot").trim() || "/onebot",
           napcatContainer: stringValue(merged.napcatContainer || `napcat-standby-${index + 1}`).trim() || `napcat-standby-${index + 1}`,
@@ -7653,6 +7774,19 @@ function sanitizeConfigPatch(patch, currentConfig) {
           enabled: booleanValue(merged.enabled, true)
         };
       });
+    }
+    if (isPlainObject(patch.accounts.promptOverrides)) {
+      const updates = Object.entries(patch.accounts.promptOverrides);
+      if (updates.length > 1 + (next.accounts.standbys?.length || 0)) throw new Error("too many account prompt updates");
+      for (const [id, prompt] of updates) {
+        if (typeof prompt !== "string" || prompt.length > 12000) throw new Error("invalid account prompt");
+        if (id === (next.accounts.primary?.id || "primary")) next.accounts.primary.promptOverride = prompt;
+        else {
+          const account = next.accounts.standbys?.find((item) => item.id === id);
+          if (!account) throw new Error("unknown account prompt target");
+          account.promptOverride = prompt;
+        }
+      }
     }
     if (isPlainObject(patch.accounts.failover)) {
       next.accounts.failover ||= {};
@@ -7707,6 +7841,13 @@ function sanitizeConfigPatch(patch, currentConfig) {
     next.send ||= {};
     setIfPresent(next.send, patch.send, "maxLength", (x) => Math.round(numberInRange(x, 420, 80, 4000)));
     setIfPresent(next.send, patch.send, "replyToMessage", (x) => booleanValue(x, true));
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "apiCenter")) {
+    next.apiCenter = validateApiCenter(patch.apiCenter, currentConfig);
+    applyApiCenterBindings(next, next.apiCenter);
+  } else if (currentConfig.apiCenter?.connections?.length && ["ai", "aiProfiles", "vision", "voice", "webSearch"].some((key) => isPlainObject(patch[key]))) {
+    syncLegacyApiPatch(next, patch);
+    applyApiCenterBindings(next, next.apiCenter);
   }
   next.__path = currentConfig.__path || configPath;
   return next;
@@ -10386,6 +10527,8 @@ async function main() {
   if (config.control?.enabled) {
     const controlHost = config.control.host || "127.0.0.1";
     const controlPort = Number(process.env.HERMES_QQ_CONTROL_PORT || config.control.port || 6200);
+    const adminOrigin = `http://127.0.0.1:${controlPort}`;
+    const adminSessionToken = randomBytes(32).toString("hex");
     const maxBodyBytes = Number(config.control.maxBodyBytes || 65536);
     const controlServer = http.createServer(async (req, res) => {
       const replyJson = (status, payload) => {
@@ -10543,6 +10686,19 @@ async function main() {
       const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
 
       try {
+        const localAdminHost = req.headers.host === `127.0.0.1:${controlPort}`
+          && ["127.0.0.1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress);
+        if (req.method === "GET" && url.pathname === "/api/admin/session") {
+          if (!localAdminHost) return replyJson(403, { ok: false, error: "local admin only" });
+          return replyJson(200, { ok: true, token: adminSessionToken });
+        }
+        if (["/api/voice/credential", "/api/voice/test", "/api/api-center", "/api/api-center/test"].includes(url.pathname)
+          || /^\/api\/api-center\/credentials\/[0-9a-f-]+$/.test(url.pathname)) {
+          if (!localAdminHost || (req.method !== "GET" && req.headers.origin !== adminOrigin) || req.headers["x-hermes-qq-admin"] !== adminSessionToken
+            || (req.method === "POST" && !/^application\/json(?:\s*;|$)/i.test(req.headers["content-type"] || ""))) {
+            return replyJson(403, { ok: false, error: "admin session required" });
+          }
+        }
         if (req.method === "GET" && (url.pathname === "/admin" || url.pathname === "/admin/")) {
           return replyFile(path.join(publicDir, "admin.html"), "text/html; charset=utf-8");
         }
@@ -10603,6 +10759,157 @@ async function main() {
 
         if (req.method === "GET" && url.pathname === "/api/config") {
           return replyJson(200, publicConfig(config));
+        }
+
+        if (req.method === "GET" && url.pathname === "/api/api-center") {
+          return replyJson(200, publicApiCenter(config));
+        }
+
+        if (req.method === "PATCH" && url.pathname === "/api/api-center") {
+          const body = await readBody();
+          const current = publicApiCenter(config);
+          if (body.revision !== current.revision) return replyJson(409, { ok: false, error: "API 配置已在别处更新，请刷新后重试" });
+          let next;
+          try { next = sanitizeConfigPatch({ apiCenter: body.center }, config); }
+          catch { return replyJson(400, { ok: false, error: "API 方案无效，请检查连接、模型和绑定" }); }
+          saveConfig(next);
+          replaceConfigInPlace(config, loadConfig());
+          return replyJson(200, publicApiCenter(config));
+        }
+
+        const apiCredentialMatch = url.pathname.match(/^\/api\/api-center\/credentials\/([0-9a-f-]+)$/);
+        if (apiCredentialMatch && ["POST", "DELETE"].includes(req.method)) {
+          const ref = apiCredentialMatch[1];
+          const center = normalizeApiCenter(config);
+          const connection = center.connections.find((item) => item.credentialSource === "keychain" && item.credentialRef === ref);
+          if (!connection) return replyJson(404, { ok: false, error: "该凭据引用不属于当前 API 连接" });
+          try {
+            if (req.method === "POST") {
+              const body = await readBody();
+              if (typeof body.secret !== "string" || body.secret.length < 10 || body.secret.length > 4096)
+                return replyJson(400, { ok: false, error: "API Key 格式无效" });
+              setApiSecret(ref, body.secret);
+            } else {
+              const boundIds = Object.values(center.bindings).filter((id) => id !== "inherit-chat");
+              if (center.profiles.some((item) => item.connectionId === connection.id && boundIds.includes(item.id)))
+                return replyJson(409, { ok: false, error: "该凭据仍被当前功能使用，请先切换绑定" });
+              deleteApiSecret(ref);
+            }
+            return replyJson(200, { ok: true, status: req.method === "POST" ? "configured" : "missing" });
+          } catch { return replyJson(503, { ok: false, error: "Keychain 操作失败，请检查钥匙串权限" }); }
+        }
+
+        if (req.method === "POST" && url.pathname === "/api/api-center/test") {
+          let temporary = "";
+          const started = Date.now();
+          try {
+            const body = await readBody();
+            const capability = String(body.capability || "");
+            if (!["chat", "task", "vision", "asr", "tts", "search"].includes(capability))
+              return replyJson(400, { ok: false, error: "不支持的测试功能" });
+            const candidate = sanitizeConfigPatch({ apiCenter: body.center }, config);
+            let detail = "";
+            if (capability === "chat" || capability === "task") {
+              const selected = aiConfigForCapability(candidate, capability);
+              detail = clampText(await callHermes("请仅回复：连接正常", selected, { signal: AbortSignal.timeout(25000) }), 120);
+            } else if (capability === "vision") {
+              temporary = fs.mkdtempSync(path.join(os.tmpdir(), "hermesqq-api-test-"));
+              const sample = path.join(temporary, "sample.png");
+              fs.writeFileSync(sample, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/+tgAAAAASUVORK5CYII=", "base64"));
+              detail = clampText(await callHermesWithImage("这张测试图是什么颜色？一句话回答。", sample, candidate), 120);
+            } else if (capability === "tts" || capability === "asr") {
+              temporary = fs.mkdtempSync(path.join(os.tmpdir(), "hermesqq-api-test-"));
+              const voice = voiceConfigForCapability(candidate, "tts");
+              const model = voice.tts?.model || "mimo-v2.5-tts";
+              if (capability === "asr" && model === "mimo-v2.5-tts-voiceclone")
+                return replyJson(422, { ok: false, error: "ASR 端到端测试需要普通 TTS 样本模型" });
+              const outputPath = path.join(temporary, "test.wav");
+              await synthesizeSpeechFile({ text: "你好", outputPath, model,
+                ...(model === "mimo-v2.5-tts-voicedesign" ? { voiceDescription: voice.tts?.voiceDescription || "自然清晰的中文声音" } : { voice: voice.tts?.voice || "mimo_default" }),
+                config: { ...voice, outputDir: temporary, timeoutMs: 20000 },
+                env: voiceApiEnvironment(voice, candidate.ai), signal: AbortSignal.timeout(20000) });
+              if (capability === "asr") {
+                const asrVoice = voiceConfigForCapability(candidate, "asr");
+                detail = clampText(await transcribeAudioFile({ inputPath: outputPath, config: asrVoice,
+                  env: voiceApiEnvironment(asrVoice, candidate.ai), signal: AbortSignal.timeout(20000) }), 120);
+              } else detail = "语音合成成功";
+            } else {
+              const query = "今天的科技新闻";
+              const result = await buildWebSearchContext({ matched: true, query, kind: "web", reason: "api-center-test" }, candidate);
+              if (result.result?.error) throw new Error(result.result.error);
+              detail = clampText(result.text || "未找到结果", 120);
+            }
+            return replyJson(200, { ok: true, capability, durationMs: Date.now() - started, detail, sentToQq: false });
+          } catch (error) {
+            return replyJson(502, { ok: false, error: apiCenterTestError(error), durationMs: Date.now() - started, sentToQq: false });
+          } finally { if (temporary) fs.rmSync(temporary, { recursive: true, force: true }); }
+        }
+
+        if (req.method === "GET" && url.pathname === "/api/voice/credential") {
+          try { return replyJson(200, { ok: true, stored: Boolean(getVoiceSecret()), source: config.voice?.credentialSource === "keychain" ? "keychain" : "existing" }); }
+          catch { return replyJson(503, { ok: false, error: "无法读取本机 Keychain 状态" }); }
+        }
+
+        if (req.method === "POST" && url.pathname === "/api/voice/credential") {
+          const body = await readBody();
+          if (typeof body.secret !== "string" || body.secret.length < 10 || body.secret.length > 4096) {
+            return replyJson(400, { ok: false, error: "语音 API Key 格式无效" });
+          }
+          let previous;
+          try {
+            previous = getVoiceSecret();
+            setVoiceSecret(body.secret);
+            const next = sanitizeConfigPatch({ voice: { credentialSource: "keychain" } }, config);
+            saveConfig(next);
+            replaceConfigInPlace(config, loadConfig());
+            return replyJson(200, { ok: true, configured: true, source: "keychain" });
+          } catch {
+            if (previous !== undefined) {
+              try { if (previous === null) deleteVoiceSecret(); else setVoiceSecret(previous); } catch { /* never expose credential details */ }
+            }
+            return replyJson(503, { ok: false, error: "Keychain 保存失败，原有语音配置未切换" });
+          }
+        }
+
+        if (req.method === "DELETE" && url.pathname === "/api/voice/credential") {
+          let previous;
+          try {
+            previous = getVoiceSecret();
+            deleteVoiceSecret();
+            const next = sanitizeConfigPatch({ voice: { credentialSource: "existing" } }, config);
+            saveConfig(next);
+            replaceConfigInPlace(config, loadConfig());
+            return replyJson(200, { ok: true, configured: false, source: "existing" });
+          } catch {
+            if (previous) { try { setVoiceSecret(previous); } catch { /* preserve the safe error response */ } }
+            return replyJson(503, { ok: false, error: "无法删除 Keychain 密钥；请检查钥匙串权限" });
+          }
+        }
+
+        if (req.method === "POST" && url.pathname === "/api/voice/test") {
+          let temporary = "";
+          try {
+            const body = await readBody();
+            const candidate = isPlainObject(body.voice) ? sanitizeConfigPatch({ voice: body.voice }, config) : config;
+            const testVoice = voiceConfigForCapability(candidate, "tts");
+            const model = testVoice.tts?.model || "mimo-v2.5-tts";
+            temporary = fs.mkdtempSync(path.join(os.tmpdir(), "hermesqq-voice-api-test-"));
+            const result = await synthesizeSpeechFile({
+              text: "语音测试", outputPath: "test.wav", model,
+              ...(model === "mimo-v2.5-tts-voicedesign" ? { voiceDescription: candidate.voice?.tts?.voiceDescription || "自然清晰的中文声音" } : { voice: candidate.voice?.tts?.voice || "mimo_default" }),
+              config: { ...testVoice, outputDir: temporary, timeoutMs: Math.min(Number(testVoice?.timeoutMs || 60000), 20000) },
+              env: voiceApiEnvironment(testVoice, candidate.ai), signal: AbortSignal.timeout(20000)
+            });
+            return replyJson(200, { ok: true, model, bytes: result.bytes, sentToQq: false });
+          } catch (error) {
+            const message = String(error?.message || "");
+            const safeError = /401|403|unauthori[sz]ed|api.key|凭据|Keychain/i.test(message) ? "API Key 无效、缺失或无权限"
+              : /timeout|timed out|aborted|超时/i.test(message) ? "语音 API 请求超时"
+                : /fetch|network|ECONN|连接/i.test(message) ? "无法连接语音 API" : "语音 API 测试失败，请检查模型和服务状态";
+            return replyJson(502, { ok: false, error: safeError, sentToQq: false });
+          } finally {
+            if (temporary) fs.rmSync(temporary, { recursive: true, force: true });
+          }
         }
 
         if (req.method === "PATCH" && url.pathname === "/api/config") {
@@ -11984,8 +12291,8 @@ async function main() {
                   ...(ttsModel === "mimo-v2.5-tts-voicedesign"
                     ? { voiceDescription: config.voice.tts?.voiceDescription }
                     : { voice: preset }),
-                  config: { ...config.voice, timeoutMs: Math.min(25_000, Number(config.voice.timeoutMs || 60_000)), outputDir },
-                  env: voiceApiEnvironment(config.voice, config.ai)
+                  config: { ...voiceConfigForCapability(config, "tts"), timeoutMs: Math.min(25_000, Number(config.voice.timeoutMs || 60_000)), outputDir },
+                  env: voiceApiEnvironment(voiceConfigForCapability(config, "tts"), config.ai)
                 });
               } catch (error) {
                 if (signal.aborted || Number(job.contextRevision || 0) !== revision) return { retry: true };
@@ -12306,8 +12613,9 @@ async function main() {
     if (!ref || config.voice?.enabled !== true || config.voice?.asr?.enabled === false) return "";
     const filePath = await downloadOneBotRecord(ref, ws, accountState);
     try {
-      return String(await transcribeAudioFile({ inputPath: filePath, config: config.voice,
-        env: voiceApiEnvironment(config.voice, config.ai) })).trim().slice(0, 1000);
+      const asrVoice = voiceConfigForCapability(config, "asr");
+      return String(await transcribeAudioFile({ inputPath: filePath, config: asrVoice,
+        env: voiceApiEnvironment(asrVoice, config.ai) })).trim().slice(0, 1000);
     } finally {
       try { fs.unlinkSync(filePath); } catch {}
     }
@@ -12380,7 +12688,7 @@ async function main() {
       try {
         await synthesizeSpeechFile({ text: design.speech, outputPath,
           model: "mimo-v2.5-tts-voicedesign", voiceDescription: design.voiceDescription,
-          config: { ...voice, outputDir }, env: voiceApiEnvironment(voice, config.ai) });
+          config: { ...voiceConfigForCapability(config, "tts"), outputDir }, env: voiceApiEnvironment(voiceConfigForCapability(config, "tts"), config.ai) });
         await say([buildRecordMessage(fs.readFileSync(outputPath))]);
         const replyConfig = configForReplyAccount(chatAccount);
         recordBotMessage({ historyByGroup, lastBotMessageByGroup, groupId: conversationId, text: design.speech, config: replyConfig, memory,
@@ -12424,8 +12732,8 @@ async function main() {
             model: "mimo-v2.5-tts-voiceclone",
             referenceAudioPath: inputPath,
             consentToVoiceClone: true,
-            config: { ...voice, outputDir },
-            env: voiceApiEnvironment(voice, config.ai)
+            config: { ...voiceConfigForCapability(config, "tts"), outputDir },
+            env: voiceApiEnvironment(voiceConfigForCapability(config, "tts"), config.ai)
           });
           await say([buildRecordMessage(fs.readFileSync(outputPath))]);
           const replyConfig = configForReplyAccount(chatAccount);
@@ -12530,8 +12838,8 @@ async function main() {
           ...(ttsModel === "mimo-v2.5-tts-voicedesign"
             ? { voiceDescription: voice.tts?.voiceDescription }
             : { voice: effectivePreset }),
-          config: { ...voice, outputDir },
-          env: voiceApiEnvironment(voice, config.ai)
+          config: { ...voiceConfigForCapability(config, "tts"), outputDir },
+          env: voiceApiEnvironment(voiceConfigForCapability(config, "tts"), config.ai)
         });
         const audio = fs.readFileSync(outputPath);
         const sent = await say([buildRecordMessage(audio)]);

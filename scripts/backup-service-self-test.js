@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import {
+  BACKUP_MAGIC,
   createBackup,
   inspectBackup,
   restoreBackup,
@@ -22,6 +25,42 @@ let tests = 0;
 function check(condition, message) {
   tests += 1;
   if (!condition) throw new Error(message);
+}
+
+function tamperFullManifest(source, password, mutate, name) {
+  const encoded = fs.readFileSync(source);
+  const headerLength = encoded.readUInt32BE(BACKUP_MAGIC.length);
+  const bodyOffset = BACKUP_MAGIC.length + 4 + headerLength;
+  const header = JSON.parse(encoded.subarray(BACKUP_MAGIC.length + 4, bodyOffset).toString("utf8"));
+  const oldKey = crypto.scryptSync(password, Buffer.from(header.crypto.salt, "base64"), 32,
+    { N: 1 << 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
+  const decipher = crypto.createDecipheriv("aes-256-gcm", oldKey, Buffer.from(header.crypto.iv, "base64"));
+  decipher.setAuthTag(Buffer.from(header.crypto.tag, "base64"));
+  const archive = Buffer.concat([decipher.update(encoded.subarray(bodyOffset)), decipher.final()]);
+  const fixture = path.join(root, name);
+  fs.mkdirSync(fixture, { mode: 0o700 });
+  const archiveFile = path.join(fixture, "payload.tgz");
+  const payloadDir = path.join(fixture, "payload");
+  fs.mkdirSync(payloadDir, { mode: 0o700 });
+  fs.writeFileSync(archiveFile, archive, { mode: 0o600 });
+  execFileSync("/usr/bin/tar", ["-xzf", archiveFile, "-C", payloadDir], { stdio: "ignore" });
+  const manifestFile = path.join(payloadDir, "manifest.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestFile, "utf8"));
+  mutate(manifest);
+  fs.writeFileSync(manifestFile, JSON.stringify(manifest), { mode: 0o600 });
+  execFileSync("/usr/bin/tar", ["-czf", archiveFile, "-C", payloadDir, "."], { stdio: "ignore" });
+  const salt = crypto.randomBytes(16);
+  const iv = crypto.randomBytes(12);
+  const key = crypto.scryptSync(password, salt, 32, { N: 1 << 15, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const encrypted = Buffer.concat([cipher.update(fs.readFileSync(archiveFile)), cipher.final()]);
+  header.crypto = { ...header.crypto, salt: salt.toString("base64"), iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64") };
+  const headerBuffer = Buffer.from(JSON.stringify(header));
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(headerBuffer.length);
+  const destination = path.join(fixture, "mutated.hermesqqbackup");
+  fs.writeFileSync(destination, Buffer.concat([BACKUP_MAGIC, length, headerBuffer, encrypted]), { mode: 0o600 });
+  return destination;
 }
 
 try {
@@ -86,6 +125,207 @@ try {
     const restoredFullConfig = JSON.parse(fs.readFileSync(path.join(fullRestore, "config.json"), "utf8"));
     check(restoredFullConfig.ai.directApiKey === config.ai.directApiKey, "full restore must retain secrets inside encrypted package");
     check(fs.readFileSync(path.join(fullRestore, "hermes", ".env"), "utf8").includes("DEEPSEEK_API_KEY"), "full restore must include app Hermes credentials");
+
+    // Fake Keychain: no test touches the machine's real login keychain.
+    let keychainValue = "previous-test-only-value";
+    const voiceSecretStore = {
+      getVoiceSecret: () => keychainValue,
+      setVoiceSecret: (value) => { keychainValue = value; },
+      deleteVoiceSecret: () => { keychainValue = null; }
+    };
+    config.voice = { credentialSource: "keychain", apiKeyEnv: "MIMO_API_KEY" };
+    fs.writeFileSync(path.join(state, "config.json"), JSON.stringify(config));
+    let missingKeychainRejected = false;
+    try {
+      await createBackup({ type: "full", password: "test-only-password", stateRoot: state, destinationDir: backups,
+        voiceSecretStore: { getVoiceSecret: () => null } });
+    } catch { missingKeychainRejected = true; }
+    check(missingKeychainRejected, "full backup must reject missing configured Keychain secret");
+    keychainValue = "backup-test-only-value";
+    const voiceSafe = await createBackup({ type: "safe", stateRoot: state, destinationDir: backups, voiceSecretStore });
+    check(!voiceSafe.manifest.files.some((item) => item.path.startsWith("voice-keychain/")), "safe backup must exclude Keychain secret");
+    check(voiceSafe.manifest.voiceCredentialRequired === true, "safe backup must mark voice credential as requiring reconfiguration");
+    const safeVoiceTarget = path.join(root, "safe-voice-restore");
+    const safeVoiceRestored = await restoreBackup({ path: voiceSafe.path, stateRoot: safeVoiceTarget, voiceSecretStore });
+    const safeVoiceConfig = JSON.parse(fs.readFileSync(path.join(safeVoiceTarget, "config.json"), "utf8"));
+    check(safeVoiceRestored.voiceCredentialRequired && safeVoiceConfig.voice.enabled === false && safeVoiceConfig.voice.credentialSource === "existing", "safe restore must disable voice and avoid foreign Keychain items");
+    check(keychainValue === "backup-test-only-value", "safe restore must not read or change Keychain item");
+    const voiceFull = await createBackup({ type: "full", password: "test-only-password", stateRoot: state, hermesHome, destinationDir: backups, voiceSecretStore });
+    check(voiceFull.manifest.components.includes("voice-keychain") && voiceFull.manifest.files.some((item) => item.path === "voice-keychain/secret"), "encrypted full backup must include Keychain component");
+    keychainValue = "previous-test-only-value";
+    const voiceTarget = path.join(root, "voice-restore");
+    const voiceRestored = await restoreBackup({ path: voiceFull.path, password: "test-only-password", stateRoot: voiceTarget, hermesHome: path.join(voiceTarget, "hermes"), voiceSecretStore });
+    check(keychainValue === "backup-test-only-value", "full restore must install Keychain secret");
+    await rollbackRestore({ stateRoot: voiceTarget, rollbackDir: voiceRestored.rollbackDir, installedTargets: voiceRestored.installedTargets });
+    check(keychainValue === "previous-test-only-value", "post-restore rollback must restore previous Keychain value");
+    let rollbackActiveSecret = "previous-test-only-value";
+    const rollbackFailStore = {
+      getVoiceSecret: () => rollbackActiveSecret,
+      setVoiceSecret: (value) => {
+        if (value === "previous-test-only-value") throw new Error("simulated locked Keychain");
+        rollbackActiveSecret = value;
+      },
+      deleteVoiceSecret: () => { rollbackActiveSecret = null; }
+    };
+    const rollbackFailTarget = path.join(root, "rollback-fail-voice-restore");
+    const rollbackFailResult = await restoreBackup({ path: voiceFull.path, password: "test-only-password", stateRoot: rollbackFailTarget, hermesHome: path.join(rollbackFailTarget, "hermes"), voiceSecretStore: rollbackFailStore });
+    let rollbackRejected = false;
+    try { await rollbackRestore({ stateRoot: rollbackFailTarget, rollbackDir: rollbackFailResult.rollbackDir, installedTargets: rollbackFailResult.installedTargets }); }
+    catch { rollbackRejected = true; }
+    check(rollbackRejected && fs.existsSync(path.join(rollbackFailTarget, "config.json")) && rollbackActiveSecret === "backup-test-only-value", "failed Keychain rollback must leave restored config in place for fail-closed caller");
+    let failedRestore = false;
+    try {
+      await restoreBackup({ path: voiceFull.path, password: "test-only-password", stateRoot: path.join(root, "failed-voice-restore"), hermesHome: path.join(root, "outside-hermes"), voiceSecretStore });
+    } catch { failedRestore = true; }
+    check(failedRestore && keychainValue === "previous-test-only-value", "failed restore must revert Keychain value");
+    keychainValue = null;
+    const emptyTarget = path.join(root, "empty-voice-restore");
+    const emptyRestored = await restoreBackup({ path: voiceFull.path, password: "test-only-password", stateRoot: emptyTarget, hermesHome: path.join(emptyTarget, "hermes"), voiceSecretStore });
+    await rollbackRestore({ stateRoot: emptyTarget, rollbackDir: emptyRestored.rollbackDir, installedTargets: emptyRestored.installedTargets });
+    check(keychainValue === null, "rollback must delete new Keychain item when none existed before");
+    keychainValue = "previous-test-only-value";
+    await restoreBackup({ path: full.path, password: "correct horse battery staple", stateRoot: path.join(root, "old-full-restore"), hermesHome: path.join(root, "old-full-restore", "hermes"), voiceSecretStore });
+    check(keychainValue === "previous-test-only-value", "old full backup without Keychain component must leave Keychain untouched");
+
+    const apiRefA = "ec021717-671a-4c86-9ca0-c44265deee81";
+    const apiRefB = "91b65f87-976e-4e74-9d8b-8fae04fe992c";
+    const apiValues = new Map([[apiRefA, "backup-api-value-a"], [apiRefB, "backup-api-value-b"]]);
+    const apiSecretStore = {
+      getApiSecret: (ref) => apiValues.get(ref) ?? null,
+      setApiSecret: (ref, secret) => { apiValues.set(ref, secret); },
+      deleteApiSecret: (ref) => { apiValues.delete(ref); }
+    };
+    config.apiCenter = { connections: [
+      { id: "a", credentialSource: "keychain", credentialRef: apiRefA, apiKeyEnv: "DEEPSEEK_API_KEY" },
+      { id: "b", credentialSource: "keychain", credentialRef: apiRefB, apiKeyEnv: "MIMO_API_KEY" },
+      { id: "legacy", credentialSource: "legacy-voice-keychain", apiKeyEnv: "MIMO_API_KEY" }
+    ], profiles: [{ id: "api-asr", kind: "asr", connectionId: "b" }], bindings: { asr: "api-asr" } };
+    config.voice.credentialSource = "existing";
+    config.voice.enabled = true;
+    config.ai.credentialSource = "keychain";
+    config.ai.credentialRef = apiRefA;
+    fs.writeFileSync(path.join(state, "config.json"), JSON.stringify(config));
+    config.apiCenter.connections[0].credentialRef = "../invalid";
+    fs.writeFileSync(path.join(state, "config.json"), JSON.stringify(config));
+    let invalidRefRejected = false;
+    try { await createBackup({ type: "safe", stateRoot: state, destinationDir: backups }); }
+    catch { invalidRefRejected = true; }
+    check(invalidRefRejected, "backup must reject unsafe API Keychain refs");
+    config.apiCenter.connections[0].credentialRef = apiRefA;
+    config.apiCenter.connections[1].apiKeyEnv = "not-an-environment-name";
+    fs.writeFileSync(path.join(state, "config.json"), JSON.stringify(config));
+    const apiSanitized = sanitizeConfigForBackup(config);
+    check(apiSanitized.config.apiCenter.connections[0].credentialRef === apiRefA, "API refs must survive generic config sanitization before remapping");
+    let missingApiRejected = false;
+    try {
+      await createBackup({ type: "full", password: "test-only-password", stateRoot: state, destinationDir: backups,
+        voiceSecretStore, apiSecretStore: { getApiSecret: () => null } });
+    } catch { missingApiRejected = true; }
+    check(missingApiRejected, "full backup must reject missing API Keychain credentials");
+    const apiSafe = await createBackup({ type: "safe", stateRoot: state, destinationDir: backups });
+    check(apiSafe.manifest.apiCredentialReconfigurationRequired === true && apiSafe.manifest.apiKeychainRefs.length === 0,
+      "safe backup must indicate API reconfiguration without listing old refs");
+    check(!apiSafe.manifest.files.some((item) => item.path.startsWith("api-keychain/")), "safe backup must exclude API Keychain secrets");
+    const apiSafeTarget = path.join(root, "api-safe-restore");
+    const apiSafeResult = await restoreBackup({ path: apiSafe.path, stateRoot: apiSafeTarget, voiceSecretStore, apiSecretStore });
+    const apiSafeConfig = JSON.parse(fs.readFileSync(path.join(apiSafeTarget, "config.json"), "utf8"));
+    check(apiSafeResult.apiCredentialReconfigurationRequired === true, "safe restore must report API reconfiguration");
+    check(apiSafeResult.voiceCredentialRequired === true && apiSafeConfig.voice.enabled === false,
+      "safe restore must disable voice when its selected API connection has no backed-up Keychain secret");
+    check(apiSafeConfig.apiCenter.connections[0].credentialRef !== apiRefA && apiSafeConfig.apiCenter.connections[1].credentialRef !== apiRefB,
+      "safe restore must remap every API Keychain ref");
+    check(apiSafeConfig.ai.credentialSource === "keychain"
+      && apiSafeConfig.ai.credentialRef === apiSafeConfig.apiCenter.connections[0].credentialRef,
+      "safe restore must keep projected API settings on the fresh fail-closed ref");
+    check(apiSafeConfig.apiCenter.connections[0].credentialSource === "keychain"
+      && apiSafeConfig.apiCenter.connections[2].credentialSource === "existing"
+      && apiSafeConfig.apiCenter.connections[2].apiKeyEnv === "",
+      "safe restore must keep API refs fail-closed and disable legacy voice Keychain use");
+    check(apiSafeConfig.apiCenter.connections[1].apiKeyEnv === "", "safe backup must remove malformed API env values");
+    check(apiValues.get(apiRefA) === "backup-api-value-a", "safe restore must not touch API Keychain");
+    const apiFull = await createBackup({ type: "full", password: "test-only-password", stateRoot: state,
+      destinationDir: backups, voiceSecretStore, apiSecretStore });
+    check(apiFull.manifest.components.includes("api-keychain") && apiFull.manifest.apiKeychainRefs.length === 2,
+      "full encrypted backup must list API Keychain refs");
+    const wrongRefs = tamperFullManifest(apiFull.path, "test-only-password",
+      (manifest) => { manifest.apiKeychainRefs = [apiRefA]; }, "tampered-api-refs");
+    let wrongRefsRejected = false;
+    try { await inspectBackup({ path: wrongRefs, password: "test-only-password" }); }
+    catch { wrongRefsRejected = true; }
+    check(wrongRefsRejected, "import must reject API manifest refs that do not match configured refs and files");
+    const unsafePath = tamperFullManifest(apiFull.path, "test-only-password",
+      (manifest) => { manifest.files.find((item) => item.path === `api-keychain/${apiRefA}`).path = "api-keychain/../unsafe"; }, "tampered-api-path");
+    let unsafePathRejected = false;
+    try { await inspectBackup({ path: unsafePath, password: "test-only-password" }); }
+    catch { unsafePathRejected = true; }
+    check(unsafePathRejected, "import must reject unsafe API Keychain manifest paths");
+    apiValues.set(apiRefA, "previous-api-a");
+    apiValues.delete(apiRefB);
+    keychainValue = "previous-test-only-value";
+    const apiTarget = path.join(root, "api-full-restore");
+    const apiResult = await restoreBackup({ path: apiFull.path, password: "test-only-password", stateRoot: apiTarget,
+      voiceSecretStore, apiSecretStore });
+    check(apiValues.get(apiRefA) === "backup-api-value-a" && apiValues.get(apiRefB) === "backup-api-value-b"
+      && keychainValue === "previous-test-only-value", "full restore must install both API refs and legacy voice secret");
+    await rollbackRestore({ stateRoot: apiTarget, rollbackDir: apiResult.rollbackDir, installedTargets: apiResult.installedTargets });
+    check(apiValues.get(apiRefA) === "previous-api-a" && !apiValues.has(apiRefB) && keychainValue === "previous-test-only-value",
+      "rollback must restore all previous API refs and delete newly created ones");
+    const apiRollbackFailStore = {
+      getApiSecret: apiSecretStore.getApiSecret,
+      setApiSecret: (ref, secret) => {
+        if (ref === apiRefA && secret === "previous-api-a") throw new Error("simulated locked Keychain");
+        apiValues.set(ref, secret);
+      },
+      deleteApiSecret: apiSecretStore.deleteApiSecret
+    };
+    const apiRollbackFailTarget = path.join(root, "failed-api-rollback");
+    const apiRollbackFailResult = await restoreBackup({ path: apiFull.path, password: "test-only-password",
+      stateRoot: apiRollbackFailTarget, voiceSecretStore, apiSecretStore: apiRollbackFailStore });
+    let apiRollbackRejected = false;
+    try { await rollbackRestore({ stateRoot: apiRollbackFailTarget, rollbackDir: apiRollbackFailResult.rollbackDir,
+      installedTargets: apiRollbackFailResult.installedTargets }); }
+    catch { apiRollbackRejected = true; }
+    check(apiRollbackRejected && fs.existsSync(path.join(apiRollbackFailTarget, "config.json"))
+      && apiValues.get(apiRefA) === "backup-api-value-a" && apiValues.get(apiRefB) === "backup-api-value-b",
+      "failed multi-ref rollback must retain restored config and best-effort reapply its API credentials");
+    apiValues.set(apiRefA, "previous-api-a");
+    apiValues.delete(apiRefB);
+    const rejectingApiStore = {
+      getApiSecret: apiSecretStore.getApiSecret,
+      setApiSecret: (ref, secret) => {
+        if (ref === apiRefB) throw new Error("simulated locked Keychain");
+        apiValues.set(ref, secret);
+      },
+      deleteApiSecret: apiSecretStore.deleteApiSecret
+    };
+    let apiRestoreRejected = false;
+    try {
+      await restoreBackup({ path: apiFull.path, password: "test-only-password", stateRoot: path.join(root, "failed-api-restore"),
+        voiceSecretStore, apiSecretStore: rejectingApiStore });
+    } catch { apiRestoreRejected = true; }
+    check(apiRestoreRejected && apiValues.get(apiRefA) === "previous-api-a" && !apiValues.has(apiRefB),
+      "partial Keychain restore failure must roll back every changed API ref");
+    apiValues.set(apiRefB, "backup-api-value-b");
+    delete config.voice;
+    fs.writeFileSync(path.join(state, "config.json"), JSON.stringify(config));
+    const legacyOnlyFull = await createBackup({ type: "full", password: "test-only-password", stateRoot: state,
+      destinationDir: backups, voiceSecretStore, apiSecretStore });
+    check(legacyOnlyFull.manifest.components.includes("voice-keychain"),
+      "legacy API Center voice connection must retain voice-only full backup compatibility");
+    const legacyOnlySafe = await createBackup({ type: "safe", stateRoot: state, destinationDir: backups });
+    const legacyOnlyTarget = path.join(root, "legacy-only-safe-restore");
+    const legacyOnlyResult = await restoreBackup({ path: legacyOnlySafe.path, stateRoot: legacyOnlyTarget,
+      voiceSecretStore, apiSecretStore });
+    const legacyOnlyConfig = JSON.parse(fs.readFileSync(path.join(legacyOnlyTarget, "config.json"), "utf8"));
+    check(legacyOnlyResult.voiceCredentialRequired === true
+      && legacyOnlyConfig.apiCenter.connections[2].credentialSource === "existing"
+      && legacyOnlyConfig.apiCenter.connections[2].apiKeyEnv === ""
+      && legacyOnlyConfig.voice.enabled === false,
+      "legacy-only safe restore must not use target voice Keychain item");
+    delete config.apiCenter;
+    delete config.ai.credentialSource;
+    delete config.ai.credentialRef;
+    fs.writeFileSync(path.join(state, "config.json"), JSON.stringify(config));
   }
 
   const beforeCancelled = fs.readdirSync(backups).length;

@@ -66,6 +66,7 @@
       "role": "primary",
       "enabled": true,
       "styleProfileId": "legacy",
+      "promptOverride": "",
       "displayName": "Hermes小跟班",
       "protocol": "snowluma",
       "onebotPath": "/onebot",
@@ -83,6 +84,7 @@
         "qq": "",
         "role": "standby",
         "styleProfileId": "legacy",
+        "promptOverride": "",
         "displayName": "Hermes小跟班2",
         "protocol": "snowluma",
         "onebotPath": "/onebot",
@@ -162,6 +164,7 @@
     "maxQuestionsPerDay": 3
   },
   "voice": {
+    "credentialSource": "existing",
     "enabled": false,
     "replyMode": "mixed",
     "apiKeyEnv": "MIMO_API_KEY",

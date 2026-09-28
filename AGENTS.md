@@ -252,6 +252,10 @@ Canonical memory is additive. Keep legacy fields intact and prefer `canonicalMem
 
 `public/admin.html` is a single-file UI without a frontend framework.
 
+The shared WebUI/App navigation has five core sections: account status, account functions, Q&A, vision, and voice. Q&A and voice use internal tabs; each section/tab saves only its own config patch. Task and automation pages remain independent, while memory/archive/backup/logs are secondary. Preserve unsaved drafts across navigation and automatic status refresh.
+
+Voice credentials may come from the existing environment/Hermes profile or the current macOS user's Keychain (`voice.credentialSource`). The Keychain implementation is in `src/voice-secret-store.js`; `config.json`, `/api/config`, logs, and ordinary backups must never contain its secret value. An ordinary backup created with Keychain voice switches voice off until the user explicitly reconfigures and enables it on the target Mac. The encrypted full backup includes the secret as an optional version-compatible component. Sensitive credential/test API calls require a loopback Host, same-origin request, and admin session token; `src/web-host.js` validates the public origin before proxying to the bridge. A failed credential rollback must leave the bridge stopped rather than running with mismatched config and Keychain state.
+
 When editing it:
 
 - Avoid inline `onclick` string handlers; prefer DOM APIs and `addEventListener`.
@@ -259,6 +263,8 @@ When editing it:
 - Do not display real API keys.
 - Keep restart/destructive actions local-only.
 - Validate the embedded script syntax after large edits. A useful pattern is to extract the script and run `node --check` or `vm.Script` against it.
+
+API 管理集中在独立页面。`src/api-center.js` 从旧 `ai`、`aiProfiles`、`vision`、`voice`、`webSearch` 派生初始方案；首次保存后，`apiCenter` 是连接、模型和功能绑定的来源，旧字段仍由投影层维护供现有调用路径读取。更改旧配置接口时必须同步当前方案，避免旧表单反向覆盖。共享连接可以被多项功能引用，但每项功能选用自己的模型。ASR/TTS 仅支持当前 MiMo 实现，语音行为开关不得修改 API 模型。`src/api-secret-store.js` 只保存 Keychain 引用和本机密钥，不在配置、日志或普通备份中保存明文；完整备份必须保持加密。相关验证：`npm run test:api-center`。
 
 ## NapCat and OneBot notes
 
@@ -311,7 +317,7 @@ For SnowLuma login, prefer opening its WebUI. Do not assume its QR code file pat
 - `accounts.topology` defaults to `failover`. `collaboration` and `function_split` are experimental and require isolated/live opt-in verification. An explicitly addressed account should answer through its own OneBot socket.
 - `automation.rules` are explicitly scoped by conversation; no implicit all-groups scheduling. Quiet mode suppresses scheduled and command-triggered group sends. A scheduled occurrence is claimed immediately before send to limit duplicates.
 - `learningMode` is opt-in per group or via an authorized `/bot learn` command; it may ask a limited number of genuine clarification questions.
-- Voice is disabled by default. `src/voice-service.js` uses MiMo ASR/TTS with `MIMO_API_KEY` (environment variable name only in config), and `src/voice-onebot.js` handles OneBot record segments. Never save real API keys in examples or logs.
+- Voice is disabled by default. `src/voice-service.js` uses MiMo ASR/TTS with `MIMO_API_KEY` (environment variable name only in config) or an explicitly selected Keychain credential, and `src/voice-onebot.js` handles OneBot record segments. Never save real API keys in examples or logs.
 - VoiceClone is a one-shot, self-voice-only flow: a speaker must quote their own voice, request it, and confirm within two minutes. Do not add third-party imitation without an explicit consent and revocation design. Input and output audio files are temporary.
 - Member VoiceDesign is an opt-in, one-shot flow with a fixed trait allowlist, per-user cooldown, and no persistent sample or voice profile. Do not replace it with unrestricted instructions to impersonate people.
 - Inter-bot follow-up is opt-in only in collaboration topology, has a low probability and long group cooldown, and may follow only a bot's voluntary discussion reply. Peer bot events remain ignored to prevent loops.
@@ -334,6 +340,8 @@ Keep these expectations intact when tuning probabilities or prompts.
 ## Search and vision behavior
 
 Web search is controlled and should usually acknowledge before searching. Search query generation should be specific and context-aware, and should prefer Google through the configured local proxy with Baidu fallback if needed.
+
+The API Center may instead bind `mimo-web-search` to Xiaomi's official MiMo Web Search Plugin. This path calls the official OpenAI-compatible Chat Completions API directly with `tools: [{ type: "web_search" }]`; it requires a supported MiMo model, an official MiMo endpoint, an available environment-variable or Keychain API key, and prior plugin activation in Xiaomi's console. Keep it distinct from legacy Google/Baidu scraping, never silently label an unsearched answer as a search result, and do not log the credential. The plugin is billed separately from model tokens.
 
 The AI search judge can classify search as `web`, `weather`, `url`, or `news`. Treat `news` as a web search mode with time-sensitive expectations unless a dedicated provider exists.
 

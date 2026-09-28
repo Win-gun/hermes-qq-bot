@@ -101,6 +101,19 @@ try {
   check(proxied.status === 200 && typeof proxied.data === "object", "bridge API is proxied");
   const admin = await request(port, "/admin");
   check(admin.status === 200 && String(admin.data).includes("<html"), "admin is served directly");
+  const adminSession = await request(port, "/api/admin/session");
+  check(adminSession.status === 200 && typeof adminSession.data.token === "string", "local admin session is proxied");
+  const voiceHeaders = { Origin: `http://127.0.0.1:${port}`, "x-hermes-qq-admin": adminSession.data.token };
+  const deniedVoice = await request(port, "/api/voice/test", "POST", { voice: { tts: { model: "invalid-test-model" } } }, { ...voiceHeaders, Origin: "http://example.com" });
+  check(deniedVoice.status === 403, "cross-origin voice API request is blocked at public host");
+  const acceptedVoice = await request(port, "/api/voice/test", "POST", { voice: { tts: { model: "invalid-test-model" } } }, voiceHeaders);
+  check(acceptedVoice.status === 502 && acceptedVoice.data.sentToQq === false, "same-origin voice test passes proxy guard without QQ send");
+  const center = await request(port, "/api/api-center", "GET", undefined, voiceHeaders);
+  check(center.status === 200 && center.data.center?.version === 1, "API center status passes protected proxy");
+  const deniedCenter = await request(port, "/api/api-center", "PATCH", { revision: center.data.revision, center: center.data.center }, { ...voiceHeaders, Origin: "http://example.com" });
+  check(deniedCenter.status === 403, "cross-origin API center update is blocked");
+  const staleCenter = await request(port, "/api/api-center", "PATCH", { revision: "stale", center: center.data.center }, voiceHeaders);
+  check(staleCenter.status === 409, "same-origin API center update reaches revision guard");
   check((await requestWithHost(port, "example.com")) === 403, "non-loopback Host is rejected");
   const badOrigin = await request(port, "/api/host/bridge/stop", "POST", {}, { Origin: "http://example.com" });
   check(badOrigin.status === 403, "cross-origin host mutation is rejected");
@@ -146,7 +159,9 @@ try {
 
   if (process.platform === "darwin" && process.arch === "arm64") {
     // The HTTP cancellation race is timing-dependent on shared CI runners; core cancellation is tested separately.
-    fs.writeFileSync(path.join(state, "data", "large.bin"), Buffer.alloc(64 * 1024 * 1024, 65), { mode: 0o600 });
+    const archiveDir = path.join(state, "data", "chat-archive");
+    fs.mkdirSync(archiveDir, { recursive: true });
+    fs.writeFileSync(path.join(archiveDir, "large.bin"), Buffer.alloc(64 * 1024 * 1024, 65), { mode: 0o600 });
     const backupPromise = request(port, "/api/host/backup", "POST", { type: "full", password: "self-test-only" });
     await waitFor(async () => {
       const status = await request(port, "/api/host/backup/status");

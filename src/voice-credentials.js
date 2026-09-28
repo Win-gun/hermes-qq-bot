@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { getVoiceSecret } from "./voice-secret-store.js";
+import { getApiSecret } from "./api-secret-store.js";
 
 function hermesProfile(ai = {}) {
   const args = Array.isArray(ai.args) ? ai.args : [];
@@ -14,9 +16,17 @@ function hermesProfile(ai = {}) {
 }
 
 /** Reuse only the active Hermes profile's private Xiaomi credential; never log or persist it. */
-export function voiceApiEnvironment(voice = {}, ai = {}, env = process.env) {
+export function voiceApiEnvironment(voice = {}, ai = {}, env = process.env, secretStore = { getVoiceSecret, getApiSecret }) {
   const name = voice.apiKeyEnv || "MIMO_API_KEY";
   if (typeof name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return env;
+  if (voice.credentialSource === "keychain" || voice.credentialSource === "legacy-voice-keychain") {
+    // Remove an inherited env value: Keychain selection must never fall back silently.
+    const result = { ...env };
+    delete result[name];
+    const secret = voice.credentialSource === "legacy-voice-keychain" || !voice.credentialRef
+      ? secretStore.getVoiceSecret() : secretStore.getApiSecret(voice.credentialRef);
+    return secret ? { ...result, [name]: secret } : result;
+  }
   if (typeof env[name] === "string" && env[name].trim()) return env;
   if (name !== "MIMO_API_KEY") return env;
   const profile = hermesProfile(ai);

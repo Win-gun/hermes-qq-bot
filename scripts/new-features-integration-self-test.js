@@ -102,10 +102,31 @@ try {
   assert.equal(roles.accounts.standbys[0].displayName, "独立任务 bot");
   assert.equal(roles.accounts.standbys[0].styleProfileId, "task");
   assert.equal(roles.accounts.standbys[0].enabled, true);
+  const accountPromptResponse = await fetch(`${base}/api/config`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ accounts: { promptOverrides: { primary: "主账号专属", "standby-a": "备用号专属" } } })
+  });
+  assert.equal(accountPromptResponse.status, 200);
+  const prompted = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
+  assert.equal(prompted.accounts.primary.promptOverride, "主账号专属");
+  assert.equal(prompted.accounts.standbys[0].promptOverride, "备用号专属");
+  assert.equal(prompted.accounts.standbys[0].styleProfileId, "task");
+  const resetPromptResponse = await fetch(`${base}/api/config`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ accounts: { promptOverrides: { "standby-a": "" } } })
+  });
+  assert.equal(resetPromptResponse.status, 200);
+  const resetPrompts = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
+  assert.equal(resetPrompts.accounts.primary.promptOverride, "主账号专属");
+  assert.equal(resetPrompts.accounts.standbys[0].promptOverride, "");
   const publicConfig = await (await fetch(`${base}/api/config`)).json();
   assert.equal(publicConfig.config?.voice?.apiKeyEnv || publicConfig.voice?.apiKeyEnv, "MIMO_API_KEY");
   assert.equal(JSON.stringify(publicConfig).includes("private-fixture-marker"), false, "unknown voice fields must not be exposed");
   console.log(JSON.stringify({ ok: true, checks: "isolated account role/name/style PATCH, persistence, hot read, no QQ send" }));
+  if (process.env.HERMES_QQ_UI_PREVIEW === "1") {
+    console.log(`Account prompt preview: ${base}/admin`);
+    await new Promise((resolve) => process.once("SIGTERM", resolve));
+  }
 } finally {
   child?.kill("SIGTERM");
   rmSync(home, { recursive: true, force: true });

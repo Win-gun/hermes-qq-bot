@@ -618,13 +618,20 @@ function registerIpc() {
         const result = await fetchJson(`${CONTROL_URL}/api/accounts/${encodeURIComponent(account.id)}/login/reset`, 120_000, "POST");
         if (!result.ok) throw new Error(`无法启动恢复的协议端：${account.id}`);
       }
-      return { ...restored, health, rollbackPath: rollback.path, warning: restored.manifest.mayRequireQqRescan ? "数据已恢复；QQ 可能因新设备策略要求重新扫码。" : "" };
+      service.completeRestore(restored.rollbackDir);
+      const warnings = [restored.manifest.mayRequireQqRescan ? "QQ 可能因新设备策略要求重新扫码" : "", restored.voiceCredentialRequired ? "语音已停用；请重新配置本机语音凭据后手动启用" : "", restored.apiCredentialReconfigurationRequired ? "API Keychain 凭据需要重新录入；问答、任务和识图可能暂不可用" : ""].filter(Boolean);
+      return { ...restored, health, rollbackPath: rollback.path, warning: warnings.length ? `数据已恢复；${warnings.join("；")}。` : "" };
     } catch (error) {
       await stopBridge();
+      let rollbackFailed = false;
       try {
         if (restored) await service.rollbackRestore({ stateRoot: stateRoot(), rollbackDir: restored.rollbackDir, installedTargets: restored.installedTargets, parkedContainers: restored.parkedContainers, restoredVolumes: restored.restoredVolumes });
-        else if (rollback) await service.restoreBackup({ path: rollback.path, password: rollbackType === "full" ? options.password : "", stateRoot: stateRoot(), hermesHome: hermesHome() });
-      } catch (rollbackError) { appendDesktopLog(`automatic rollback failed: ${rollbackError.message}`); }
+        else if (rollback) {
+          const recovered = await service.restoreBackup({ path: rollback.path, password: rollbackType === "full" ? options.password : "", stateRoot: stateRoot(), hermesHome: hermesHome() });
+          if (recovered.voiceCredentialRequired || recovered.apiCredentialReconfigurationRequired) throw new Error("安全回滚包不含原 Keychain 密钥，需要手动确认 API 与语音凭据");
+        }
+      } catch (rollbackError) { rollbackFailed = true; appendDesktopLog(`automatic rollback failed: ${rollbackError.message}`); }
+      if (rollbackFailed) throw new Error("恢复失败且自动回滚未完成；机器人已停止，请检查 Keychain 与回滚快照");
       bridgeIntentionalStop = false;
       startBridge();
       throw error;

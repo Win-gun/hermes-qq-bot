@@ -5,6 +5,9 @@ import crypto from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import { spawn } from "node:child_process";
 import * as tar from "tar";
+import * as defaultVoiceSecretStore from "./voice-secret-store.js";
+import * as defaultApiSecretStore from "./api-secret-store.js";
+import { isValidApiSecretRef } from "./api-secret-store.js";
 
 export const BACKUP_MAGIC = Buffer.from("HERMESQQBACKUP1\n", "utf8");
 export const BACKUP_FORMAT_VERSION = 1;
@@ -14,6 +17,109 @@ const DATA_COMPONENTS = ["memory.json", "chat-archive", "images", "tasks"];
 const HERMES_PROFILE_FILES = new Set([".env", "config.yaml", "config.yml", "config.json", "profiles", "auth.json", "skills"]);
 const SECRET_KEY_RE = /(^|_)(password|passwd|secret|token|cookie|credential|privatekey|api[_-]?key)($|_)/i;
 const SECRET_VALUE_RE = /^(sk[-_][A-Za-z0-9_-]{16,}|eyJ[A-Za-z0-9_.-]{24,}|[A-Za-z0-9+/=_-]{48,})$/;
+const VOICE_SECRET_PATH = "voice-keychain/secret";
+const API_SECRET_ROOT = "api-keychain";
+const MAX_API_SECRET_BYTES = 4096;
+// Keeps the prior value out of return values, IPC payloads, manifests, and logs.
+const secretRollbacks = new Map();
+
+function restoreVoiceSecret(store, previous) {
+  if (previous === null) store.deleteVoiceSecret();
+  else store.setVoiceSecret(previous);
+}
+
+function apiKeychainRefs(config) {
+  const connections = config?.apiCenter?.connections;
+  if (connections === undefined) return [];
+  if (!Array.isArray(connections)) throw new Error("API Center 连接配置无效");
+  const refs = new Set();
+  for (const connection of connections) {
+    if (!connection || typeof connection !== "object") throw new Error("API Center 连接配置无效");
+    if (connection.credentialSource !== undefined
+      && !["keychain", "existing", "legacy-voice-keychain"].includes(connection.credentialSource))
+      throw new Error("API Center 凭据来源无效");
+    if (connection.credentialSource !== "keychain") continue;
+    if (!isValidApiSecretRef(connection.credentialRef)) throw new Error("API Keychain 凭据引用无效");
+    refs.add(connection.credentialRef);
+  }
+  return [...refs].sort();
+}
+
+function hasLegacyVoiceKeychain(config) {
+  return ["keychain", "legacy-voice-keychain"].includes(config?.voice?.credentialSource)
+    || config?.apiCenter?.connections?.some((connection) => connection?.credentialSource === "legacy-voice-keychain") === true;
+}
+
+function disableUnbackedVoiceKeychain(config) {
+  let changed = false;
+  if (["keychain", "legacy-voice-keychain"].includes(config.voice?.credentialSource)) {
+    config.voice.credentialSource = "existing";
+    config.voice.enabled = false;
+    changed = true;
+  }
+  let legacyConnection = false;
+  for (const connection of config.apiCenter?.connections || []) {
+    if (connection?.credentialSource !== "legacy-voice-keychain") continue;
+    connection.credentialSource = "existing";
+    connection.apiKeyEnv = "";
+    legacyConnection = true;
+  }
+  if (legacyConnection) {
+    config.voice = { ...(config.voice || {}), credentialSource: "existing", apiKeyEnv: "", enabled: false };
+  }
+  return changed || legacyConnection;
+}
+
+function disableVoiceWithUnbackedApiCredentials(config) {
+  const center = config.apiCenter;
+  if (!center || !Array.isArray(center.profiles) || !Array.isArray(center.connections)) return false;
+  const profiles = new Map(center.profiles.map((profile) => [profile.id, profile]));
+  const connections = new Map(center.connections.map((connection) => [connection.id, connection]));
+  const affected = ["asr", "tts"].some((kind) => {
+    const profile = profiles.get(center.bindings?.[kind]);
+    return connections.get(profile?.connectionId)?.credentialSource === "keychain";
+  });
+  if (affected) config.voice = { ...(config.voice || {}), enabled: false };
+  return affected;
+}
+
+function restoreSecrets(changes, { keepCurrentOnFailure = false } = {}) {
+  let failed = false;
+  const restored = [];
+  for (const change of [...changes].reverse()) {
+    try { change.restore(); restored.push(change); } catch { failed = true; }
+  }
+  if (failed && keepCurrentOnFailure) {
+    // The restored files are still installed; best effort keeps their credentials
+    // consistent if a later ref could not be rolled back.
+    for (const change of restored.reverse()) {
+      try { change.set(); } catch { /* report the failed rollback below */ }
+    }
+  }
+  if (failed) throw new Error("无法还原原 Keychain 凭据；恢复已停止");
+}
+
+function validApiSecret(secret) {
+  return typeof secret === "string" && secret.length > 0 && !/[\r\n\0]/.test(secret)
+    && Buffer.byteLength(secret, "utf8") <= MAX_API_SECRET_BYTES;
+}
+
+function remapApiCredentialRefs(target, replacements, source = target) {
+  if (!source || typeof source !== "object" || !target || typeof target !== "object") return;
+  if (source.credentialSource === "keychain" && replacements.has(source.credentialRef)) {
+    target.credentialSource = "keychain";
+    target.credentialRef = replacements.get(source.credentialRef);
+  }
+  if (Array.isArray(source)) {
+    for (let index = 0; index < source.length; index += 1)
+      remapApiCredentialRefs(target[index], replacements, source[index]);
+  } else {
+    for (const key of Object.keys(source)) {
+      if (key === "credentialRef" || key === "credentialSource") continue;
+      remapApiCredentialRefs(target[key], replacements, source[key]);
+    }
+  }
+}
 
 function ensureDir(dir, mode = 0o700) {
   fs.mkdirSync(dir, { recursive: true, mode });
@@ -174,9 +280,14 @@ export function sanitizeConfigForBackup(input) {
       if (key === "__path") continue;
       const nextTrail = [...trail, key];
       const isEnvironmentName = /env(var|name)?$/i.test(key) || /apiKeyEnv/i.test(key);
+      const isApiCredentialRef = key === "credentialRef" && trail.length === 3 && trail[0] === "apiCenter"
+        && trail[1] === "connections" && /^\d+$/.test(trail[2] || "");
+      const isCredentialSource = key === "credentialSource" && ((trail.length === 1 && trail[0] === "voice")
+        || (trail.length === 3 && trail[0] === "apiCenter" && trail[1] === "connections" && /^\d+$/.test(trail[2] || "")));
       const normalizedKey = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2");
-      const secretKey = SECRET_KEY_RE.test(normalizedKey) && !isEnvironmentName;
-      if (secretKey || (typeof child === "string" && likelySecret(child) && !isEnvironmentName)) {
+      const safeMetadata = isEnvironmentName || isApiCredentialRef || isCredentialSource;
+      const secretKey = SECRET_KEY_RE.test(normalizedKey) && !safeMetadata;
+      if (secretKey || (typeof child === "string" && likelySecret(child) && !safeMetadata)) {
         output[key] = "";
         redactions.push(nextTrail.join("."));
       } else {
@@ -354,12 +465,57 @@ function copyHermesProfile(sourceRoot, destinationRoot) {
   return copied;
 }
 
-async function copyBackupPayload({ stateRoot, hermesHome, logRoot, includeLogs, payloadDir, type, signal }) {
+async function copyBackupPayload({ stateRoot, hermesHome, logRoot, includeLogs, payloadDir, type, signal, voiceSecretStore, apiSecretStore }) {
   const configPath = path.join(stateRoot, "config.json");
   const rawConfig = readJson(configPath, {});
+  const apiRefs = apiKeychainRefs(rawConfig);
   const sensitive = type === "full";
   const sanitized = sensitive ? { config: rawConfig, redactions: [] } : sanitizeConfigForBackup(rawConfig);
+  if (!sensitive && Array.isArray(sanitized.config.apiCenter?.connections)) {
+    for (const [index, connection] of sanitized.config.apiCenter.connections.entries()) {
+      if (connection?.apiKeyEnv === undefined || /^[A-Za-z_][A-Za-z0-9_]*$/.test(connection.apiKeyEnv)) continue;
+      connection.apiKeyEnv = "";
+      sanitized.redactions.push(`apiCenter.connections.${index}.apiKeyEnv`);
+    }
+  }
+  if (!sensitive && apiRefs.length) {
+    const replacement = new Map(apiRefs.map((ref) => [ref, crypto.randomUUID()]));
+    remapApiCredentialRefs(sanitized.config, replacement, rawConfig);
+    for (const [index, connection] of rawConfig.apiCenter.connections.entries())
+      if (connection.credentialSource === "keychain") sanitized.redactions.push(`apiCenter.connections.${index}.credentialRef`);
+  }
+  const unbackedApiVoice = !sensitive && disableVoiceWithUnbackedApiCredentials(sanitized.config);
+  const voiceCredentialRequired = !sensitive && (hasLegacyVoiceKeychain(rawConfig) || unbackedApiVoice);
+  if (voiceCredentialRequired) {
+    disableUnbackedVoiceKeychain(sanitized.config);
+    sanitized.redactions.push("voice.credentialSource", "voice.enabled");
+    let legacyConnectionFound = false;
+    for (const [index, connection] of (rawConfig.apiCenter?.connections || []).entries()) {
+      if (connection?.credentialSource === "legacy-voice-keychain") {
+        legacyConnectionFound = true;
+        sanitized.redactions.push(`apiCenter.connections.${index}.credentialSource`, `apiCenter.connections.${index}.apiKeyEnv`);
+      }
+    }
+    if (legacyConnectionFound) sanitized.redactions.push("voice.apiKeyEnv");
+  }
   writeJson(path.join(payloadDir, "state", "config.json"), portableConfig(sanitized.config, stateRoot, hermesHome));
+  if (sensitive && hasLegacyVoiceKeychain(rawConfig)) {
+    const secret = voiceSecretStore.getVoiceSecret();
+    if (!secret) throw new Error("Keychain 语音凭据缺失，无法创建完整备份");
+    const destination = path.join(payloadDir, VOICE_SECRET_PATH);
+    ensureDir(path.dirname(destination));
+    fs.writeFileSync(destination, secret, { mode: 0o600 });
+  }
+  if (sensitive) {
+    for (const ref of apiRefs) {
+      checkCancelled(signal);
+      const secret = apiSecretStore.getApiSecret(ref);
+      if (!validApiSecret(secret)) throw new Error("Keychain API 凭据缺失或无效，无法创建完整备份");
+      const destination = path.join(payloadDir, API_SECRET_ROOT, ref);
+      ensureDir(path.dirname(destination));
+      fs.writeFileSync(destination, secret, { mode: 0o600 });
+    }
+  }
   const dataTarget = path.join(payloadDir, "state", "data");
   for (const name of DATA_COMPONENTS) await copyPathForBackup(path.join(stateRoot, "data", name), path.join(dataTarget, name), { signal });
   if (sensitive) {
@@ -389,17 +545,17 @@ async function copyBackupPayload({ stateRoot, hermesHome, logRoot, includeLogs, 
     }
     if (includeLogs && logRoot) await copyPathForBackup(logRoot, path.join(payloadDir, "diagnostic-logs"), { signal });
   }
-  return { rawConfig, redactions: sanitized.redactions };
+  return { rawConfig, redactions: sanitized.redactions, voiceCredentialRequired, apiRefs };
 }
 
-async function buildPayload({ stateRoot, hermesHome, logRoot, includeLogs, type, appVersion, platform, arch, signal, onProgress }) {
+async function buildPayload({ stateRoot, hermesHome, logRoot, includeLogs, type, appVersion, platform, arch, signal, onProgress, voiceSecretStore, apiSecretStore }) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hermesqq-backup-"));
   fs.chmodSync(tempRoot, 0o700);
   try {
     const payloadDir = path.join(tempRoot, "payload");
     ensureDir(payloadDir);
     onProgress?.({ stage: "copy", percent: 2, detail: "复制配置、记忆和聊天数据" });
-    const { rawConfig, redactions } = await copyBackupPayload({ stateRoot, hermesHome, logRoot, includeLogs, payloadDir, type, signal });
+    const { rawConfig, redactions, voiceCredentialRequired, apiRefs } = await copyBackupPayload({ stateRoot, hermesHome, logRoot, includeLogs, payloadDir, type, signal, voiceSecretStore, apiSecretStore });
     checkCancelled(signal);
     onProgress?.({ stage: "copy", percent: 10, detail: "本地数据已复制" });
     let docker = { records: [], containerStates: [] };
@@ -421,7 +577,15 @@ async function buildPayload({ stateRoot, hermesHome, logRoot, includeLogs, type,
     containsSensitiveInformation: type === "full",
     requiresPassword: type === "full",
     mayRequireQqRescan: type !== "full",
-    components: includeLogs && fs.existsSync(path.join(payloadDir, "diagnostic-logs")) ? [...DEFAULT_COMPONENTS, "diagnostic-logs"] : DEFAULT_COMPONENTS,
+    voiceCredentialRequired,
+    apiCredentialReconfigurationRequired: type === "safe" && apiRefs.length > 0,
+    apiKeychainRefs: type === "full" ? apiRefs : [],
+    components: [
+      ...DEFAULT_COMPONENTS,
+      ...(fs.existsSync(path.join(payloadDir, VOICE_SECRET_PATH)) ? ["voice-keychain"] : []),
+      ...(apiRefs.length && type === "full" ? [API_SECRET_ROOT] : []),
+      ...(includeLogs && fs.existsSync(path.join(payloadDir, "diagnostic-logs")) ? ["diagnostic-logs"] : [])
+    ],
     redactedConfigFields: redactions,
     accounts: accountDefinitions(rawConfig).map((account) => ({
       id: String(account.id),
@@ -516,7 +680,7 @@ async function extractContainer({ file, password = "" }) {
     }
     const payloadDir = path.join(tempRoot, "payload");
     ensureDir(payloadDir);
-    const allowedRoots = new Set(["manifest.json", "state", "docker", "protocol-host", "hermes-home", "diagnostic-logs"]);
+    const allowedRoots = new Set(["manifest.json", "state", "docker", "protocol-host", "hermes-home", "diagnostic-logs", "voice-keychain", API_SECRET_ROOT]);
     await tar.t({ file: archive, gzip: true, strict: true, onReadEntry(entry) {
       const name = String(entry.path || "").replace(/^\.\//, "").replace(/\/$/, "");
       if (!name || name === ".") return;
@@ -527,7 +691,8 @@ async function extractContainer({ file, password = "" }) {
     await tar.x({ cwd: payloadDir, file: archive, gzip: true, strict: true, preservePaths: false });
     const actual = walkFiles(payloadDir);
     const manifest = readJson(path.join(payloadDir, "manifest.json"));
-    if (!manifest || manifest.formatVersion !== BACKUP_FORMAT_VERSION || !Array.isArray(manifest.files)) throw new Error("备份格式版本不受支持");
+    if (!manifest || manifest.formatVersion !== BACKUP_FORMAT_VERSION
+      || !Array.isArray(manifest.files) || !Array.isArray(manifest.components)) throw new Error("备份格式版本不受支持");
     if (!versionAtLeast(CURRENT_APP_VERSION, manifest.minimumAppVersion)) throw new Error("备份需要更新版本的 Hermes QQ Bot");
     if (!(["safe", "full"].includes(manifest.type)) || Boolean(header.encrypted) !== (manifest.type === "full")) throw new Error("备份类型与加密标记不一致");
     if (manifest.type === "full" && (manifest.platform !== "darwin" || manifest.arch !== "arm64")) throw new Error("完整迁移包仅支持 Apple 芯片 Mac");
@@ -539,10 +704,32 @@ async function extractContainer({ file, password = "" }) {
       if (parts[0] === "hermes-home") return parts.length >= 2 && HERMES_PROFILE_FILES.has(parts[1]);
       if (parts[0] === "docker") return parts.length === 3 && /^[A-Za-z0-9_.-]+$/.test(parts[1]) && /^(snowlumaData|appConfig|localShare)\.tgz$/.test(parts[2]);
       if (parts[0] === "diagnostic-logs") return parts.length >= 2 && manifest.components?.includes("diagnostic-logs");
+      if (parts[0] === "voice-keychain") return value === VOICE_SECRET_PATH && manifest.components?.includes("voice-keychain");
+      if (parts[0] === API_SECRET_ROOT) return parts.length === 2 && isValidApiSecretRef(parts[1]) && manifest.components?.includes(API_SECRET_ROOT);
       return false;
     };
     if (manifest.files.some((item) => !validPayloadPath(item.path))) throw new Error("备份包含未知组件或文件");
+    const hasVoiceSecret = manifest.files.some((item) => item.path === VOICE_SECRET_PATH);
+    if (Boolean(manifest.components?.includes("voice-keychain")) !== hasVoiceSecret
+      || (hasVoiceSecret && !hasLegacyVoiceKeychain(readJson(path.join(payloadDir, "state", "config.json"))))) {
+      throw new Error("备份 Keychain 组件清单无效");
+    }
     if (!fs.existsSync(path.join(payloadDir, "state", "config.json"))) throw new Error("备份缺少配置文件");
+    const backupConfig = readJson(path.join(payloadDir, "state", "config.json"));
+    const configApiRefs = apiKeychainRefs(backupConfig);
+    const declaredApiRefs = manifest.apiKeychainRefs ?? [];
+    if (!Array.isArray(declaredApiRefs) || declaredApiRefs.some((ref) => !isValidApiSecretRef(ref))
+      || new Set(declaredApiRefs).size !== declaredApiRefs.length) throw new Error("备份 API Keychain 引用清单无效");
+    const fileApiRefs = manifest.files.filter((item) => String(item.path || "").startsWith(`${API_SECRET_ROOT}/`))
+      .map((item) => item.path.slice(API_SECRET_ROOT.length + 1)).sort();
+    if (manifest.type === "safe") {
+      if (manifest.components.includes(API_SECRET_ROOT) || declaredApiRefs.length || fileApiRefs.length)
+        throw new Error("普通备份不得包含 API Keychain 凭据");
+    } else if (manifest.components.includes(API_SECRET_ROOT) !== (configApiRefs.length > 0)
+      || JSON.stringify([...declaredApiRefs].sort()) !== JSON.stringify(configApiRefs)
+      || JSON.stringify(fileApiRefs) !== JSON.stringify(configApiRefs)) {
+      throw new Error("备份 API Keychain 组件清单无效");
+    }
     if (!Array.isArray(manifest.dockerVolumes) || manifest.dockerVolumes.some((item) => !validPayloadPath(item.archive) || !manifest.files.some((file) => file.path === item.archive))) throw new Error("Docker 卷清单无效");
     const expectedPaths = new Set(manifest.files.map((item) => item.path));
     if (expectedPaths.size !== manifest.files.length || actual.length !== manifest.files.length + 1 || actual.some((item) => item.path !== "manifest.json" && !expectedPaths.has(item.path))) throw new Error("备份文件清单不一致");
@@ -584,7 +771,9 @@ export async function createBackup(options = {}) {
       platform: options.platform || process.platform,
       arch: options.arch || process.arch,
       signal,
-      onProgress
+      onProgress,
+      voiceSecretStore: options.voiceSecretStore || defaultVoiceSecretStore,
+      apiSecretStore: options.apiSecretStore || defaultApiSecretStore
     });
     const packed = path.join(built.tempRoot, "payload.tgz");
     onProgress?.({ stage: "compress", percent: type === "full" ? 78 : 55, detail: "压缩备份数据" });
@@ -743,6 +932,9 @@ export async function rollbackRestore({ stateRoot, rollbackDir, installedTargets
   const target = path.resolve(stateRoot);
   const saved = path.resolve(rollbackDir);
   if (path.dirname(saved) !== path.dirname(target) || !path.basename(saved).startsWith(".Hermes QQ Bot rollback ")) throw new Error("回滚目录无效");
+  const secretRollback = secretRollbacks.get(saved);
+  // Keep restored files in place if any Keychain rollback cannot complete.
+  if (secretRollback) restoreSecrets(secretRollback, { keepCurrentOnFailure: true });
   for (const name of installedTargets) {
     if (!/^[A-Za-z0-9_.-]+$/.test(name)) throw new Error("回滚目标无效");
     fs.rmSync(path.join(target, name), { recursive: true, force: true });
@@ -754,7 +946,13 @@ export async function rollbackRestore({ stateRoot, rollbackDir, installedTargets
   }
   await rollbackRestoredContainers(parkedContainers);
   for (const volume of restoredVolumes) await run("docker", ["volume", "rm", volume], { timeoutMs: 30_000 });
+  if (secretRollback) secretRollbacks.delete(saved);
   return { ok: true };
+}
+
+/** Once health checks pass, forget the previous Keychain value kept for rollback. */
+export function completeRestore(rollbackDir) {
+  secretRollbacks.delete(path.resolve(rollbackDir));
 }
 
 export async function restoreBackup(options = {}) {
@@ -762,23 +960,68 @@ export async function restoreBackup(options = {}) {
   const extracted = await extractContainer({ file: path.resolve(options.path), password: options.password || "" });
   let parked = [];
   let restoredVolumes = [];
+  const voiceSecretStore = options.voiceSecretStore || defaultVoiceSecretStore;
+  const apiSecretStore = options.apiSecretStore || defaultApiSecretStore;
+  const secretChanges = [];
   try {
     const disk = fs.statfsSync(path.dirname(stateRoot));
     const available = Number(disk.bavail) * Number(disk.bsize);
     if (available < Number(extracted.manifest.totalBytes || 0) * 2) throw new Error("目标磁盘剩余空间不足以安全恢复并保留回滚数据");
     const stagedConfigPath = path.join(extracted.payloadDir, "state", "config.json");
     const config = localConfig(readJson(stagedConfigPath, {}), stateRoot, options.hermesHome ? path.resolve(options.hermesHome) : "");
+    let voiceCredentialRequired = extracted.manifest.voiceCredentialRequired === true;
+    let apiCredentialReconfigurationRequired = extracted.manifest.apiCredentialReconfigurationRequired === true;
+    // Older ordinary backups may still say "keychain" despite not carrying its
+    // secret. Disable voice rather than silently using another machine's item.
+    if (extracted.manifest.type === "safe") {
+      voiceCredentialRequired = disableUnbackedVoiceKeychain(config)
+        || disableVoiceWithUnbackedApiCredentials(config) || voiceCredentialRequired;
+      const refs = apiKeychainRefs(config);
+      if (refs.length) {
+        const replacement = new Map(refs.map((ref) => [ref, crypto.randomUUID()]));
+        remapApiCredentialRefs(config, replacement);
+        apiCredentialReconfigurationRequired = true;
+      }
+    }
     if (extracted.manifest.type === "full" && (extracted.manifest.dockerVolumes || []).length) {
       const restored = await restoreDockerVolumes({ payloadDir: extracted.payloadDir, manifest: extracted.manifest, config });
       restoredVolumes = restored.createdVolumes;
       parked = await parkContainers(config);
     }
     writeJson(stagedConfigPath, config);
+    const pendingSecrets = [];
+    if (extracted.manifest.files.some((item) => item.path === VOICE_SECRET_PATH)) {
+      const secret = fs.readFileSync(path.join(extracted.payloadDir, VOICE_SECRET_PATH), "utf8");
+      if (!secret || /[\r\n\0]/.test(secret)) throw new Error("备份中的 Keychain 语音凭据无效");
+      const previous = voiceSecretStore.getVoiceSecret();
+      pendingSecrets.push({ set: () => voiceSecretStore.setVoiceSecret(secret),
+        restore: () => restoreVoiceSecret(voiceSecretStore, previous) });
+    }
+    for (const ref of extracted.manifest.apiKeychainRefs || []) {
+      const secret = fs.readFileSync(path.join(extracted.payloadDir, API_SECRET_ROOT, ref), "utf8");
+      if (!validApiSecret(secret))
+        throw new Error("备份中的 Keychain API 凭据无效");
+      const previous = apiSecretStore.getApiSecret(ref);
+      pendingSecrets.push({ set: () => apiSecretStore.setApiSecret(ref, secret),
+        restore: () => previous === null ? apiSecretStore.deleteApiSecret(ref) : apiSecretStore.setApiSecret(ref, previous) });
+    }
+    for (const change of pendingSecrets) {
+      secretChanges.push(change);
+      change.set();
+    }
     const result = replaceFromStage({ stateRoot, payloadDir: extracted.payloadDir, full: extracted.manifest.type === "full", hermesHome: options.hermesHome });
-    return { ok: true, manifest: extracted.manifest, rollbackDir: result.rollbackDir, installedTargets: result.installedTargets, parkedContainers: parked, restoredVolumes };
+    if (secretChanges.length) secretRollbacks.set(result.rollbackDir, secretChanges);
+    return { ok: true, manifest: extracted.manifest, voiceCredentialRequired, apiCredentialReconfigurationRequired,
+      rollbackDir: result.rollbackDir, installedTargets: result.installedTargets, parkedContainers: parked, restoredVolumes };
   } catch (error) {
+    let rollbackError = null;
+    if (secretChanges.length) {
+      try { restoreSecrets(secretChanges); }
+      catch { rollbackError = new Error("恢复失败，且无法还原原 Keychain 凭据"); }
+    }
     if (parked.length) await rollbackRestoredContainers(parked);
     for (const volume of restoredVolumes) await run("docker", ["volume", "rm", volume], { timeoutMs: 30_000 });
+    if (rollbackError) throw rollbackError;
     throw error;
   } finally {
     fs.rmSync(extracted.tempRoot, { recursive: true, force: true });

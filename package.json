@@ -1,6 +1,6 @@
 {
   "name": "qq-hermes-onebot-bridge",
-  "version": "1.0.0-beta.4",
+  "version": "1.0.0-beta.6",
   "description": "Local desktop manager and OneBot bridge for Hermes-powered QQ bots",
   "main": "desktop/main.cjs",
   "private": true,
@@ -19,6 +19,7 @@
     "test:features": "node scripts/bot-capabilities-self-test.js && node scripts/automation-rules-self-test.js && node scripts/voice-intent-self-test.js && node scripts/voice-credentials-self-test.js && node scripts/voice-service-self-test.js && node scripts/voice-onebot-self-test.js && node scripts/voice-consent-self-test.js && node scripts/voice-design-self-test.js && node scripts/task-web-policy-self-test.js && node scripts/new-features-integration-self-test.js",
     "test:backup": "node scripts/backup-service-self-test.js",
     "test:web-host": "node scripts/web-host-self-test.js",
+    "test:api-center": "node scripts/api-center-self-test.js && node scripts/api-secret-store-self-test.js && node scripts/api-center-integration-self-test.js && node scripts/mimo-web-search-self-test.js",
     "test:docker-backup": "node scripts/docker-migration-self-test.js",
     "memory:rebuild": "node scripts/memory-rebuild.js",
     "memory:rebuild:apply": "node scripts/memory-rebuild.js --apply",

@@ -434,17 +434,25 @@ async function restoreLocalBackup(options) {
     restored = await backup.restoreBackup({ path: file, password: options.password || "", stateRoot, hermesHome });
     await startBridge(true);
     await resetRestoredAccounts(restored.manifest);
+    backup.completeRestore(restored.rollbackDir);
     publish({ status: "completed", type: "restore", stage: "finished", percent: 100 });
-    return { ok: true, manifest: restored.manifest, rollbackName: path.basename(rollback.path), warning: restored.manifest.mayRequireQqRescan ? "QQ 可能需要重新扫码" : "" };
+    const warnings = [restored.manifest.mayRequireQqRescan ? "QQ 可能需要重新扫码" : "", restored.voiceCredentialRequired ? "语音已停用；请重新配置本机语音凭据后手动启用" : "", restored.apiCredentialReconfigurationRequired ? "API Keychain 凭据需要重新录入；问答、任务和识图可能暂不可用" : ""].filter(Boolean);
+    return { ok: true, manifest: restored.manifest, rollbackName: path.basename(rollback.path), warning: warnings.join("；") };
   } catch (error) {
     await stopBridge();
     let rollbackFailed = false;
     try {
       if (restored) await backup.rollbackRestore({ stateRoot, rollbackDir: restored.rollbackDir, installedTargets: restored.installedTargets, parkedContainers: restored.parkedContainers, restoredVolumes: restored.restoredVolumes });
-      else if (rollback) await backup.restoreBackup({ path: rollback.path, password: rollbackType === "full" ? options.password : "", stateRoot, hermesHome });
+      else if (rollback) {
+        const recovered = await backup.restoreBackup({ path: rollback.path, password: rollbackType === "full" ? options.password : "", stateRoot, hermesHome });
+        if (recovered.voiceCredentialRequired || recovered.apiCredentialReconfigurationRequired) throw new Error("安全回滚包不含原 Keychain 密钥，需要手动确认 API 与语音凭据");
+      }
     } catch (rollbackError) { rollbackFailed = true; console.error(`restore rollback failed: ${rollbackError.message}`); }
-    try { await startBridge(true); } catch (restartError) { console.error(`bridge restart after restore failure: ${restartError.message}`); }
+    if (!rollbackFailed) {
+      try { await startBridge(true); } catch (restartError) { console.error(`bridge restart after restore failure: ${restartError.message}`); }
+    }
     publish({ status: "failed", type: "restore", stage: "finished", percent: progress?.percent || 0, rollbackFailed });
+    if (rollbackFailed) throw new Error("恢复失败且自动回滚未完成；桥接已停止，请检查 Keychain 与回滚快照");
     throw error;
   } finally { operation = null; }
 }
@@ -471,7 +479,14 @@ async function upload(req) {
 
 function proxy(req, res) {
   if (!child || !childPort) return reply(res, 503, { ok: false, error: "bridge_stopped" });
-  const upstream = http.request({ hostname: "127.0.0.1", port: childPort, method: req.method, path: req.url, headers: { ...req.headers, host: `127.0.0.1:${childPort}` } }, (response) => {
+  const headers = { ...req.headers, host: `127.0.0.1:${childPort}` };
+  // The public host validates the browser Origin before proxying. The bridge
+  // independently checks its own loopback origin for credential mutations.
+  if (req.headers.origin && (/^\/api\/voice\/(?:credential|test)(?:\?|$)/.test(req.url || "")
+    || /^\/api\/api-center(?:\/|\?|$)/.test(req.url || ""))) {
+    headers.origin = `http://127.0.0.1:${childPort}`;
+  }
+  const upstream = http.request({ hostname: "127.0.0.1", port: childPort, method: req.method, path: req.url, headers }, (response) => {
     res.writeHead(response.statusCode || 502, response.headers);
     response.pipe(res);
   });

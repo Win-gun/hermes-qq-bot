@@ -47,6 +47,12 @@ export function styleProfileForAccount(config = {}, accountId = "primary") {
 }
 
 export function systemPromptForAccount(config = {}, accountId = "primary") {
+  const accounts = config.accounts || {};
+  const identityId = accountTopology(config) === "failover" ? (accounts.primary?.id || "primary") : accountId;
+  const account = identityId === (accounts.primary?.id || "primary")
+    ? accounts.primary
+    : (accounts.standbys || []).find((item) => item?.id === identityId);
+  if (typeof account?.promptOverride === "string" && account.promptOverride.trim()) return account.promptOverride;
   const profile = styleProfileForAccount(config, accountId);
   return String(profile?.systemPrompt || config.prompt?.system || "");
 }
