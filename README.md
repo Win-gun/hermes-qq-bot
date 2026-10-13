@@ -21,7 +21,7 @@ http://127.0.0.1:6200/admin
 管理页提供：
 
 - 查看 OneBot / QQ 连接状态、日志尾部和当前队列；
-- 分别查看与管理 SnowLuma / NapCat 协议端及主备账号；
+- 添加、暂停和管理多个 SnowLuma / NapCat 账号，按需组成接管组；
 - 开关联网搜索，调整 Google / 百度搜索配置和代理端口；
 - 调整活跃度、默认克制/正常/活跃模式、主动插话概率和冷却；
 - 编辑系统提示词；
@@ -33,9 +33,9 @@ http://127.0.0.1:6200/admin
 
 管理页默认只监听 `127.0.0.1`。API key 不会在页面里保存明文；如需切换密钥，请在运行环境中配置对应环境变量，再在页面填写环境变量名。
 
-新功能默认保持保守：账号拓扑为故障接管，自动化和语音关闭，VoiceClone 关闭。需要启用时先在管理页指定群/会话范围并在测试群验收。
+新功能默认保持保守：旧账号关系无损迁移，新增账号默认暂停且只允许文本发送；自动化、语音和 VoiceClone 仍需显式启用。需要启用时先在管理页指定群/会话范围并在测试群验收。
 
-在“账号管理”页可逐账号启用/停用消息处理、修改对外名称、选择聊天/任务功能和风格预设。“同一个 bot · 主备故障接管”沿用主账号的人设与自我记忆；切换为“独立 bot · 按功能分工/协作聊天”后，群友画像和群事实仍共用，但每个账号的自我记忆单独保存。未指定对象的群聊默认由当前账号处理，明确 @ 某账号则交给该账号；不会让两个账号默认同时回复。停用不退出 QQ，全部停用则机器人不发言。新风格在“提示词”页创建后可在账号卡片中选用。
+在“账号状态”添加账号、管理登录连接，在“账号功能”逐账号设置身份、功能、可发内容、参与范围和模型方案。账号默认平级，普通群聊由符合条件的账号分别判断，不设固定回复账号数量上限；明确 @ 则只由被点名账号处理。所有账号共享群发送节流和 quiet 限制，群事实与成员资料可以共享，自我记忆分别保存。需要多个 QQ 代表同一个 bot 时显式创建接管组，组内只由当前成员发言。暂停机器人不退出 QQ，也不会删除记忆。完整说明见[多账号管理](docs/MULTI-ACCOUNT.md)。
 
 - `/bot voice status` 查看当前会话的语音模式与音色。群管理员可用 `/bot voice off|mixed|force` 分别设置只发文字、按请求/收到的语音酌情回语音、聊天回复优先语音；主人私聊也可独立设置。合成失败时降级为文字；发送回执不确定时不重复发送。收语音转写由 ASR 开关单独控制。
 - `/bot voice preset list|音色ID` 查看或切换允许的预设音色；`/bot voice synth 要说的话` 用当前音色合成一条语音。
@@ -279,8 +279,8 @@ npm run memory:rebuild
 限制范围：
 
 ```bash
-npm run memory:rebuild -- --group 364433603
-npm run memory:rebuild -- --group 364433603 --user 123456
+npm run memory:rebuild -- --group 20001
+npm run memory:rebuild -- --group 20001 --user 123456
 npm run memory:rebuild -- --limit 5
 ```
 
@@ -550,11 +550,11 @@ data/memory.json
 运行：
 
 ```bash
-node src/bridge.js --dry-run ./sample-chat.txt --group 364433603
+node src/bridge.js --dry-run ./sample-chat.txt --group 20001
 ```
 
 不调用 AI、只看上下文包和决策：
 
 ```bash
-node src/bridge.js --dry-run ./sample-chat.txt --group 364433603 --no-ai
+node src/bridge.js --dry-run ./sample-chat.txt --group 20001 --no-ai
 ```

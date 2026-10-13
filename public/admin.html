@@ -4,429 +4,27 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Hermes QQ Bot 控制台</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      --bg: #0b0f17;
-      --panel: #121826;
-      --panel-2: #172033;
-      --card: #151c2b;
-      --line: #293247;
-      --line-soft: rgba(148, 163, 184, .18);
-      --text: #eef4ff;
-      --muted: #93a4bd;
-      --muted-2: #66758d;
-      --accent: #7c9cff;
-      --accent-2: #6ee7ff;
-      --good: #5ee08c;
-      --warn: #ffd166;
-      --bad: #ff6b81;
-      --shadow: 0 18px 50px rgba(0, 0, 0, .28);
-      --radius: 18px;
-    }
-    * { box-sizing: border-box; }
-    html { scroll-behavior: smooth; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-      background:
-        radial-gradient(circle at top left, rgba(124, 156, 255, .18), transparent 34rem),
-        radial-gradient(circle at top right, rgba(110, 231, 255, .10), transparent 30rem),
-        var(--bg);
-      color: var(--text);
-    }
-    button, input, textarea, select { font: inherit; }
-    button {
-      border: 0;
-      border-radius: 12px;
-      padding: 10px 13px;
-      background: linear-gradient(135deg, #3f63ff, #6c82ff);
-      color: white;
-      cursor: pointer;
-      transition: transform .12s ease, filter .12s ease, opacity .12s ease;
-    }
-    button:hover { filter: brightness(1.08); transform: translateY(-1px); }
-    button:disabled { opacity: .5; cursor: not-allowed; transform: none; }
-    button.secondary { background: #273149; color: #d9e4ff; }
-    button.ghost { background: transparent; border: 1px solid var(--line); color: var(--muted); }
-    button.danger { background: linear-gradient(135deg, #b93550, #e14d66); }
-    button.good { background: linear-gradient(135deg, #168a52, #22c56f); }
-    a { color: inherit; text-decoration: none; }
-    label { display: block; margin: 0 0 7px; color: var(--muted); font-size: 12px; }
-    input, textarea, select {
-      width: 100%;
-      color: var(--text);
-      background: #0d1320;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 10px 11px;
-      outline: none;
-    }
-    input:focus, textarea:focus, select:focus { border-color: rgba(124, 156, 255, .9); box-shadow: 0 0 0 3px rgba(124, 156, 255, .12); }
-    textarea { min-height: 110px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.55; }
-    input[type="checkbox"] { width: auto; transform: translateY(1px); }
-    input[type="range"] { padding: 0; accent-color: var(--accent); }
-    pre {
-      white-space: pre-wrap;
-      background: #0d1320;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 13px;
-      max-height: 360px;
-      overflow: auto;
-      color: #d8e4fb;
-    }
-    .shell {
-      display: grid;
-      grid-template-columns: 260px minmax(0, 1fr);
-      min-height: 100vh;
-    }
-    .sidebar {
-      position: sticky;
-      top: 0;
-      height: 100vh;
-      padding: 22px 18px;
-      background: rgba(9, 13, 21, .72);
-      backdrop-filter: blur(16px);
-      border-right: 1px solid var(--line-soft);
-      overflow: auto;
-    }
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-bottom: 20px;
-    }
-    .logo {
-      width: 42px;
-      height: 42px;
-      border-radius: 14px;
-      display: grid;
-      place-items: center;
-      background: linear-gradient(135deg, rgba(124, 156, 255, .95), rgba(110, 231, 255, .65));
-      box-shadow: 0 12px 30px rgba(89, 121, 255, .24);
-      font-size: 22px;
-    }
-    .brand h1 { margin: 0; font-size: 18px; letter-spacing: .2px; }
-    .brand .sub { margin-top: 2px; color: var(--muted); font-size: 12px; }
-    .nav { display: grid; gap: 7px; margin: 18px 0; }
-    .nav-label { margin: 16px 12px 3px; color: var(--muted-2); font-size: 11px; letter-spacing: .08em; }
-    .nav-more { border-top: 1px solid var(--line-soft); margin-top: 12px; padding-top: 12px; }
-    .nav-more summary { cursor: pointer; color: var(--muted); padding: 8px 12px; list-style-position: inside; }
-    .nav-more button { margin-top: 6px; }
-    .nav button {
-      width: 100%;
-      text-align: left;
-      background: transparent;
-      color: var(--muted);
-      border: 1px solid transparent;
-      padding: 10px 12px;
-    }
-    .nav button.active, .nav button:hover {
-      background: rgba(124, 156, 255, .12);
-      border-color: rgba(124, 156, 255, .24);
-      color: var(--text);
-      transform: none;
-    }
-    .nav button.has-unsaved::after, .subnav button.has-unsaved::after { content: " •"; color: var(--warn); }
-    .side-card {
-      margin-top: 14px;
-      padding: 13px;
-      background: rgba(21, 28, 43, .82);
-      border: 1px solid var(--line-soft);
-      border-radius: 16px;
-    }
-    .side-card .title { color: var(--muted); font-size: 12px; margin-bottom: 7px; }
-    .main {
-      min-width: 0;
-      padding: 24px;
-    }
-    .topbar {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 16px;
-      margin-bottom: 18px;
-    }
-    .topbar h2 { margin: 0 0 5px; font-size: 25px; }
-    .topbar p { margin: 0; color: var(--muted); }
-    .toolbar {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      justify-content: flex-end;
-    }
-    .page { display: none; }
-    .page.active { display: block; }
-    .subnav { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
-    .qa-persona-bar { display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
-    .qa-persona-bar .subnav { margin-bottom: 0; }
-    .qa-prompt-target { width: min(360px, 100%); }
-    .qa-prompt-target label { display: block; margin-bottom: 6px; }
-    .subnav button { background: #1b2538; color: var(--muted); border: 1px solid var(--line); }
-    .subnav button.active { background: rgba(124, 156, 255, .16); border-color: var(--accent); color: var(--text); }
-    .subpanel { display: none; }
-    .subpanel.active { display: block; }
-    .connection-settings { margin-top: 14px; }
-    .connection-settings > summary { cursor: pointer; font-weight: 650; margin: 0 0 12px; }
-    .panel-intro { color: var(--muted); margin: 0 0 16px; line-height: 1.6; }
-    .grid { display: grid; gap: 14px; }
-    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-    .api-capability { min-height: 130px; }
-    .api-capability strong { display: block; margin-bottom: 8px; }
-    .api-capability .hint { min-height: 34px; }
-    .api-capability .row { margin-top: 10px; }
-    .api-editor .row { margin-top: 12px; }
-    .api-editor .hint { line-height: 1.5; }
-    .card {
-      background: rgba(18, 24, 38, .88);
-      border: 1px solid var(--line-soft);
-      border-radius: var(--radius);
-      padding: 17px;
-      box-shadow: var(--shadow);
-    }
-    .card.flat { box-shadow: none; background: rgba(21, 28, 43, .72); }
-    .card h3 {
-      margin: 0 0 12px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      font-size: 16px;
-    }
-    .section-title {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      margin-bottom: 12px;
-    }
-    .section-title h3 { margin: 0; }
-    .stat {
-      min-height: 126px;
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-    }
-    .stat .label { color: var(--muted); font-size: 13px; }
-    .stat .value { margin: 9px 0 5px; font-size: 25px; font-weight: 700; word-break: break-word; }
-    .stat .hint { color: var(--muted); font-size: 12px; line-height: 1.5; }
-    .dot {
-      display: inline-block;
-      width: 9px;
-      height: 9px;
-      border-radius: 99px;
-      margin-right: 7px;
-      background: var(--muted-2);
-      box-shadow: 0 0 0 4px rgba(148, 163, 184, .08);
-    }
-    .dot.good { background: var(--good); box-shadow: 0 0 0 4px rgba(94, 224, 140, .12); }
-    .dot.warn { background: var(--warn); box-shadow: 0 0 0 4px rgba(255, 209, 102, .12); }
-    .dot.bad { background: var(--bad); box-shadow: 0 0 0 4px rgba(255, 107, 129, .12); }
-    .pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 6px 9px;
-      border-radius: 999px;
-      background: #0d1320;
-      border: 1px solid var(--line);
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.2;
-    }
-    .pill.good { color: #b8ffd3; border-color: rgba(94, 224, 140, .32); background: rgba(94, 224, 140, .09); }
-    .pill.warn { color: #ffe8a3; border-color: rgba(255, 209, 102, .34); background: rgba(255, 209, 102, .09); }
-    .pill.bad { color: #ffd0d8; border-color: rgba(255, 107, 129, .36); background: rgba(255, 107, 129, .09); }
-    .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-    .muted { color: var(--muted); }
-    .small { font-size: 12px; }
-    .hint { color: var(--muted); font-size: 12px; line-height: 1.55; }
-    .alert, .success, .warning {
-      border-radius: 15px;
-      padding: 13px 14px;
-      margin: 10px 0;
-      line-height: 1.55;
-    }
-    .alert { border: 1px solid rgba(255, 107, 129, .40); background: rgba(255, 107, 129, .10); color: #ffd2d9; }
-    .success { border: 1px solid rgba(94, 224, 140, .34); background: rgba(94, 224, 140, .08); color: #caffdc; }
-    .warning { border: 1px solid rgba(255, 209, 102, .36); background: rgba(255, 209, 102, .08); color: #ffecb0; }
-    .hidden { display: none !important; }
-    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-    .field { min-width: 0; }
-    .field.full { grid-column: 1 / -1; }
-    .settings-block { margin-top: 14px; }
-    .settings-block .hint { margin: 0 0 12px; }
-    .settings-block .row { margin-top: 12px; }
-    .profile-prompt { min-height: 220px; }
-    .automation-rule { cursor: default; overflow-wrap: anywhere; }
-    .automation-rule .row { justify-content: space-between; }
-    .automation-rule p { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
-    .automation-days { display: flex; flex-wrap: wrap; gap: 8px 14px; }
-    .automation-days label { display: inline-flex; align-items: center; gap: 5px; margin: 0; }
-    .voice-presets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-    .voice-presets label { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 0; padding: 9px 10px; border: 1px solid var(--line-soft); border-radius: 12px; background: rgba(13, 19, 32, .62); overflow-wrap: anywhere; }
-    .switch-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 11px 12px;
-      border: 1px solid var(--line-soft);
-      background: rgba(13, 19, 32, .7);
-      border-radius: 14px;
-      margin-bottom: 10px;
-    }
-    .switch-row strong { display: block; font-size: 14px; }
-    .switch-row span { color: var(--muted); font-size: 12px; }
-    .slider-line {
-      display: grid;
-      grid-template-columns: 130px minmax(0, 1fr) 70px;
-      gap: 10px;
-      align-items: center;
-      margin: 12px 0;
-    }
-    .quick-list { display: grid; gap: 10px; }
-    .quick-action {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 12px;
-      align-items: center;
-      padding: 13px;
-      border: 1px solid var(--line-soft);
-      background: rgba(13, 19, 32, .62);
-      border-radius: 15px;
-    }
-    .quick-action strong { display: block; margin-bottom: 3px; }
-    .quick-action span { color: var(--muted); font-size: 12px; line-height: 1.45; }
-    .backup-progress { margin-top: 16px; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel-2); }
-    .backup-progress-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
-    .backup-progress progress { display: block; width: 100%; height: 10px; accent-color: var(--accent); }
-    .backup-progress .hint { margin-top: 7px; }
-    .qr {
-      width: 210px;
-      height: 210px;
-      background: white;
-      border-radius: 16px;
-      padding: 9px;
-    }
-    .protocol-fields[hidden], .protocol-only[hidden] { display: none !important; }
-    .account-actions { align-items: stretch; }
-    .account-actions > a, .account-actions > button { display: inline-flex; align-items: center; justify-content: center; }
-    .account-manager-card { padding: 16px; border: 1px solid var(--line); border-radius: 16px; background: rgba(13, 19, 32, .62); }
-    .account-manager-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
-    .account-manager-head strong { display: block; font-size: 16px; }
-    .account-manager-head .hint { margin: 4px 0 0; }
-    .account-manager-card .form-grid { gap: 12px; }
-    .account-manager-card .switch-row { margin: 0 0 12px; }
-    .account-scenarios { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-    .account-scenario { display: block; min-height: 112px; text-align: left; background: rgba(13, 19, 32, .62); border: 1px solid var(--line); color: var(--text); }
-    .account-scenario strong, .account-scenario span { display: block; }
-    .account-scenario span { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }
-    .account-scenario[aria-pressed="true"] { background: rgba(124, 156, 255, .14); border-color: var(--accent); box-shadow: inset 0 0 0 1px rgba(124, 156, 255, .24); }
-    .account-effect { padding: 13px 14px; border: 1px solid var(--line); border-radius: 14px; background: rgba(13, 19, 32, .62); line-height: 1.6; }
-    .account-duty { grid-column: 1 / -1; margin: 0 0 12px; }
-    .login-assist { display: grid; gap: 10px; }
-    .memory-layout {
-      display: grid;
-      grid-template-columns: 320px minmax(0, 1fr);
-      gap: 14px;
-    }
-    .list {
-      max-height: 520px;
-      overflow: auto;
-      display: grid;
-      gap: 8px;
-    }
-    .list-item {
-      padding: 11px 12px;
-      border-radius: 14px;
-      border: 1px solid var(--line-soft);
-      background: rgba(13, 19, 32, .62);
-      cursor: pointer;
-    }
-    .list-item:hover, .list-item.active { border-color: rgba(124, 156, 255, .45); background: rgba(124, 156, 255, .11); }
-    .list-item strong { display: block; margin-bottom: 5px; }
-    .task-item { cursor: default; overflow-wrap: anywhere; }
-    .task-item .task-title { font-size: 15px; line-height: 1.45; }
-    .task-item .task-meta { display: block; margin: 7px 0 10px; color: var(--muted); font-size: 12px; line-height: 1.5; }
-    .task-item details { color: var(--muted); font-size: 13px; margin: 8px 0; }
-    .task-item details p { margin: 8px 0; white-space: pre-wrap; }
-    .artifact-layout { display: grid; grid-template-columns: minmax(190px, 280px) minmax(0, 1fr); gap: 14px; }
-    .artifact-list { display: grid; align-content: start; gap: 8px; }
-    .artifact-list button { width: 100%; text-align: left; overflow-wrap: anywhere; }
-    .artifact-preview { min-height: 340px; max-height: 72vh; overflow: auto; border: 1px solid var(--line); border-radius: 14px; background: #0d1320; padding: 12px; }
-    .artifact-preview img { display: block; max-width: 100%; max-height: 68vh; margin: auto; object-fit: contain; }
-    .artifact-preview iframe { display: block; width: 100%; height: 66vh; border: 0; background: white; }
-    .artifact-preview pre { max-height: none; margin: 0; border: 0; background: transparent; overflow-wrap: anywhere; }
-    @media (max-width: 760px) { .artifact-layout { grid-template-columns: 1fr; } }
-    .log-tabs { display: flex; gap: 8px; margin-bottom: 10px; }
-    .toast-wrap {
-      position: fixed;
-      right: 18px;
-      bottom: 18px;
-      display: grid;
-      gap: 10px;
-      z-index: 20;
-    }
-    .toast {
-      width: min(420px, calc(100vw - 36px));
-      padding: 13px 14px;
-      border-radius: 15px;
-      background: rgba(18, 24, 38, .96);
-      border: 1px solid var(--line);
-      box-shadow: var(--shadow);
-      color: var(--text);
-    }
-    .toast.bad { border-color: rgba(255, 107, 129, .45); }
-    .toast.good { border-color: rgba(94, 224, 140, .38); }
-    .kbd {
-      border: 1px solid var(--line);
-      border-bottom-width: 2px;
-      background: #0d1320;
-      border-radius: 8px;
-      padding: 2px 6px;
-      font-size: 12px;
-      color: var(--muted);
-    }
-    details {
-      border: 1px solid var(--line-soft);
-      border-radius: 15px;
-      background: rgba(13, 19, 32, .45);
-      padding: 11px 12px;
-      margin-top: 12px;
-    }
-    summary { cursor: pointer; color: #dce7ff; }
-    @media (max-width: 1160px) {
-      .shell { grid-template-columns: 1fr; }
-      .sidebar { position: relative; height: auto; }
-      .nav { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-      .nav-label, .nav-more { grid-column: 1 / -1; }
-      .grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .memory-layout { grid-template-columns: 1fr; }
-    }
-    @media (max-width: 760px) {
-      .qa-prompt-target { width: 100%; }
-      .account-scenarios { grid-template-columns: 1fr; }
-      .main { padding: 16px; }
-      .topbar { display: grid; }
-      .toolbar { justify-content: stretch; }
-      .toolbar button { flex: 1; }
-      .grid.two, .grid.three, .grid.four, .form-grid { grid-template-columns: 1fr; }
-      .field.full { grid-column: auto; }
-      .slider-line { grid-template-columns: 1fr; }
-      .nav { grid-template-columns: 1fr 1fr; }
-    }
-  </style>
+  <script src="/console-theme.js"></script>
+  <link rel="stylesheet" href="/console.css" />
 </head>
-<body>
+<body class="console-page">
+  <a class="skip-link" href="#consoleMain">跳到主要内容</a>
+  <header class="mobile-header" id="consoleMobileHeader">
+    <button id="consoleMenuButton" class="ghost" type="button" aria-label="打开导航菜单" aria-controls="consoleSidebar" aria-expanded="false">
+      <svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
+    </button>
+    <strong>Hermes</strong>
+    <div class="theme-field">
+      <label class="sr-only" for="consoleMobileTheme">外观主题</label>
+      <select id="consoleMobileTheme" data-console-theme><option value="dark">深色</option><option value="light">浅色</option><option value="system">跟随系统</option></select>
+    </div>
+  </header>
+  <div class="drawer-backdrop" id="consoleDrawerBackdrop" hidden aria-hidden="true"></div>
   <div class="shell">
-    <aside class="sidebar">
+    <aside class="sidebar" id="consoleSidebar" aria-label="控制台导航与外观">
+      <button id="consoleMenuClose" class="ghost drawer-close" type="button" aria-label="关闭导航菜单">关闭菜单</button>
       <div class="brand">
-        <div class="logo">🤖</div>
+        <div class="logo" aria-hidden="true">H</div>
         <div>
           <h1>Hermes 控制台</h1>
           <div class="sub">本机 QQ Bot 管理</div>
@@ -438,7 +36,7 @@
         <div id="sideStatus" class="row"><span class="pill">加载中</span></div>
       </div>
 
-      <nav class="nav" id="nav">
+      <nav class="nav" id="nav" aria-label="主要导航">
         <button data-page="overview" class="active">总览</button>
         <div class="nav-label">核心管理</div>
         <button data-page="account-status">账号状态</button>
@@ -459,25 +57,34 @@
         </details>
       </nav>
 
-      <div class="side-card">
-        <div class="title">保存状态</div>
-        <div id="saveState">加载中</div>
-        <div class="hint" id="lastRefresh">尚未刷新</div>
+      <div class="sidebar-footer">
+        <div class="side-card">
+          <div class="title">保存状态</div>
+          <div id="saveState" role="status" aria-live="polite">加载中</div>
+          <div class="hint" id="lastRefresh">尚未刷新</div>
+        </div>
+        <div class="theme-field">
+          <label for="consoleTheme">外观主题</label>
+          <select id="consoleTheme" data-console-theme aria-describedby="consoleThemeState"><option value="dark">深色</option><option value="light">浅色</option><option value="system">跟随系统</option></select>
+          <span id="consoleThemeState" class="hint" role="status" aria-live="polite"></span>
+        </div>
       </div>
     </aside>
 
-    <main class="main">
-      <div class="topbar">
+    <main class="main" id="consoleMain" tabindex="-1" aria-labelledby="pageTitle">
+      <header class="topbar">
         <div>
           <h2 id="pageTitle">总览</h2>
           <p id="pageSubtitle">查看连接、登录、模型、联网、识图和记忆状态。</p>
+          <p id="pageActionState" class="topbar-status" role="status" aria-live="polite">配置尚未加载</p>
         </div>
         <div class="toolbar">
-          <button id="refreshBtn">刷新</button>
+          <button id="refreshBtn" class="secondary" title="只更新运行状态，不改动表单">刷新状态</button>
+          <button id="reloadConfigBtn" class="ghost" title="重新读取配置；未保存的草稿会保留">刷新配置</button>
           <button id="saveBtn" class="good">保存配置</button>
           <button id="autoRefreshBtn" class="secondary">自动刷新：开</button>
         </div>
-      </div>
+      </header>
 
       <section id="page-overview" class="page active">
         <div class="grid four">
@@ -511,7 +118,7 @@
           </div>
         </div>
 
-        <div class="grid two" style="margin-top:14px">
+        <div class="grid overview-priority mt-24">
           <div class="card">
             <h3>需要你关注的事 <span id="attentionPill" class="pill">检查中</span></h3>
             <div id="attentionBox" class="success">正在加载状态……</div>
@@ -523,8 +130,8 @@
                   <div class="row account-actions">
                     <a id="overviewProtocolWebuiLink" class="pill hidden" target="_blank" rel="noreferrer">打开协议端 WebUI</a>
                     <a id="overviewNoVncLink" class="pill hidden" target="_blank" rel="noreferrer">打开 noVNC 桌面</a>
-                    <button id="overviewProbePrimaryBtn">检测主号</button>
-                    <button id="overviewRestartProtocolBtn" class="danger">重启主号协议端</button>
+                    <button id="overviewProbePrimaryBtn">检测账号</button>
+                    <button id="overviewRestartProtocolBtn" class="danger">重启此账号协议端</button>
                     <button id="overviewRefreshQrBtn" class="hidden">刷新二维码</button>
                     <button id="overviewRebuildNapcatBtn" class="danger hidden">稳定重建 NapCat</button>
                   </div>
@@ -536,7 +143,7 @@
           <div class="card">
             <h3>能力开关</h3>
             <div class="row" id="capabilityPills"></div>
-            <div class="quick-list" style="margin-top:14px">
+            <div class="quick-list mt-24">
               <div class="quick-action">
                 <div><strong>监听范围</strong><span id="scopeText">加载中</span></div>
                 <button class="secondary" data-jump="tools">查看</button>
@@ -549,10 +156,10 @@
           </div>
         </div>
 
-        <div class="card" style="margin-top:14px">
-          <h3>最近事件</h3>
+        <details class="card overview-events">
+          <summary>最近事件 <span class="hint">· 排查时展开原始日志</span></summary>
           <pre id="recentLog">加载中...</pre>
-        </div>
+        </details>
       </section>
 
       <section id="page-account-status" class="page">
@@ -569,9 +176,9 @@
         <p class="panel-intro">先配置服务连接与密钥，再给每项功能选模型。共用连接不会强制共用模型；测试只使用本页草稿，不修改线上绑定，也不会发送 QQ 消息。</p>
         <p id="apiCenterState" class="hint" role="status">进入此页后加载 API 方案…</p>
         <div id="apiCapabilityCards" class="grid three"></div>
-        <div class="grid two" style="margin-top:14px">
-          <div class="card api-editor">
-            <h3>服务连接与凭据</h3>
+        <div class="grid two mt-24">
+          <div class="card api-editor" id="apiConnectionEditor">
+            <h3><span><span class="panel-step">1</span>服务连接与凭据</span></h3>
             <div class="field"><label for="apiConnectionSelect">当前连接</label><select id="apiConnectionSelect"></select></div>
             <div class="form-grid">
               <div class="field"><label for="apiConnectionName">名称</label><input id="apiConnectionName" maxlength="80" /></div>
@@ -584,8 +191,8 @@
             <div class="row"><button id="apiConnectionNew" class="secondary">新建连接</button><button id="apiConnectionDelete" class="danger">移除未使用连接</button><button id="apiConnectionSave">保存当前连接</button></div>
             <div id="apiKeyEditor" class="settings-block hidden"><label for="apiKeyInput">本机 API Key（不会回显）</label><input id="apiKeyInput" type="password" autocomplete="new-password" spellcheck="false" placeholder="只发送到本机 Keychain；保存后立即清空" /><div class="row"><button id="apiKeySave">保存密钥</button><button id="apiKeyDelete" class="danger">删除未绑定的密钥</button></div></div>
           </div>
-          <div class="card api-editor">
-            <h3>模型方案</h3>
+          <div class="card api-editor" id="apiProfileEditor">
+            <h3><span><span class="panel-step">2</span>模型方案</span></h3>
             <div class="field"><label for="apiProfileSelect">当前方案</label><select id="apiProfileSelect"></select></div>
             <div class="form-grid">
               <div class="field"><label for="apiProfileName">名称</label><input id="apiProfileName" maxlength="80" /></div>
@@ -600,10 +207,10 @@
             <div class="row"><button id="apiProfileNew" class="secondary">新建方案</button><button id="apiProfileDelete" class="danger">移除未绑定方案</button><button id="apiProfileSave">保存当前方案</button></div>
           </div>
         </div>
-        <div class="grid two" style="margin-top:14px">
-          <div class="card api-editor"><h3>功能绑定</h3><p class="hint">任务默认继承问答，可改选另一问答方案。每项功能可独立测试当前草稿。</p><div id="apiBindingRows"></div><div class="row"><button id="apiBindingsSave">保存功能绑定</button></div></div>
-          <div class="card api-editor">
-            <h3>联网来源</h3>
+        <div class="grid two mt-24">
+          <div class="card api-editor" id="apiBindingsEditor"><h3><span><span class="panel-step">3</span>功能绑定</span></h3><p class="hint">在这里选择各功能实际使用的方案；顶部卡片只展示绑定结果。任务可继承问答；测试草稿不会修改线上配置或发送 QQ 消息。</p><div id="apiBindingRows"></div><div class="row"><button id="apiBindingsSave">保存功能绑定</button></div></div>
+          <div class="card api-editor" id="apiSearchEditor">
+            <h3>联网来源方案</h3>
             <div class="field"><label for="apiSearchSelect">来源方案</label><select id="apiSearchSelect"></select></div>
             <div class="form-grid">
               <div class="field"><label for="apiSearchName">名称</label><input id="apiSearchName" maxlength="80" /></div>
@@ -626,6 +233,7 @@
       </section>
 
       <section id="page-qa" class="page">
+        <div class="row panel-intro"><span id="qaModelSummary" class="pill">问答模型加载中</span><button class="ghost" type="button" data-jump="api-center">在 API 管理中配置模型</button></div>
         <div class="qa-persona-bar">
           <div class="subnav" data-tabs="qa" role="tablist" aria-label="问答设置">
             <button data-tab="persona" class="active" role="tab">提示词与风格</button>
@@ -644,6 +252,7 @@
 
       <section id="page-vision" class="page">
         <p class="panel-intro">图片理解只在需要时调用；引用图片和表情包可以单独控制。</p>
+        <div class="row panel-intro"><span id="visionModelSummary" class="pill">识图模型加载中</span><button class="ghost" type="button" data-jump="api-center">在 API 管理中配置模型</button></div>
         <div id="visionMount"></div>
       </section>
 
@@ -674,8 +283,8 @@
                 <button id="refreshAccountsTopBtn" class="secondary">刷新状态</button>
               </div>
             </div>
-            <div class="hint">每个账号都可单独查看登录与 OneBot 状态。独立模式下“默认发言”只是未指定对象时优先使用的账号；明确 @ 其他账号仍可分别回应。</div>
-            <div id="accountCards" class="grid two" style="margin-top:12px"></div>
+            <div class="hint">每个账号都可单独查看登录与 OneBot 状态。独立模式下“默认路由”只决定未指定对象时优先使用的账号；明确 @ 其他账号仍可分别回应。</div>
+            <div id="accountCards" class="grid two mt-16"></div>
           </div>
 
           <div class="card" id="accountConnectionCard">
@@ -804,12 +413,12 @@
               <input id="accounts.failover.switchAfterMs" type="number" />
             </div>
             </div>
-            <div class="row" style="margin-top:12px">
+            <div class="row mt-16">
               <button id="saveAccountsBtn">保存账号配置</button>
               <button id="refreshAccountsBtn" class="secondary">刷新状态</button>
               <button id="peerPingBtn" class="secondary">双向验活</button>
             </div>
-            <div class="warning" style="margin-top:12px">停用账号会停止该账号处理消息，不会退出 QQ；全部停用后机器人不再发言。SnowLuma 的账号登录在 WebUI 或 noVNC 中完成；修改协议类型、容器、端口或 WS 地址后，请保存配置并重启对应协议端。</div>
+            <div class="warning mt-16">停用账号会停止该账号处理消息，不会退出 QQ；全部停用后机器人不再发言。SnowLuma 的账号登录在 WebUI 或 noVNC 中完成；修改协议类型、容器、端口或 WS 地址后，请保存配置并重启对应协议端。</div>
           </div>
         </div>
         <div class="card settings-block" id="interBotCard">
@@ -826,7 +435,7 @@
           <p class="hint">只在指定群启用。机器人遇到确实不懂的群内称呼或梗时，可以少量提问；不会自动向所有新群发问。</p>
           <div class="switch-row"><div><strong>允许学习提问</strong><span>群管理员还可在群里用 /bot learn on 或 off 单独控制。</span></div><input id="learningMode.enabled" type="checkbox" /></div>
           <div class="form-grid">
-            <div class="field full"><label for="learningMode.groupIds">启用的群号（每行一个）</label><textarea id="learningMode.groupIds" placeholder="例如 364433603"></textarea></div>
+            <div class="field full"><label for="learningMode.groupIds">启用的群号（每行一个）</label><textarea id="learningMode.groupIds" placeholder="例如 20001"></textarea></div>
             <div class="field"><label for="learningMode.minIntervalMs">两次提问最短间隔（毫秒）</label><input id="learningMode.minIntervalMs" type="number" min="60000" max="86400000" /></div>
             <div class="field"><label for="learningMode.maxQuestionsPerDay">每群每天最多提问</label><input id="learningMode.maxQuestionsPerDay" type="number" min="1" max="20" /></div>
           </div>
@@ -847,7 +456,7 @@
                 <button id="testSearchBtn">测试</button>
               </div>
               <div class="quick-action">
-                <div><strong>当前协议端 WebUI</strong><span id="activeProtocolText">查看当前接管账号的登录、OneBot 和协议端状态。</span></div>
+                <div><strong>默认账号协议端 WebUI</strong><span id="activeProtocolText">查看默认账号的登录、OneBot 和协议端状态。</span></div>
                 <a id="activeProtocolLink" class="pill" target="_blank" rel="noreferrer">打开</a>
               </div>
               <div class="quick-action" id="activeNoVncAction">
@@ -865,7 +474,7 @@
             </div>
             <details id="legacyNapcatTools" class="hidden">
               <summary>NapCat 兼容工具</summary>
-              <p class="hint">仅在仍配置 NapCat 账号时使用，不影响 SnowLuma 主备账号。</p>
+              <p class="hint">仅在仍配置 NapCat 账号时使用，不影响其他 SnowLuma 账号。</p>
               <div class="row">
                 <button id="legacyRefreshQrBtn">刷新主号二维码</button>
                 <button id="legacyRebuildNapcatBtn" class="danger">稳定重建 NapCat</button>
@@ -878,7 +487,7 @@
             <div class="form-grid">
               <div class="field">
                 <label>群 ID</label>
-                <input id="send.groupId" placeholder="例如 364433603" />
+                <input id="send.groupId" placeholder="例如 20001" />
               </div>
               <div class="field">
                 <label>快速填入</label>
@@ -906,14 +515,14 @@
               <label>配置档案</label>
               <select id="aiProfileSelect"></select>
             </div>
-            <div id="aiProfileActiveState" class="hint" style="margin-top:10px">加载中...</div>
-            <div class="row" style="margin-top:14px">
+            <div id="aiProfileActiveState" class="hint mt-12">加载中...</div>
+            <div class="row mt-24">
               <button id="activateAiProfileBtn">设为当前配置</button>
               <button id="newAiProfileBtn" class="secondary">新建</button>
               <button id="duplicateAiProfileBtn" class="secondary">复制</button>
               <button id="deleteAiProfileBtn" class="danger">删除</button>
             </div>
-            <div class="warning" style="margin-top:14px">
+            <div class="warning mt-24">
               API Key 只保存环境变量名，不保存明文。切换配置会热更新下一次对话调用；正在生成的回复不受影响。
             </div>
           </div>
@@ -977,7 +586,7 @@
               <button id="saveModelBtn">保存配置档案</button>
               <button id="testAiBtn2" class="secondary">测试模型</button>
             </div>
-            <div class="hint" style="margin-top:12px">Faro 使用 OpenAI 兼容模式，需要填写 Faro 提供的 Base URL、模型名，并确保服务环境中存在 <span class="kbd">FARO_API_KEY</span>。</div>
+            <div class="hint mt-16">Faro 使用 OpenAI 兼容模式，需要填写 Faro 提供的 Base URL、模型名，并确保服务环境中存在 <span class="kbd">FARO_API_KEY</span>。</div>
             <pre id="aiTest">还没有测试。</pre>
           </div>
         </div>
@@ -992,8 +601,8 @@
               <button id="presetNormal" class="secondary">正常版</button>
               <button id="presetLively">活跃版</button>
             </div>
-            <div class="hint" style="margin-top:10px">预设只会填入表单，点“保存配置”后才生效。正常版等于之前的克制版；新的克制版更安静；活跃版更积极参与讨论。</div>
-            <div class="form-grid" style="margin-top:12px">
+            <div class="hint mt-12">预设只会填入表单，点“保存配置”后才生效。正常版等于之前的克制版；新的克制版更安静；活跃版更积极参与讨论。</div>
+            <div class="form-grid mt-16">
               <div class="field">
                 <label>默认模式</label>
                 <select id="behaviorModes.default">
@@ -1057,7 +666,7 @@
               </div>
             </div>
             <div class="hint">当前档位可覆盖最低置信度：活跃 0.45、正常 0.58、克制 0.72。</div>
-            <pre id="socialPlannerRecent" style="margin-top:10px">暂无社交判断记录</pre>
+            <pre class="mt-12" id="socialPlannerRecent">暂无社交判断记录</pre>
           </div>
         </div>
       </section>
@@ -1168,7 +777,7 @@
           <div class="card">
             <h3>系统提示词</h3>
             <p id="promptAccountState" class="hint" aria-live="polite"></p>
-            <textarea id="prompt.system" maxlength="12000" style="min-height:420px" aria-label="当前所选账号的系统提示词"></textarea>
+            <textarea class="prompt-editor" id="prompt.system" maxlength="12000" aria-label="当前所选账号的系统提示词"></textarea>
             <div class="row">
               <button id="savePromptBtn">保存提示词</button>
               <button id="resetAccountPromptBtn" class="secondary" type="button">恢复继承</button>
@@ -1220,16 +829,16 @@
         <div class="memory-layout">
           <div class="card">
             <h3>记忆群列表 <span id="memoryCount" class="pill">0</span></h3>
-            <input id="memorySearch" placeholder="搜索群 ID / 摘要 / 设置" />
-            <div id="groupList" class="list" style="margin-top:12px"></div>
-            <div class="row" style="margin-top:12px">
+            <input id="memorySearch" type="search" aria-label="搜索记忆群列表" placeholder="搜索群 ID / 摘要 / 设置" />
+            <div id="groupList" class="list mt-16"></div>
+            <div class="row mt-16">
               <button id="exportMemoryBtn" class="secondary">导出 memory.json</button>
             </div>
           </div>
           <div class="card">
             <h3>记忆详情 <span id="selectedGroupPill" class="pill">未选择</span></h3>
-            <div id="memorySummaryBox" class="row" style="margin-bottom:10px"></div>
-            <input id="memoryDetailSearch" placeholder="在当前群记忆中搜索成员、梗、偏好" />
+            <div id="memorySummaryBox" class="row mb-12"></div>
+            <input id="memoryDetailSearch" type="search" aria-label="搜索当前群记忆" placeholder="在当前群记忆中搜索成员、梗、偏好" />
             <pre id="memoryView">选择一个群查看记忆。</pre>
           </div>
         </div>
@@ -1283,8 +892,8 @@
           </div>
           <div class="card">
             <h3>会话列表 <span id="archiveCount" class="pill">0</span></h3>
-            <input id="archiveSearch" placeholder="搜索 group:群号 / private:QQ / 路径" />
-            <div id="archiveList" class="list" style="margin-top:12px"></div>
+            <input id="archiveSearch" type="search" aria-label="搜索聊天存档会话" placeholder="搜索 group:群号 / private:QQ / 路径" />
+            <div id="archiveList" class="list mt-16"></div>
             <p class="hint">导出为 JSONL，包含原始消息、bot 回复、搜索摘要、图片描述元数据。</p>
           </div>
         </div>
@@ -1323,12 +932,12 @@
           <div class="card">
             <h3>任务队列 <span id="taskCount" class="pill">0</span></h3>
             <pre id="taskRuntimeSummary">加载中...</pre>
-            <div id="taskList" class="list" style="margin-top:12px"></div>
+            <div id="taskList" class="list mt-16"></div>
           </div>
         </div>
-        <div id="taskArtifactPanel" class="card hidden" style="margin-top:14px">
-          <div class="row" style="justify-content:space-between">
-            <h3 id="taskArtifactTitle" style="margin:0">任务产物</h3>
+        <div id="taskArtifactPanel" class="card hidden mt-24">
+          <div class="row space-between">
+            <h3 class="heading-inline" id="taskArtifactTitle">任务产物</h3>
             <button id="closeTaskArtifactsBtn" class="ghost" type="button">关闭预览</button>
           </div>
           <p class="hint">仅预览图片、PDF 和文本；其他文件请下载后用合适的应用打开。</p>
@@ -1366,7 +975,7 @@
                 <div class="field"><label for="automationRule.id">规则 ID</label><input id="automationRule.id" maxlength="64" placeholder="daily_summary" /></div>
                 <div class="field"><label for="automationRule.action">执行动作</label><select id="automationRule.action"><option value="message">发送消息</option><option value="summary">生成摘要</option><option value="task">创建任务</option></select></div>
                 <div class="field"><label for="automationRule.triggerType">触发方式</label><select id="automationRule.triggerType"><option value="schedule">定时</option><option value="command">斜杠命令</option></select></div>
-                <div class="field"><label for="automationRule.accountId">执行账号 ID（可选）</label><input id="automationRule.accountId" placeholder="留空由运行时选择" /></div>
+                <div class="field"><label for="automationRule.target">执行账号 / 接管组</label><select id="automationRule.target"><option value="">未指定（保留原规则路由）</option></select><p class="hint">只能选择一个账号或接管组；不会扩大会话范围，也不会自动建立跨账号触发。</p></div>
                 <div class="field full"><label for="automationRule.scope">会话范围（每行一个）</label><textarea id="automationRule.scope" placeholder="group:123456"></textarea><p class="hint">可填写群号、group:&lt;id&gt; 或 private:&lt;id&gt;；必须明确指定 1–100 个会话，不支持“所有群”。</p></div>
                 <div class="field automation-schedule"><label for="automationRule.timezone">时区</label><input id="automationRule.timezone" placeholder="Asia/Shanghai" /></div>
                 <div class="field automation-schedule"><label for="automationRule.time">本地时间</label><input id="automationRule.time" type="time" /></div>
@@ -1384,6 +993,7 @@
 
       <section id="page-voice" class="page">
         <p id="voiceLoadState" class="hint">正在加载语音配置…</p>
+        <div class="row panel-intro"><span id="voiceModelSummary" class="pill">语音模型加载中</span><button class="ghost" type="button" data-jump="api-center">在 API 管理中配置模型和密钥</button></div>
         <div class="subnav" data-tabs="voice" role="tablist" aria-label="语音设置">
           <button data-tab="behavior" class="active" role="tab">语音行为与音色</button>
         </div>
@@ -1487,19 +1097,19 @@
 
       <section id="page-backup" class="page">
         <div id="backupBrowserNotice" class="warning hidden">当前运行的是旧版桥接服务，尚无备份宿主。请使用本地 WebUI 启动器或桌面应用打开控制台。</div>
-        <div class="grid three" style="margin-top:14px">
+        <div class="grid three mt-24">
           <div class="card stat"><div><div class="label">运行方式</div><div class="value" id="desktopAppState">检测中</div></div><div class="hint" id="desktopAppHint">读取本机运行环境。</div></div>
           <div class="card stat"><div><div class="label">用户数据</div><div class="value" id="desktopDataState">—</div></div><div class="hint" id="desktopDataPath">配置、记忆、聊天与任务。</div></div>
           <div class="card stat"><div><div class="label">最近备份</div><div class="value" id="desktopBackupState">—</div></div><div class="hint" id="desktopBackupPath">默认保存到“文稿”。</div></div>
         </div>
-        <div class="grid two" style="margin-top:14px">
+        <div class="grid two mt-24">
           <div class="card">
             <h3>创建备份</h3>
             <div class="quick-list">
               <div class="quick-action"><div><strong>普通数据备份</strong><span>配置、提示词、记忆、聊天、图片和任务产物；排除密钥、QQ 登录态、日志和缓存。使用 Keychain 语音时，恢复后会先停用语音，待重新配置本机凭据。</span></div><button id="createSafeBackupBtn">立即备份</button></div>
-              <div class="quick-action"><div><strong>完整迁移备份</strong><span>额外包含应用专用 Hermes 凭据、Keychain 语音密钥和主备 SnowLuma 登录卷。创建时会短暂停止机器人，必须设置密码。</span></div><button id="createFullBackupBtn" class="danger">加密备份</button></div>
+              <div class="quick-action"><div><strong>完整迁移备份</strong><span>额外包含应用专用 Hermes 凭据、Keychain 语音密钥和各账号 SnowLuma 登录卷。创建时会短暂停止机器人，必须设置密码。</span></div><button id="createFullBackupBtn" class="danger">加密备份</button></div>
             </div>
-            <div class="field" style="margin-top:14px"><label>完整备份密码（不会保存或写入日志）</label><input id="backupPassword" type="password" autocomplete="new-password" placeholder="仅完整备份和恢复时填写" /></div>
+            <div class="field mt-24"><label>完整备份密码（不会保存或写入日志）</label><input id="backupPassword" type="password" autocomplete="new-password" placeholder="仅完整备份和恢复时填写" /></div>
             <div class="switch-row"><div><strong>附带诊断日志</strong><div class="hint">仅用于加密的完整迁移备份；日志可能包含聊天内容或敏感信息，默认不包含，恢复时也不会覆盖目标电脑的日志。</div></div><input id="backupIncludeLogs" type="checkbox" /></div>
             <div class="row"><button id="chooseBackupDestinationBtn" class="secondary">选择保存目录</button><span id="backupDestinationLabel" class="hint">使用默认备份目录</span></div>
             <div id="backupProgressPanel" class="backup-progress hidden" role="status" aria-live="polite">
@@ -1513,7 +1123,7 @@
             <p class="muted">恢复前会自动创建回滚包，并先在隔离目录中校验版本、密码和 SHA-256。导入采用整体替换，不自动合并记忆。</p>
             <div class="row"><button id="chooseBackupFileBtn" class="secondary">选择 .hermesqqbackup</button><span id="restoreFileLabel" class="hint">尚未选择</span></div>
             <input id="webBackupFileInput" type="file" accept=".hermesqqbackup" class="hidden" />
-            <div class="row" style="margin-top:10px"><button id="inspectBackupBtn" class="secondary">检查内容</button><button id="restoreBackupBtn" class="danger">验证并恢复</button></div>
+            <div class="row mt-12"><button id="inspectBackupBtn" class="secondary">检查内容</button><button id="restoreBackupBtn" class="danger">验证并恢复</button></div>
             <pre id="backupInspectView">选择迁移包后可先检查内容。</pre>
           </div>
           <div class="card">
@@ -1521,14 +1131,14 @@
             <p class="muted">复制现有 config.json、data/ 和协议端宿主目录，重写旧绝对路径。旧项目、容器和卷不会被删除。</p>
             <div id="webLegacyPathField" class="field hidden"><label>旧项目在本机的绝对路径</label><input id="webLegacyProjectPath" type="text" placeholder="例如 /Users/你的用户名/Documents/旧项目" /></div>
             <div class="row"><button id="selectLegacyProjectBtn" class="secondary">选择旧项目</button><button id="migrateLegacyProjectBtn" disabled>开始迁移</button></div>
-            <div id="legacyProjectInfo" class="hint" style="margin-top:10px">尚未选择。</div>
+            <div id="legacyProjectInfo" class="hint mt-12">尚未选择。</div>
           </div>
           <div class="card">
             <div class="section-title"><h3>本机备份</h3><button id="refreshBackupsBtn" class="secondary">刷新</button></div>
             <div id="localBackupList" class="list"></div>
           </div>
         </div>
-        <div class="card" style="margin-top:14px">
+        <div class="card mt-24">
           <div class="section-title"><h3>桌面运行与启动</h3><div class="row"><button id="desktopStartBtn" class="good">启动机器人</button><button id="desktopStopBtn" class="danger">停止</button><button id="desktopRestartBtn" class="secondary">重启</button></div></div>
           <div class="switch-row"><div><strong>登录后自动启动</strong><span>当前入口动态安装登录启动项；App 与 WebUI 不会同时启用，避免重复接管 QQ。</span></div><input id="desktopAutoStart" type="checkbox" /></div>
           <pre id="desktopStatusView">加载中...</pre>
@@ -1549,7 +1159,7 @@
     </main>
   </div>
 
-  <div class="toast-wrap" id="toastWrap"></div>
+  <div class="toast-wrap" id="toastWrap" role="status" aria-live="polite" aria-atomic="false"></div>
 
   <script>
     const $ = (id) => document.getElementById(id);
@@ -1557,7 +1167,7 @@
     const pageMeta = {
       overview: ["总览", "查看连接、登录、模型、联网、识图和记忆状态。"],
       "account-status": ["账号状态", "登录、OneBot、真实收发与连接诊断。"],
-      "account-functions": ["账号功能", "账号职责、协作关系、名称与风格。"],
+      "account-functions": ["账号功能", "每个账号独立配置身份、功能、发送内容、会话范围与模型。"],
       "api-center": ["API 管理", "统一配置问答、任务、识图、语音与联网来源的连接和模型。"],
       qa: ["问答", "人格、回复节奏与群聊行为。"],
       vision: ["识图", "图片理解触发时机与引用图片；模型在 API 管理中配置。"],
@@ -1589,12 +1199,16 @@
     let refreshTimer = null;
     let dirty = false;
     const dirtyScopes = new Set();
+    const conflictedScopes = new Set();
+    const scopeFeedback = new Map();
     let activePage = "overview";
     const activeTabs = { qa: "persona", voice: "behavior" };
     let aiProfilesDraft = { activeId: "", profiles: [] };
     let apiCenterDraft = null;
+    let apiCenterSaved = null;
     let apiCenterRevision = "";
     let apiCenterDirty = false;
+    let apiCenterConflicted = false;
     let apiCenterLastLoaded = 0;
     let apiCredentialStatus = {};
     let selectedApiConnection = "";
@@ -1640,12 +1254,32 @@
     }
 
     async function api(path, opts = {}) {
+      const accountAdmin = /^\/api\/(?:accounts|account-groups)(?:[/?]|$)/.test(path);
+      if (accountAdmin) {
+        const headers = new Headers(opts.headers || {});
+        headers.set("x-hermes-qq-admin", await ensureAdminSession());
+        const method = String(opts.method || "GET").toUpperCase();
+        if (!["GET", "HEAD"].includes(method)) headers.set("content-type", "application/json");
+        opts = { ...opts, headers, ...(!["GET", "HEAD"].includes(method) && opts.body === undefined ? { body: "{}" } : {}) };
+      }
       const res = await fetch(path, opts);
       const text = await res.text();
       let body;
       try { body = text ? JSON.parse(text) : {}; }
       catch { body = { ok: false, error: text }; }
-      if (!res.ok) throw new Error(body.error || res.statusText || `HTTP ${res.status}`);
+      if (!res.ok) {
+        if (accountAdmin && res.status === 403) adminSessionToken = ""; // Do not replay a mutation.
+        const error = new Error(body.error || res.statusText || `HTTP ${res.status}`);
+        error.status = res.status;
+        throw error;
+      }
+      if (!["GET", "HEAD"].includes(String(opts.method || "GET").toUpperCase()) && /^\/api\/(?:config|api-center|accounts|account-groups|voice\/credential)(?:[/?]|$)/.test(path)) {
+        registryState.epoch += 1;
+        if (/^\/api\/(?:config|api-center)(?:[/?]|$)/.test(path)) registryState.modelLoadedAt = 0;
+        if (path === "/api/api-center" && body.center) {
+          registryState.modelCenter = structuredClone(body.center); registryState.modelLoadedAt = Date.now();
+        }
+      }
       return body;
     }
 
@@ -1701,9 +1335,11 @@
       return String(s ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
     }
 
+    let preservingDirtyFields = false;
     function setVal(id, value) {
       const el = $(id);
       if (!el) return;
+      if (preservingDirtyFields && dirtyScopes.has(scopeForElement(el))) return;
       if (el.type === "checkbox") el.checked = Boolean(value);
       else if (Array.isArray(value)) el.value = value.join("\n");
       else el.value = value ?? "";
@@ -1738,16 +1374,25 @@
     function renderSaveState() {
       dirty = dirtyScopes.size > 0;
       $("saveState").textContent = !cfg ? "配置未加载" : dirty ? `未保存：${[...dirtyScopes].map((scope) => scopeNames[scope] || scope).join("、")}` : "已同步";
+      const scope = currentScope();
+      const editable = Boolean(scopeNames[scope]) && scope !== "api-center";
+      $("saveBtn").classList.toggle("hidden", !editable || (scope === "account-status" && !dirtyScopes.has(scope) && !$("accountConnectionDetails")?.open));
+      $("saveBtn").disabled = !editable || !cfg;
+      $("pageActionState").textContent = !cfg ? "配置尚未加载" : (conflictedScopes.has(scope) || (scope === "api-center" && apiCenterConflicted))
+        ? "配置已被其他窗口更新；草稿仍在。请刷新配置核对后再保存。"
+        : scopeFeedback.get(scope) || (dirtyScopes.has(scope) ? "此区域有未保存修改；刷新不会覆盖草稿。" : "当前区域已同步。");
       for (const button of document.querySelectorAll("#nav [data-page], [data-tabs] [data-tab]")) {
         const scope = button.dataset.tab ? `${button.closest("[data-tabs]").dataset.tabs}:${button.dataset.tab}` : button.dataset.page;
         button.classList.toggle("has-unsaved", dirtyScopes.has(scope) || (["qa", "voice"].includes(scope) && [...dirtyScopes].some((item) => item.startsWith(`${scope}:`))));
       }
+      renderRegistrySaveState();
     }
 
     function markDirty(eventOrScope) {
       const scope = typeof eventOrScope === "string" ? eventOrScope : eventOrScope?.target ? scopeForElement(eventOrScope.target) : currentScope();
       if (!scopeNames[scope]) return;
       dirtyScopes.add(scope);
+      scopeFeedback.set(scope, "此区域有未保存修改；刷新不会覆盖草稿。");
       if (scope === "account-functions") $("accountFunctionsFeedback").textContent = "账号功能有未保存的修改。";
       renderSaveState();
     }
@@ -1892,99 +1537,7 @@
       markDirty();
     }
 
-    function renderAccountModeFields(config) {
-      const host = $("accountModeFields");
-      host.replaceChildren();
-      const accounts = [config.accounts?.primary || { id: "primary" }, ...(config.accounts?.standbys || [{ id: "standby-a" }])];
-      for (const [index, account] of accounts.entries()) {
-        const accountId = String(account.id || (index === 0 ? "primary" : `standby-${index}`));
-        const card = document.createElement("div");
-        card.className = "account-manager-card";
-        card.dataset.accountManagerId = accountId;
-        const head = document.createElement("div");
-        head.className = "account-manager-head";
-        const title = document.createElement("div");
-        const name = document.createElement("strong");
-        name.textContent = index === 0 ? "主账号" : `账号 ${index + 1}`;
-        const detail = document.createElement("p");
-        detail.className = "hint";
-        detail.textContent = `${accountId} · QQ ${account.qq || "登录后识别"}`;
-        title.append(name, detail);
-        const status = document.createElement("span");
-        status.className = "pill";
-        status.dataset.accountManagerStatus = accountId;
-        status.textContent = "等待状态";
-        head.append(title, status);
-        card.appendChild(head);
-
-        const enabledRow = document.createElement("label");
-        enabledRow.className = "switch-row";
-        const enabledText = document.createElement("span");
-        enabledText.textContent = "启用此账号参与机器人工作";
-        const enabled = document.createElement("input");
-        enabled.type = "checkbox";
-        enabled.dataset.accountEnabledId = accountId;
-        enabled.checked = account.enabled !== false;
-        enabled.addEventListener("change", () => {
-          if (index < 2) setVal(index === 0 ? "accounts.primary.enabled" : "accounts.standbys.0.enabled", String(enabled.checked));
-          markDirty("account-functions");
-          updateAccountTopologyHint();
-        });
-        enabledRow.append(enabledText, enabled);
-        card.appendChild(enabledRow);
-
-        const fields = document.createElement("div");
-        fields.className = "form-grid";
-        const field = (labelText, control) => {
-          const wrap = document.createElement("div");
-          wrap.className = "field";
-          const label = document.createElement("label");
-          label.htmlFor = control.id;
-          label.textContent = labelText;
-          wrap.append(label, control);
-          fields.appendChild(wrap);
-        };
-        const displayName = document.createElement("input");
-        displayName.id = `account-display-${index}`;
-        displayName.dataset.accountDisplayId = accountId;
-        displayName.maxLength = 60;
-        displayName.value = account.displayName || (index === 0 ? "Hermes小跟班" : `Hermes小跟班${index + 1}`);
-        displayName.addEventListener("input", () => markDirty("account-functions"));
-        field("机器人自称（不修改 QQ 昵称）", displayName);
-
-        const select = document.createElement("select");
-        select.id = `account-mode-${index}`;
-        select.dataset.accountModeId = accountId;
-        for (const [value, title] of [["", "继承默认"], ["all", "聊天 + 任务"], ["chat", "仅聊天"], ["task", "仅任务"]]) {
-          const option = document.createElement("option");
-          option.value = value;
-          option.textContent = title;
-          select.appendChild(option);
-        }
-        select.value = config.botFeatures?.accountModes?.[accountId] || "";
-        select.addEventListener("change", () => { markDirty("account-functions"); updateAccountTopologyHint(); });
-        field("负责的功能", select);
-
-        const duty = document.createElement("p");
-        duty.className = "hint account-duty";
-        duty.dataset.accountDutyId = accountId;
-        fields.appendChild(duty);
-
-        const style = document.createElement("select");
-        style.id = `account-style-${index}`;
-        style.dataset.accountStyleId = accountId;
-        style.addEventListener("change", () => {
-          if (index < 2) setVal(index === 0 ? "accounts.primary.styleProfileId" : "accounts.standbys.0.styleProfileId", style.value);
-          markDirty("account-functions");
-        });
-        field("风格预设", style);
-        card.appendChild(fields);
-        host.appendChild(card);
-        fillAccountStyleOptions(style, account.styleProfileId || "");
-      }
-      updateAccountTopologyHint();
-      updateAccountManagerStatuses();
-    }
+    function renderAccountModeFields() { /* Replaced by the registry editor. */ }
 
     function fillAccountStyleOptions(select, selected) {
       select.replaceChildren();
@@ -2003,44 +1556,13 @@
       select.value = selected;
     }
 
-    function updateAccountTopologyHint() {
-      const topology = getVal("accounts.topology");
-      for (const button of document.querySelectorAll("[data-topology-value]")) button.setAttribute("aria-pressed", String(button.dataset.topologyValue === topology));
-      $("accountTopologyHint").textContent = topology === "failover"
-        ? "主备代表同一个 bot，共用风格和自我记忆；主号故障时备用号接管。要让备用号成为另一个 bot，请切到独立模式。"
-        : topology === "function_split"
-          ? "两个账号是独立 bot，可分别负责聊天或任务。普通群聊默认由当前账号处理；明确 @ 某账号会路由给该账号。不会自动把一个 bot 的身份当成另一个。"
-          : "两个账号是独立 bot，可参与同一群聊。默认仍只回复一次；双账号接话需另行开启。";
-      $("failoverSettings").classList.toggle("hidden", topology !== "failover");
-      $("failoverSettings").closest(".card")?.classList.toggle("hidden", topology !== "failover");
-      $("interBotCard").classList.toggle("hidden", topology !== "collaboration");
-      for (const id of ["botFeatures.interBot.enabled", "botFeatures.interBot.probability", "botFeatures.interBot.cooldownMs"]) $(id).disabled = topology !== "collaboration";
-      const primaryId = cfg?.accounts?.primary?.id || "primary";
-      for (const select of document.querySelectorAll("[data-account-mode-id], [data-account-style-id]")) {
-        select.disabled = topology === "failover" && (select.dataset.accountModeId || select.dataset.accountStyleId) !== primaryId;
-      }
-      const defaultMode = getVal("botFeatures.defaultMode");
-      const effectiveMode = (id) => document.querySelector(`[data-account-mode-id="${CSS.escape(id)}"]`)?.value || defaultMode;
-      const dutyText = (mode) => mode === "chat" ? "聊天" : mode === "task" ? "任务" : "聊天 + 任务";
-      const enabled = [...document.querySelectorAll("[data-account-enabled-id]:checked")];
-      for (const duty of document.querySelectorAll("[data-account-duty-id]")) {
-        const id = duty.dataset.accountDutyId;
-        const isEnabled = document.querySelector(`[data-account-enabled-id="${CSS.escape(id)}"]`)?.checked;
-        const mode = topology === "failover" && id !== primaryId ? effectiveMode(primaryId) : effectiveMode(id);
-        duty.textContent = isEnabled ? `实际职责：${dutyText(mode)}${topology === "failover" && id !== primaryId ? "（随主账号接管）" : ""}` : "实际职责：已停用，不处理消息";
-      }
-      $("accountScenarioPreview").textContent = !cfg ? "等待配置加载后显示实际效果。" : topology === "failover"
-        ? `生效预览：${!enabled.length ? "所有账号已停用，机器人不会发言。" : getVal("accounts.failover.enabled") ? "启用的账号共用 bot 身份与记忆；主号异常时备用号可接管。" : "启用的账号共用 bot 身份与记忆；自动接管已关闭。"}`
-        : topology === "function_split"
-          ? `生效预览：${enabled.length} 个账号参与，按各自职责处理聊天或任务；明确 @ 的账号独立回应。`
-          : `生效预览：${enabled.length} 个账号可独立参与聊天；${getVal("botFeatures.interBot.enabled") ? "已开启低概率双账号接话。" : "默认只回复一次，双账号接话未开启。"}`;
-    }
+    function updateAccountTopologyHint() { /* No global topology switch in v2. */ }
 
     function updateAccountManagerStatuses() {
       const rows = new Map(accountRows().map((item) => [item.id, item]));
       for (const badge of document.querySelectorAll("[data-account-manager-status]")) {
         const row = rows.get(badge.dataset.accountManagerStatus);
-        badge.textContent = !row ? "待连接" : row.enabled === false ? "已停用" : row.connected ? (row.active ? "在线 · 当前" : "在线") : "未连接";
+        badge.textContent = !row ? "待连接" : row.enabled === false ? "已停用" : row.connected ? (row.active ? (cfg?.accounts?.topology === "failover" ? "在线 · 当前接管" : "在线 · 默认路由") : "在线") : "未连接";
         badge.className = `pill ${row?.enabled === false ? "" : row?.connected ? "good" : "bad"}`;
       }
     }
@@ -2051,6 +1573,7 @@
 
     function promptAccountRows() {
       if (!cfg) return [];
+      if (Array.isArray(cfg.accounts?.items)) return cfg.accounts.items.filter((item) => !item.archived);
       return [cfg.accounts?.primary, ...(cfg.accounts?.standbys || [])]
         .filter((account) => account?.id);
     }
@@ -2058,7 +1581,7 @@
     function inheritedPromptForAccount(accountId) {
       const accounts = promptAccountRows();
       const primary = accounts[0];
-      const effectiveId = cfg?.accounts?.topology === "failover" ? primary?.id : accountId;
+      const effectiveId = cfg?.accounts?.version === 2 ? accountId : cfg?.accounts?.topology === "failover" ? primary?.id : accountId;
       const account = accounts.find((item) => item.id === effectiveId);
       if (!account) return promptDrafts.get("default") ?? cfg?.prompt?.system ?? "";
       if (promptDrafts.has(effectiveId) && promptDrafts.get(effectiveId) !== null) return promptDrafts.get(effectiveId);
@@ -2074,7 +1597,7 @@
       const select = $("promptAccountSelect");
       const choices = [{ id: "default", label: "通用默认（原提示词）" }, ...promptAccountRows().map((account, index) => ({
         id: account.id,
-        label: `${index === 0 ? "主账号" : `账号 ${index + 1}`} · ${account.displayName || account.id}`
+        label: `${account.displayName || account.id} · ${account.id}`
       }))];
       if (!choices.some((item) => item.id === selectedPromptAccountId)) selectedPromptAccountId = choices[1]?.id || "default";
       select.replaceChildren();
@@ -2086,7 +1609,7 @@
       }
       select.value = selectedPromptAccountId;
       const account = promptAccountRows().find((item) => item.id === selectedPromptAccountId);
-      const inheritedStandby = Boolean(account && cfg.accounts?.topology === "failover" && account.id !== cfg.accounts?.primary?.id);
+      const inheritedStandby = false;
       const textarea = $("prompt.system");
       textarea.value = selectedPromptAccountId === "default"
         ? promptDrafts.get("default") ?? cfg.prompt?.system ?? ""
@@ -2269,7 +1792,8 @@
         const trigger = rule.trigger?.type === "command"
           ? `命令 ${rule.trigger.text || "未填"}`
           : `定时 ${rule.trigger?.time || "未填"} · ${rule.timezone || "Asia/Shanghai"}`;
-        detail.textContent = `${rule.enabled === false ? "已停用" : "已启用"} · ${trigger} · ${rule.scope?.conversationIds?.length || 0} 个会话 · ${rule.action?.kind || "message"}`;
+        const target = rule.groupId ? `接管组 ${registryState.groups.find((group) => group.id === rule.groupId)?.name || rule.groupId}` : rule.accountId ? `账号 ${registryItem(rule.accountId)?.displayName || rule.accountId}` : "原规则路由";
+        detail.textContent = `${rule.enabled === false ? "已停用" : "已启用"} · ${trigger} · ${rule.scope?.conversationIds?.length || 0} 个会话 · ${target} · ${rule.action?.kind || "message"}`;
         head.append(title, buttons);
         item.append(head, detail);
         list.appendChild(item);
@@ -2287,6 +1811,18 @@
       for (const field of document.querySelectorAll(".automation-command")) field.classList.toggle("hidden", isSchedule);
     }
 
+    function renderAutomationTargetPicker(selected = getVal("automationRule.target") || "") {
+      const select = $("automationRule.target");
+      if (!select) return;
+      const options = [["", "未指定（保留原规则路由）"],
+        ...registryState.items.map((item) => [`account:${item.id}`, `账号 · ${item.displayName || item.id}（${item.id}）`]),
+        ...registryState.groups.map((group) => [`group:${group.id}`, `接管组 · ${group.name || group.id}（${group.id}）`])];
+      if (selected && !options.some(([value]) => value === selected)) options.push([selected, selected === "!conflict" ? "账号与接管组冲突，请重新选择" : `${selected}（目标已移除或尚未加载）`]);
+      select.replaceChildren();
+      for (const [value, title] of options) { const option = document.createElement("option"); option.value = value; option.textContent = title; select.append(option); }
+      select.value = selected;
+    }
+
     function loadAutomationEditor() {
       const rule = automationRulesDraft[selectedAutomationRuleIndex];
       renderAutomationRules();
@@ -2296,7 +1832,7 @@
       setVal("automationRule.id", rule.id);
       setVal("automationRule.action", rule.action?.kind || "message");
       setVal("automationRule.triggerType", rule.trigger?.type || "schedule");
-      setVal("automationRule.accountId", rule.accountId || "");
+      renderAutomationTargetPicker(rule.accountId && rule.groupId ? "!conflict" : rule.groupId ? `group:${rule.groupId}` : rule.accountId ? `account:${rule.accountId}` : "");
       setVal("automationRule.scope", rule.scope?.conversationIds || rule.scope?.groupIds || []);
       setVal("automationRule.timezone", rule.timezone || "Asia/Shanghai");
       setVal("automationRule.time", rule.trigger?.type === "schedule" ? rule.trigger.time : "09:00");
@@ -2356,8 +1892,11 @@
         if (!/^\/[a-z][a-z0-9_-]{0,47}$/.test(text) || ["/bot", "/task", "/voice"].includes(text)) throw new Error("命令须为小写、无参数的斜杠命令，且不能占用 /bot、/task、/voice");
         trigger = { type: "command", text };
       }
-      const accountId = String(getVal("automationRule.accountId") || "").trim();
-      if (accountId && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(accountId)) throw new Error("执行账号 ID 格式无效");
+      const target = String(getVal("automationRule.target") || "");
+      if (target && !/^(account|group):[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(target)) throw new Error("请选择单个执行账号或接管组，不能同时指定两者");
+      const [targetKind, targetId] = target.split(":");
+      if (targetKind === "account" && !registryItem(targetId)) throw new Error("执行账号已移除或未加载，请重新选择");
+      if (targetKind === "group" && !registryState.groups.some((group) => group.id === targetId)) throw new Error("接管组已移除或未加载，请重新选择");
       return {
         id,
         enabled: getVal("automationRule.enabled"),
@@ -2365,7 +1904,7 @@
         scope: { conversationIds: [...new Set(scopes)] },
         trigger,
         action: { kind: getVal("automationRule.action") },
-        ...(accountId ? { accountId } : {}),
+        ...(targetKind === "account" ? { accountId: targetId } : targetKind === "group" ? { groupId: targetId } : {}),
         prompt
       };
     }
@@ -2464,12 +2003,12 @@
           webuiPort: getVal("accounts.primary.webuiPort"), noVncPort: getVal("accounts.primary.noVncPort"), vncPort: getVal("accounts.primary.vncPort"),
           onebotWsUrl: getVal("accounts.primary.onebotWsUrl"), snowlumaImage: getVal("accounts.primary.snowlumaImage")
         },
-        standbys: [{ ...first,
+        standbys: [{ id: first.id || "standby-a",
           qq: getVal("accounts.standbys.0.qq"), protocol: getVal("accounts.standbys.0.protocol"), onebotPath: getVal("accounts.standbys.0.onebotPath"),
           napcatContainer: getVal("accounts.standbys.0.napcatContainer"), protocolContainer: getVal("accounts.standbys.0.protocolContainer"),
           webuiPort: getVal("accounts.standbys.0.webuiPort"), noVncPort: getVal("accounts.standbys.0.noVncPort"), vncPort: getVal("accounts.standbys.0.vncPort"),
           onebotWsUrl: getVal("accounts.standbys.0.onebotWsUrl"), snowlumaImage: getVal("accounts.standbys.0.snowlumaImage")
-        }, ...standby.slice(1)]
+        }, ...standby.slice(1).map((account) => ({ id: account.id }))]
       } };
       if (scope === "account-functions") {
         const topology = getVal("accounts.topology");
@@ -2504,7 +2043,7 @@
             primary: { displayName: accountName(primaryId, "主账号"), styleProfileId: controls("data-account-style-id", primaryId)?.value || "", enabled: Boolean(controls("data-account-enabled-id", primaryId)?.checked) },
             standbys: (standby.length ? standby : [first]).map((account, index) => {
               const id = String(account.id || `standby-${index + 1}`);
-              return { ...account, id, displayName: accountName(id, `账号 ${index + 2}`), styleProfileId: controls("data-account-style-id", id)?.value || "", enabled: Boolean(controls("data-account-enabled-id", id)?.checked) };
+              return { id, displayName: accountName(id, `账号 ${index + 2}`), styleProfileId: controls("data-account-style-id", id)?.value || "", enabled: Boolean(controls("data-account-enabled-id", id)?.checked) };
             }),
             ...(topology === "failover" ? { failover: { enabled: getVal("accounts.failover.enabled"), switchBackWhenPrimaryHealthy: getVal("accounts.failover.switchBackWhenPrimaryHealthy"), switchAfterMs } } : {})
           },
@@ -2514,7 +2053,7 @@
       if (scope === "qa:model") return aiProfilesPatch();
       if (scope === "qa:persona") return promptEditorPatch();
       if (scope === "qa:behavior") return {
-        ...(standby.length ? { accounts: { standbys: standby.map((account, index) => index === 0 ? { ...account, behaviorMode: getVal("accounts.standbys.0.behaviorMode") } : account) } } : {}),
+        ...(standby.length ? { accounts: { standbys: standby.map((account, index) => index === 0 ? { id: account.id, behaviorMode: getVal("accounts.standbys.0.behaviorMode") } : { id: account.id }) } } : {}),
         learningMode: learningModePatch(),
         webSearch: { enabled: getVal("webSearch.enabled") },
         behaviorModes: { default: getVal("behaviorModes.default") },
@@ -2556,10 +2095,11 @@
       throw new Error("此页面没有可保存的设置");
     }
 
-    function fillConfig() {
+    function fillConfig({ preserveDirty = false } = {}) {
       if (!cfg) return;
-      initializeAiProfiles(cfg);
-      initializeStyleProfiles(cfg);
+      preservingDirtyFields = preserveDirty;
+      if (!preserveDirty || !dirtyScopes.has("qa:model")) initializeAiProfiles(cfg);
+      if (!preserveDirty || !dirtyScopes.has("qa:persona")) initializeStyleProfiles(cfg);
       setVal("botFeatures.defaultMode", cfg.botFeatures?.defaultMode || "all");
       setVal("botFeatures.interBot.enabled", cfg.botFeatures?.interBot?.enabled === true);
       setVal("botFeatures.interBot.probability", cfg.botFeatures?.interBot?.probability ?? 0.03);
@@ -2569,8 +2109,8 @@
       setVal("learningMode.minIntervalMs", cfg.learningMode?.minIntervalMs ?? 1800000);
       setVal("learningMode.maxQuestionsPerDay", cfg.learningMode?.maxQuestionsPerDay ?? 3);
       setVal("accounts.topology", cfg.accounts?.topology || "failover");
-      renderAccountModeFields(cfg);
-      initializeAutomation(cfg);
+      if (!preserveDirty || !dirtyScopes.has("account-functions")) renderAccountModeFields(cfg);
+      if (!preserveDirty || !dirtyScopes.has("automation")) initializeAutomation(cfg);
       setVal("voice.enabled", cfg.voice?.enabled === true);
       setVal("voice.replyMode", cfg.voice?.replyMode || "mixed");
       setVal("voice.credentialSource", cfg.voice?.credentialSource || "existing");
@@ -2592,17 +2132,20 @@
       setVal("voice.tts.model", ttsModel);
       const selectedVoice = cfg.voice?.tts?.voice || "mimo_default";
       const voiceSelect = $("voice.tts.voice");
-      voiceSelect.querySelector("[data-voice-custom-option]")?.remove();
-      if (!VOICE_PRESET_IDS.includes(selectedVoice)) {
-        const option = document.createElement("option");
-        option.value = selectedVoice;
-        option.textContent = `${selectedVoice}（现有配置）`;
-        option.dataset.voiceCustomOption = "";
-        voiceSelect.appendChild(option);
+      const preserveVoiceDraft = preserveDirty && dirtyScopes.has("voice:behavior");
+      if (!preserveVoiceDraft) {
+        voiceSelect.querySelector("[data-voice-custom-option]")?.remove();
+        if (!VOICE_PRESET_IDS.includes(selectedVoice)) {
+          const option = document.createElement("option");
+          option.value = selectedVoice;
+          option.textContent = `${selectedVoice}（现有配置）`;
+          option.dataset.voiceCustomOption = "";
+          voiceSelect.appendChild(option);
+        }
+        setVal("voice.tts.voice", selectedVoice);
       }
-      setVal("voice.tts.voice", selectedVoice);
       const allowedVoices = Array.isArray(cfg.voice?.tts?.allowedVoices) ? cfg.voice.tts.allowedVoices : VOICE_PRESET_IDS;
-      for (const checkbox of document.querySelectorAll("[data-voice-preset]")) checkbox.checked = allowedVoices.includes(checkbox.value);
+      if (!preserveVoiceDraft) for (const checkbox of document.querySelectorAll("[data-voice-preset]")) checkbox.checked = allowedVoices.includes(checkbox.value);
       const unknownVoices = allowedVoices.filter((id) => !VOICE_PRESET_IDS.includes(id));
       $("voiceAllowedState").textContent = unknownVoices.length
         ? `现有配置中有 ${unknownVoices.length} 个不在官方列表内的音色；保存时只保留上方勾选项。`
@@ -2622,7 +2165,7 @@
         ? `语音 API 已就绪（${keychainSelected ? "本机 Keychain" : "环境变量或 Hermes 凭据"}；密钥不会回显）。`
         : keychainSelected ? "已选择 Keychain，但当前无法读取凭据；不会自动改用环境变量。" : `尚未找到 ${cfg.voice?.apiKeyEnv || "MIMO_API_KEY"} 或当前 Hermes 凭据。`;
       $("voiceSecretState").textContent = cfg.voice?.keychainStored ? "本机 Keychain 已保存语音密钥；密钥不会回显。" : "本机 Keychain 尚未保存语音密钥。";
-      for (const field of document.querySelectorAll("#page-automation input, #page-automation select, #page-automation textarea, #page-automation button, #page-voice input, #page-voice select, #page-voice textarea, #page-voice button")) field.disabled = false;
+      for (const field of document.querySelectorAll("#page-automation input, #page-automation select, #page-automation textarea, #page-automation button, #page-voice .registry-global input, #page-voice .registry-global select, #page-voice .registry-global textarea, #page-voice .registry-global button")) field.disabled = false;
       $("newAutomationRuleBtn").disabled = automationRulesDraft.length >= 100;
 
       setVal("vision.enabled", cfg.vision?.enabled);
@@ -2747,11 +2290,9 @@
       setVal("accounts.failover.enabled", cfg.accounts?.failover?.enabled !== false);
       setVal("accounts.failover.switchBackWhenPrimaryHealthy", cfg.accounts?.failover?.switchBackWhenPrimaryHealthy !== false);
       setVal("accounts.failover.switchAfterMs", cfg.accounts?.failover?.switchAfterMs || 60000);
-      updateAccountTopologyHint();
-      promptDrafts.clear();
-      renderPromptEditor();
-      dirty = false;
-      $("saveState").textContent = "已加载配置";
+      if (!preserveDirty || !dirtyScopes.has("account-functions")) updateAccountTopologyHint();
+      if (!preserveDirty || !dirtyScopes.has("qa:persona")) { promptDrafts.clear(); renderPromptEditor(); }
+      preservingDirtyFields = false;
       syncProtocolFields();
     }
 
@@ -2981,7 +2522,7 @@
       }
     }
 
-    async function refreshAll({ silent = false } = {}) {
+    async function refreshAll({ silent = false, selfSavedScope = "" } = {}) {
       if (!silent) $("saveState").textContent = "刷新中...";
       statusData = await api(`/api/status?ts=${Date.now()}`);
       renderOverview();
@@ -2994,16 +2535,31 @@
         api(`/api/archive/status?ts=${Date.now()}`).catch((err) => ({ ok: false, error: err.message })),
         api(`/api/archive/conversations?ts=${Date.now()}`).catch((err) => ({ ok: false, conversations: [], error: err.message }))
       ]);
-      cfg = config;
+      if (cfg?.revision && config.revision && cfg.revision !== config.revision) {
+        for (const scope of dirtyScopes) if (scope !== selfSavedScope) conflictedScopes.add(scope);
+      }
+      await refreshAccountRegistry({ configSnapshot: config, selfSavedScope });
+      $("qaModelSummary").textContent = `问答：${cfg.ai?.model || "未指定模型"}`;
+      $("visionModelSummary").textContent = `识图：${cfg.vision?.model || "未指定模型"}`;
+      $("voiceModelSummary").textContent = `ASR：${cfg.voice?.asr?.model || "mimo-v2.5-asr"} · TTS：${cfg.voice?.tts?.model || "未指定模型"}`;
       memoryData = memory;
       archiveStatusData = archiveStatus;
       archiveConversationData = archiveConversations;
       await refreshAgentFeatures();
       renderAll();
-      if (!dirty) fillConfig();
+      fillConfig({ preserveDirty: dirtyScopes.size > 0 });
       $("saveBtn").disabled = activePage === "api-center" || !scopeNames[currentScope()] || !cfg;
       $("lastRefresh").textContent = `上次刷新：${fmtTime()} · 状态生成：${fmtAgo(statusData?.health?.generatedAt || statusData?.serverTime)}`;
       renderSaveState();
+    }
+
+    async function refreshStatusOnly() {
+      statusData = await api(`/api/status?ts=${Date.now()}`);
+      await refreshAccountRegistry();
+      renderOverview();
+      renderAccounts();
+      renderProtocolControls();
+      $("lastRefresh").textContent = `状态刷新：${fmtTime()} · 生成：${fmtAgo(statusData?.health?.generatedAt || statusData?.serverTime)}`;
     }
 
     function renderAll() {
@@ -3053,13 +2609,13 @@
     }
 
     function primaryAccountRow() {
-      return accountRows().find((item) => item.role === "primary" || item.id === "primary") || {};
+      return accountRows()[0] || {};
     }
 
     function activeAccountRow() {
       const rows = accountRows();
       const activeId = statusData?.health?.activeAccountId || statusData?.config?.accounts?.activeAccountId;
-      return rows.find((item) => item.id === activeId) || rows.find((item) => item.active) || rows.find((item) => item.role === "primary") || {};
+      return rows.find((item) => item.id === registryState.selected) || rows.find((item) => item.id === activeId) || rows.find((item) => item.active) || rows[0] || {};
     }
 
     function syncProtocolFields() {
@@ -3083,246 +2639,74 @@
         webuiLink.href = webuiUrl || "#";
         webuiLink.classList.toggle("hidden", !webuiUrl);
       }
-      if ($("activeProtocolText")) $("activeProtocolText").textContent = `${active.displayName || active.id || "当前账号"} · ${label} · ${active.protocolContainer || "容器未配置"}`;
+      if ($("activeProtocolText")) $("activeProtocolText").textContent = `${active.displayName || active.id || "所选账号"} · ${label} · ${active.managed === false ? "外部接入" : active.protocolContainer || "容器未配置"} · 其他账号独立工作`;
       if ($("activeNoVncAction")) $("activeNoVncAction").classList.toggle("hidden", !noVncUrl);
       if ($("activeNoVncLink")) $("activeNoVncLink").href = noVncUrl || "#";
       if ($("restartActiveProtocolHint")) $("restartActiveProtocolHint").textContent = `重启 ${active.displayName || active.id || "当前账号"} 的 ${label} 容器，用于登录态、Hook 或 OneBot 异常。`;
       const hasNapcat = accountRows().some((item) => normalizedProtocol(item.protocol) === "napcat");
       if ($("legacyNapcatTools")) $("legacyNapcatTools").classList.toggle("hidden", !hasNapcat);
+      for (const id of ["overviewRestartProtocolBtn", "overviewRefreshQrBtn", "restartActiveProtocolBtn"]) if ($(id)) $(id).disabled = !active.id || active.managed === false;
       syncProtocolFields();
     }
 
-    function configuredAccounts() {
-      const primary = {
-        id: cfg?.accounts?.primary?.id || "primary",
-        role: "primary",
-        displayName: cfg?.accounts?.primary?.displayName || "Hermes小跟班",
-        configuredQq: cfg?.accounts?.primary?.qq || "",
-        qq: cfg?.accounts?.primary?.qq || "",
-        protocol: cfg?.accounts?.primary?.protocol || "napcat",
-        onebotPath: cfg?.accounts?.primary?.onebotPath || "/onebot",
-        napcatContainer: cfg?.accounts?.primary?.napcatContainer || "napcat",
-        protocolContainer: cfg?.accounts?.primary?.protocolContainer || cfg?.accounts?.primary?.napcatContainer || "napcat",
-        onebotWsUrl: cfg?.accounts?.primary?.onebotWsUrl || "",
-        webuiPort: cfg?.accounts?.primary?.webuiPort || null,
-        noVncPort: cfg?.accounts?.primary?.noVncPort || null,
-        vncPort: cfg?.accounts?.primary?.vncPort || null,
-        snowlumaImage: cfg?.accounts?.primary?.snowlumaImage || "",
-        enabled: cfg?.accounts?.primary?.enabled !== false
-      };
-      const standbys = (cfg?.accounts?.standbys || []).map((item, index) => ({
-        id: item.id || `standby-${index + 1}`,
-        role: "standby",
-        displayName: item.displayName || `Hermes小跟班${index + 2}`,
-        configuredQq: item.qq || "",
-        qq: item.qq || "",
-        protocol: item.protocol || "napcat",
-        onebotPath: item.onebotPath || primary.onebotPath,
-        napcatContainer: item.napcatContainer || `napcat-standby-${index + 1}`,
-        protocolContainer: item.protocolContainer || item.napcatContainer || (item.protocol === "snowluma" ? `snowluma-standby-${index + 1}` : `napcat-standby-${index + 1}`),
-        onebotWsUrl: item.onebotWsUrl || "",
-        webuiPort: item.webuiPort || null,
-        noVncPort: item.noVncPort || null,
-        vncPort: item.vncPort || null,
-        snowlumaImage: item.snowlumaImage || "",
-        behaviorMode: item.behaviorMode || "normal",
-        enabled: item.enabled !== false
-      }));
-      if (!standbys.length) {
-        standbys.push({
-          id: "standby-a",
-          role: "standby",
-          displayName: "Hermes小跟班2",
-          configuredQq: "",
-          qq: "",
-          protocol: "snowluma",
-          onebotPath: primary.onebotPath,
-          napcatContainer: "napcat-standby-a",
-          protocolContainer: "snowluma-standby-a",
-          onebotWsUrl: "ws://127.0.0.1:6301",
-          webuiPort: 6101,
-          noVncPort: 6102,
-          vncPort: 5901,
-          snowlumaImage: "motricseven7/snowluma:latest",
-          behaviorMode: "normal",
-          enabled: true
-        });
-      }
-      return [primary, ...standbys];
-    }
 
     function accountRows() {
-      const configured = configuredAccounts();
-      const statusItems = statusData?.health?.accounts || statusData?.config?.accounts?.items || [];
-      const byId = new Map(configured.map((item) => [item.id, { ...item }]));
-      for (const item of statusItems) {
-        const existing = byId.get(item.id) || {};
-        byId.set(item.id, { ...existing, ...item });
-      }
-      return Array.from(byId.values());
+      if (registryState.loaded) return registryState.items.map((item) => ({ ...registryStatus(item.id), ...item }));
+      return (cfg?.accounts?.items || []).filter((item) => !item.archived).map((item) => ({ ...item }));
     }
 
-    function renderAccounts() {
-      const list = $("accountCards");
-      if (!list) return;
-      const rows = accountRows();
-      updateAccountManagerStatuses();
-      if (!rows.length) {
-        list.innerHTML = `<div class="hint">还没有账号配置。</div>`;
-        return;
-      }
-      list.innerHTML = "";
-      for (const acc of rows) {
-        const id = acc.id || "primary";
-        const safe = domSafe(id);
-        const connected = Boolean(acc.connected);
-        const active = Boolean(acc.active);
-        const qr = acc.qrcode || {};
-        const diagnosis = acc.diagnosis || {};
-        const statusLevel = acc.statusLevel || diagnosis.level || (connected ? "good" : "bad");
-        const statusText = acc.statusText || diagnosis.text || (connected ? "正常" : "未连接");
-        const statusReason = acc.statusReason || diagnosis.reason || "";
-        const routeState = acc.routeState || diagnosis.routeState || "";
-        const routeStateLabel = acc.routeStateLabel || diagnosis.routeStateLabel || statusText;
-        const routingAction = acc.routingAction || diagnosis.routingAction || "";
-        const independent = (cfg?.accounts?.topology || "failover") !== "failover";
-        const roleText = acc.role === "primary" ? "主账号" : independent ? "独立账号" : "备用账号";
-        const protocol = normalizedProtocol(acc.protocol);
-        const protocolLabel = acc.protocolLabel || (protocol === "snowluma" ? "SnowLuma" : "NapCat");
-        const protocolContainer = acc.protocolContainer || acc.napcatContainer || "";
-        const card = document.createElement("div");
-        card.className = "card";
-        const shouldShowQr = protocol !== "snowluma" && Boolean(qr.exists && (
-          acc.needsLogin
-          || acc.wrongAccountLoggedIn
-          || routeState === "LOGIN_REQUIRED"
-          || routeState === "DISCONNECTED"
-        ));
-        const qrHidden = shouldShowQr ? "" : "hidden";
-        const actualQq = acc.actualQq || acc.qq || "";
-        const configuredQq = acc.configuredQq || "";
-        const qqText = actualQq || configuredQq || "未识别";
-        const webuiUrl = acc.webui?.url || diagnosis.webui?.url || "";
-        const noVncUrl = accountNoVncUrl(acc);
-        const probe = diagnosis.probe || acc.probe || null;
-        const peerPing = diagnosis.peerPing || {};
-        const peerSendText = peerPing.sentAt
-          ? `${peerPing.sentOk ? "发出成功" : `发出失败：${peerPing.sentError || "未知错误"}`} ${fmtAgo(peerPing.sentAt)}${peerPing.sentTo ? ` → ${peerPing.sentTo}` : ""}`
-          : "尚未发出";
-        const ownerSendText = peerPing.ownerSentAt
-          ? `${peerPing.ownerSentOk ? "成功" : `失败：${peerPing.ownerSentError || "未知错误"}`} ${fmtAgo(peerPing.ownerSentAt)}${peerPing.ownerSentTo ? ` → ${peerPing.ownerSentTo}` : ""}`
-          : "尚未检测";
-        const peerReceiveText = peerPing.receivedAt
-          ? `收到 ${fmtAgo(peerPing.receivedAt)}${peerPing.receivedFrom ? ` ← ${peerPing.receivedFrom}` : ""}`
-          : peerPing.expectedAt
-            ? `${peerPing.receiveMissing ? "应收未收" : "等待接收"} ${fmtAgo(peerPing.expectedAt)}${peerPing.expectedFrom ? ` ← ${peerPing.expectedFrom}` : ""}`
-            : "尚无接收验活";
-        const caps = acc.capabilities || diagnosis.capabilities || {};
-        const capClass = (cap) => cap?.status === "ok" ? "good" : cap?.status === "bad" ? "bad" : cap?.status === "warn" ? "warn" : "secondary";
-        const capText = (name, cap) => `<span class="pill ${capClass(cap)}">${esc(name)}：${esc(cap?.text || "未验证")}</span>`;
-        const capReason = (name, cap) => cap
-          ? `<div class="hint">${esc(name)}：${esc(cap.reason || cap.text || "")}${cap.at ? ` · ${fmtAgo(cap.at)}` : ""}${cap.evidence ? ` · ${esc(cap.evidence)}` : ""}</div>`
-          : "";
-        card.innerHTML = `
-          <h3>${esc(roleText)} <span class="pill ${active ? "good" : "secondary"}">${active ? independent ? "默认发言" : "当前接管" : esc(id)}</span></h3>
-          <div class="row" style="margin-bottom:8px">
-            ${statusPill(statusLevel !== "bad", routeStateLabel)}
-            ${statusPill(connected, connected ? "OneBot 已连接" : "OneBot 未连接")}
-            <span class="pill">实际QQ：${esc(qqText)}</span>
-            ${configuredQq && configuredQq !== actualQq ? `<span class="pill bad">配置QQ：${esc(configuredQq)}</span>` : configuredQq ? `<span class="pill">配置QQ：${esc(configuredQq)}</span>` : ""}
-            <span class="pill">昵称：${esc(acc.displayName || "")}</span>
-            <span class="pill">${acc.enabled === false ? "已停用" : "已启用"}</span>
-          </div>
-          <div class="${statusLevel === "bad" ? "alert" : statusLevel === "warn" ? "warning" : "success"}" style="margin:8px 0">${esc(statusReason || statusText)}</div>
-          <div class="row" style="margin:8px 0">
-            ${capText("身份", caps.identity)}
-            ${capText("OneBot", caps.onebot)}
-            ${capText("API", caps.api)}
-          </div>
-          <div class="row" style="margin:8px 0">
-            ${capText("私聊发", caps.privateSend)}
-            ${capText("私聊收", caps.privateReceive)}
-            ${capText("群聊发", caps.groupSend)}
-            ${capText("群聊收", caps.groupReceive)}
-          </div>
-          <details style="margin:8px 0">
-            <summary class="muted">查看证据详情</summary>
-            ${capReason("身份", caps.identity)}
-            ${capReason("OneBot", caps.onebot)}
-            ${capReason("API", caps.api)}
-            ${capReason("私聊发送", caps.privateSend)}
-            ${capReason("私聊接收", caps.privateReceive)}
-            ${capReason("群聊发送", caps.groupSend)}
-            ${capReason("群聊接收", caps.groupReceive)}
-            ${protocol === "napcat" ? capReason("二维码", caps.qrcode) : ""}
-            <div class="hint">路由动作：${esc(routingAction || "observe")}；强证据：${Number(acc.evidence?.strong ?? diagnosis.evidence?.strong ?? 0)}，弱证据：${Number(acc.evidence?.weak ?? diagnosis.evidence?.weak ?? 0)}</div>
-          </details>
-          <div class="hint">协议端：<span class="kbd">${esc(protocolLabel)}</span> · 容器：<span class="kbd">${esc(protocolContainer)}</span></div>
-          <div class="hint">${protocol === "snowluma" ? "主动 WS" : "反向 WS"}：<span class="kbd">${protocol === "snowluma" ? esc(acc.onebotWsUrl || "ws://127.0.0.1:6301") : `ws://host.docker.internal:6199${esc(acc.onebotPath || "/onebot")}`}</span></div>
-          ${protocol === "snowluma" ? `<div class="hint">WebUI：${esc(webuiUrl || "未配置")} · noVNC：${esc(noVncUrl || "未配置")}</div>` : ""}
-          <div class="hint">最近帧：${fmtAgo(acc.lastFrameAt)} · 最近消息：${fmtAgo(acc.lastMessageAt)} · 探测：${probe?.checkedAt ? `${probe.ok ? "成功" : "失败"} ${fmtAgo(probe.checkedAt)}` : "等待检测"}</div>
-          <div class="hint">给主人发送检测：${esc(ownerSendText)}</div>
-          <div class="hint">互发验活：${esc(peerSendText)} · ${esc(peerReceiveText)}</div>
-          <div class="row" style="margin-top:8px">
-            ${statusPill(Boolean(acc.canReceive), acc.canReceive ? "可收消息" : "收消息未确认")}
-            ${statusPill(Boolean(acc.canSend), acc.canSend ? "可发消息" : "发送未确认")}
-            ${acc.wrongAccountLoggedIn ? '<span class="pill bad">账号错绑</span>' : ""}
-            ${acc.suspectFakeOnline ? '<span class="pill bad">疑似假在线</span>' : ""}
-            ${acc.needsLogin ? '<span class="pill bad">建议重新登录</span>' : ""}
-          </div>
-          <div class="row" style="margin-top:10px">
-            <img id="accountQr-${safe}" class="qr ${qrHidden}" alt="${esc(id)} 登录二维码" src="${shouldShowQr ? `/qrcode/${encodeURIComponent(id)}.png?ts=${Date.now()}` : ""}" />
-            <div>
-              <div id="accountQrInfo-${safe}" class="muted">${protocol === "snowluma" ? (acc.needsLogin || !connected ? "请打开 SnowLuma WebUI 检查注入状态，或进入 noVNC 桌面完成 QQ 登录。" : "SnowLuma 登录与 QQ 桌面均可从下方入口管理，无需使用 NapCat 二维码。") : shouldShowQr ? `请扫码登录/确认。二维码：${esc(qr.path || "")} · ${fmtAgo(qr.mtimeMs)}` : connected ? (qr.exists ? `账号未被判定为需登录；残留二维码已隐藏：${esc(qr.path || "")} · ${fmtAgo(qr.mtimeMs)}` : "账号看起来已连接；需要重登时再刷新二维码。") : qr.exists ? `二维码：${esc(qr.path || "")} · ${fmtAgo(qr.mtimeMs)}` : "暂无二维码；需要登录时点刷新二维码。"}</div>
-              <div class="row account-actions" style="margin-top:8px">
-                <button id="accountProbe-${safe}" data-account-action="probe" data-account-id="${esc(id)}">检测账号</button>
-                <button id="accountActivate-${safe}" class="secondary" data-account-action="activate" data-account-id="${esc(id)}">切为当前</button>
-                ${webuiUrl ? `<a class="pill" target="_blank" rel="noreferrer" href="${esc(webuiUrl)}">打开 ${esc(protocolLabel)} WebUI</a>` : ""}
-                ${noVncUrl ? `<a class="pill" target="_blank" rel="noreferrer" href="${esc(noVncUrl)}">打开 noVNC 桌面</a>` : ""}
-                ${protocol === "napcat" ? `<button id="accountRefresh-${safe}" data-account-action="refresh-qr" data-account-id="${esc(id)}">刷新二维码</button><button id="accountForceRefresh-${safe}" class="danger" data-account-action="force-refresh-qr" data-account-id="${esc(id)}">强制刷新</button><button id="accountResetLogin-${safe}" class="danger" data-account-action="reset-login" data-account-id="${esc(id)}">清理登录态</button>` : ""}
-                <button id="accountRestart-${safe}" class="danger" data-account-action="restart" data-account-id="${esc(id)}">重启${esc(protocolLabel)}</button>
-              </div>
-            </div>
-          </div>
-        `;
-        list.appendChild(card);
-      }
-    }
+    function renderAccounts() { renderRegistryLists(); }
 
     function renderOverview() {
       const h = statusData?.health || {};
       const runtime = h.runtime || {};
+      const independent = true;
+      const enabledAccounts = accountRows().filter((item) => item.enabled !== false);
+      const accountIssue = (item) => Boolean(item.needsLogin || item.wrongAccountLoggedIn || item.strongBad || item.statusLevel === "bad" || ["LOGIN_REQUIRED", "WRONG_ACCOUNT", "DISCONNECTED", "STALE", "DEGRADED_SEND", "DEGRADED_RECEIVE"].includes(item.routeState));
+      const problemAccounts = enabledAccounts.filter(accountIssue);
       const primaryAccount = primaryAccountRow();
       const activeAccount = activeAccountRow();
-      const protocol = normalizedProtocol(primaryAccount.protocol);
-      const protocolLabel = primaryAccount.protocolLabel || (protocol === "snowluma" ? "SnowLuma" : "NapCat");
-      const primaryConnected = Boolean(primaryAccount.connected);
-      const needsLogin = Boolean(primaryAccount.needsLogin || primaryAccount.routeState === "LOGIN_REQUIRED");
-      const sendBad = Boolean(h.sendFailureActive || primaryAccount.canSend === false || primaryAccount.routeState === "DEGRADED_SEND");
-      const messageInactive = Boolean(h.messageInactive);
+      const focusAccount = independent ? (problemAccounts[0] || activeAccount || enabledAccounts[0] || primaryAccount) : primaryAccount;
+      const protocol = normalizedProtocol(focusAccount.protocol);
+      const protocolLabel = focusAccount.protocolLabel || (protocol === "snowluma" ? "SnowLuma" : "NapCat");
+      const primaryConnected = Boolean(focusAccount.connected);
+      const needsLogin = Boolean(focusAccount.needsLogin || focusAccount.routeState === "LOGIN_REQUIRED");
+      const sendBad = Boolean((!independent && h.sendFailureActive) || focusAccount.routeState === "DEGRADED_SEND");
+      const messageInactive = !independent && Boolean(h.messageInactive);
       const primaryBad = Boolean(primaryAccount.strongBad || primaryAccount.needsLogin || primaryAccount.wrongAccountLoggedIn || primaryAccount.routeState === "LOGIN_REQUIRED" || primaryAccount.routeState === "WRONG_ACCOUNT" || primaryAccount.routeState === "DISCONNECTED" || primaryAccount.routeState === "STALE");
       const activeConnected = Boolean(activeAccount.connected ?? h.onebotConnected);
+      const connectedCount = enabledAccounts.filter((item) => item.connected).length;
       const replyState = h.replyCoordinator || h.diagnostics?.replyCoordinator || {};
-      const needsAttention = Boolean(needsLogin || !activeConnected || h.onebotStale || sendBad || messageInactive || primaryBad);
-      $("statLogin").innerHTML = `<span class="dot ${needsLogin || sendBad || primaryBad ? "bad" : "good"}"></span>${needsLogin ? "需登录" : sendBad ? "发送失败" : primaryBad ? "主号异常" : "正常"}`;
-      $("statLoginHint").textContent = `${primaryAccount.displayName || "主账号"} · ${protocolLabel} · ${primaryAccount.statusReason || primaryAccount.statusText || "等待账号诊断"} · 状态生成 ${fmtAgo(h.generatedAt || statusData?.serverTime)}`;
-      $("statOnebot").innerHTML = `<span class="dot ${activeConnected && !h.onebotStale && !messageInactive ? "good" : "bad"}"></span>${h.onebotStale ? "疑似卡住" : messageInactive ? "消息停滞" : activeConnected ? "已连接" : "未连接"}`;
-      $("statOnebotHint").textContent = `当前接管：${activeAccount.displayName || activeAccount.id || "未知"} · 回复生成 ${Number(replyState.activeCount || 0)} · 待处理 ${Number(replyState.pending || 0)} · 已合并 ${Number(replyState.merged || 0)} · 重生成 ${Number(replyState.regenerated || 0)}${replyState.lastCancellationReason ? ` · 最近取消：${replyState.lastCancellationReason}` : ""} · 最近帧 ${fmtAgo(runtime.lastOneBotFrameAt)} · 最近消息 ${fmtAgo(runtime.lastOneBotMessageAt)}${h.onebotStale ? " · 超过 90 秒无心跳/事件" : ""}${messageInactive ? " · 心跳正常但聊天事件长时间未进入" : ""}${sendBad ? ` · 最近发送失败：${primaryAccount.sendHealth?.lastSendError || h.sendHealth?.lastSendFailure || "未知错误"}` : ""}`;
+      const needsAttention = independent ? Boolean(problemAccounts.length) : Boolean(needsLogin || !activeConnected || h.onebotStale || sendBad || messageInactive || primaryBad);
+      $("statLogin").innerHTML = independent
+        ? `<span class="dot ${problemAccounts.length ? "bad" : "good"}"></span>${!enabledAccounts.length ? "机器人已停用" : problemAccounts.length ? `${problemAccounts.length} 个账号异常` : `${enabledAccounts.length} 个账号正常`}`
+        : `<span class="dot ${needsLogin || sendBad || primaryBad ? "bad" : "good"}"></span>${needsLogin ? "需登录" : sendBad ? "发送失败" : primaryBad ? "主号异常" : "正常"}`;
+      $("statLoginHint").textContent = independent
+        ? `${enabledAccounts.map((item) => `${item.displayName || item.id}：${item.statusText || (item.connected ? "在线" : "未连接")}`).join(" · ") || "没有启用的账号"} · 状态生成 ${fmtAgo(h.generatedAt || statusData?.serverTime)}`
+        : `${primaryAccount.displayName || "主账号"} · ${protocolLabel} · ${primaryAccount.statusReason || primaryAccount.statusText || "等待账号诊断"} · 状态生成 ${fmtAgo(h.generatedAt || statusData?.serverTime)}`;
+      $("statOnebot").innerHTML = independent
+        ? `<span class="dot ${connectedCount === enabledAccounts.length ? "good" : "bad"}"></span>${connectedCount}/${enabledAccounts.length} 已连接`
+        : `<span class="dot ${activeConnected && !h.onebotStale && !messageInactive ? "good" : "bad"}"></span>${h.onebotStale ? "疑似卡住" : messageInactive ? "消息停滞" : activeConnected ? "已连接" : "未连接"}`;
+      $("statOnebotHint").textContent = `${independent ? `默认路由：${activeAccount.displayName || activeAccount.id || "未知"}；各账号独立收发` : `当前接管：${activeAccount.displayName || activeAccount.id || "未知"}`} · 回复生成 ${Number(replyState.activeCount || 0)} · 待处理 ${Number(replyState.pending || 0)} · 已合并 ${Number(replyState.merged || 0)} · 重生成 ${Number(replyState.regenerated || 0)}${replyState.lastCancellationReason ? ` · 最近取消：${replyState.lastCancellationReason}` : ""} · 最近帧 ${fmtAgo(runtime.lastOneBotFrameAt)} · 最近消息 ${fmtAgo(runtime.lastOneBotMessageAt)}${!independent && h.onebotStale ? " · 超过 90 秒无心跳/事件" : ""}${messageInactive ? " · 心跳正常但聊天事件长时间未进入" : ""}${sendBad ? ` · 最近发送失败：${focusAccount.sendHealth?.lastSendError || h.sendHealth?.lastSendFailure || "未知错误"}` : ""}`;
       $("statModel").textContent = cfg?.ai?.model || statusData?.config?.ai?.model || "未设置";
       $("statModelHint").textContent = `provider: ${cfg?.ai?.provider || "未设置"} · timeout: ${fmtMs(cfg?.ai?.timeoutMs)}`;
       $("statMemory").textContent = `${memoryData?.groupCount ?? 0} 群`;
       const users = (memoryData?.groups || []).reduce((sum, g) => sum + Number(g.users || 0), 0);
       $("statMemoryHint").textContent = `${users} 个成员档案 · ${cfg?.memory?.aiExtraction?.enabled === false ? "AI 记忆关闭" : "AI 记忆开启"}`;
       $("sideStatus").innerHTML = [
-        statusPill(!needsLogin && !sendBad && !primaryBad, needsLogin ? "QQ 需登录" : sendBad ? "发送失败" : primaryBad ? "主号需关注" : "QQ 正常"),
-        statusPill(Boolean(activeConnected && !h.onebotStale && !messageInactive), h.onebotStale ? "OneBot 卡住" : messageInactive ? "消息停滞" : activeConnected ? "OneBot 已连" : "OneBot 断开")
+        independent ? statusPill(!problemAccounts.length, problemAccounts.length ? `${problemAccounts.length} 个账号需关注` : "QQ 正常") : statusPill(!needsLogin && !sendBad && !primaryBad, needsLogin ? "QQ 需登录" : sendBad ? "发送失败" : primaryBad ? "主号需关注" : "QQ 正常"),
+        independent ? statusPill(connectedCount === enabledAccounts.length, `OneBot ${connectedCount}/${enabledAccounts.length} 已连`) : statusPill(Boolean(activeConnected && !h.onebotStale && !messageInactive), h.onebotStale ? "OneBot 卡住" : messageInactive ? "消息停滞" : activeConnected ? "OneBot 已连" : "OneBot 断开")
       ].join("");
       $("attentionPill").className = needsAttention ? "pill bad" : "pill good";
       $("attentionPill").textContent = needsAttention ? "需要处理" : "一切正常";
       const box = $("attentionBox");
       box.className = needsAttention ? "alert" : "success";
       const freshness = `最近消息：${runtime.lastOneBotMessagePreview || "暂无"}（${fmtAgo(runtime.lastOneBotMessageAt)}）`;
-      box.textContent = needsLogin
+      box.textContent = independent
+        ? problemAccounts.length
+          ? `以下账号需分别处理：${problemAccounts.map((item) => `${item.displayName || item.id}：${item.statusReason || item.statusText || "连接异常"}`).join("；")}。请到账号状态页逐一检测。`
+          : enabledAccounts.length ? `${enabledAccounts.length} 个账号独立工作，当前没有发现强异常。${freshness}` : "所有账号的机器人功能均已停用。"
+        : needsLogin
         ? `${primaryAccount.displayName || "主账号"} 需要重新登录，请从 ${protocolLabel} 登录入口处理。${freshness}`
         : sendBad
           ? `OneBot 看起来连着，但 QQ 真实发送失败：${primaryAccount.statusReason || h.sendHealth?.lastSendFailure || "未知错误"}。这通常是协议端假在线或登录态失效，建议检测账号后重启 ${protocolLabel}。${freshness}`
@@ -3336,25 +2720,30 @@
           ? `QQ 已登录，当前由 ${activeAccount.displayName || activeAccount.id || "账号"} 通过 ${activeAccount.protocolLabel || protocolLabel} 收发消息。 ${freshness}`
           : `当前协议端未连接，请到主备账号页检查。 ${freshness}`;
 
-      const loginAssistVisible = Boolean(needsLogin || !primaryConnected || primaryAccount.suspectFakeOnline || primaryAccount.wrongAccountLoggedIn);
+      const loginAssistVisible = independent ? Boolean(problemAccounts.length) : Boolean(needsLogin || !primaryConnected || primaryAccount.suspectFakeOnline || primaryAccount.wrongAccountLoggedIn);
       $("loginAssist").classList.toggle("hidden", !loginAssistVisible);
-      const webuiUrl = primaryAccount.webui?.url || "";
-      const noVncUrl = accountNoVncUrl(primaryAccount);
+      const webuiUrl = focusAccount.webui?.url || "";
+      const noVncUrl = accountNoVncUrl(focusAccount);
+      $("overviewProbePrimaryBtn").dataset.accountId = focusAccount.id || "primary";
+      $("overviewRestartProtocolBtn").dataset.accountId = focusAccount.id || "primary";
+      $("overviewRefreshQrBtn").dataset.accountId = focusAccount.id || "primary";
+      $("overviewProbePrimaryBtn").textContent = `检测${focusAccount.displayName || "账号"}`;
+      $("overviewRestartProtocolBtn").textContent = `重启${focusAccount.displayName || "账号"}协议端`;
       $("overviewProtocolWebuiLink").href = webuiUrl || "#";
       $("overviewProtocolWebuiLink").classList.toggle("hidden", !webuiUrl);
       $("overviewProtocolWebuiLink").textContent = `打开 ${protocolLabel} WebUI`;
       $("overviewNoVncLink").href = noVncUrl || "#";
       $("overviewNoVncLink").classList.toggle("hidden", !noVncUrl);
       $("overviewRefreshQrBtn").classList.toggle("hidden", protocol !== "napcat");
-      $("overviewRebuildNapcatBtn").classList.toggle("hidden", protocol !== "napcat");
+      $("overviewRebuildNapcatBtn").classList.toggle("hidden", independent || protocol !== "napcat");
       if (protocol === "snowluma") {
         $("loginQr").classList.add("hidden");
         $("loginQr").removeAttribute("src");
         $("loginAssistInfo").textContent = "SnowLuma 不使用本页的 NapCat 二维码。请先打开 WebUI 查看注入状态；需要扫码或处理 QQ 弹窗时打开 noVNC 桌面。";
       } else {
-        const qr = primaryAccount.qrcode || {};
+        const qr = focusAccount.qrcode || {};
         $("loginQr").classList.toggle("hidden", !qr.exists);
-        if (qr.exists) $("loginQr").src = `/qrcode/${encodeURIComponent(primaryAccount.id || "primary")}.png?ts=${Date.now()}`;
+        if (qr.exists) $("loginQr").src = `/qrcode/${encodeURIComponent(focusAccount.id || "primary")}.png?ts=${Date.now()}`;
         else $("loginQr").removeAttribute("src");
         $("loginAssistInfo").textContent = qr.exists ? `请扫码登录。二维码更新于 ${fmtAgo(qr.mtimeMs)}。` : "当前没有可用二维码，请点击刷新二维码。";
       }
@@ -3469,7 +2858,7 @@
           <strong>${esc(conversationId)}</strong>
           <div class="hint">${esc(item.kind || "")} · ${Number(item.messageCount || 0)} 条 · ${Number(item.bytes || 0)} bytes · 更新 ${fmtAgo(item.mtimeMs)}</div>
           <div class="hint">${esc(item.path || "")}</div>
-          <div class="row" style="margin-top:8px">
+          <div class="row mt-8">
             <button class="secondary" data-archive-action="export" data-conversation-id="${esc(conversationId)}">导出 JSONL</button>
             <button class="danger" data-archive-action="clear" data-conversation-id="${esc(conversationId)}">清理此会话</button>
           </div>
@@ -3508,6 +2897,9 @@
 
     function accountConfigEffectText(configPayload, healthPayload) {
       const accounts = configPayload?.accounts || {};
+      const independent = accounts.topology && accounts.topology !== "failover";
+      const firstLabel = independent ? "账号 1" : "主号";
+      const secondLabel = independent ? "账号 2" : "备用 A";
       const standby = accounts.standbys?.[0] || {};
       const effectiveFailover = Boolean(accounts.failover?.enabled !== false && standby.enabled !== false);
       const primaryProtocol = normalizedProtocol(accounts.primary?.protocol);
@@ -3515,22 +2907,22 @@
       const lines = [
         "账号配置已保存。",
         "",
-        `主号 QQ：${accounts.primary?.qq || "未填"}`,
-        `主号协议端：${primaryProtocol === "snowluma" ? "SnowLuma" : "NapCat"}`,
-        `主号协议端容器：${accounts.primary?.protocolContainer || accounts.primary?.napcatContainer || "未填"}`,
-        primaryProtocol === "snowluma" ? `主号 OneBot WS：${accounts.primary?.onebotWsUrl || "未填"}` : `主号 OneBot 路径：${accounts.primary?.onebotPath || "/onebot"}`,
-        primaryProtocol === "snowluma" ? `主号 WebUI / noVNC：${accounts.primary?.webuiPort || "未填"} / ${accounts.primary?.noVncPort || "未填"}` : "",
+        `${firstLabel} QQ：${accounts.primary?.qq || "未填"}`,
+        `${firstLabel} 协议端：${primaryProtocol === "snowluma" ? "SnowLuma" : "NapCat"}`,
+        `${firstLabel} 协议端容器：${accounts.primary?.protocolContainer || accounts.primary?.napcatContainer || "未填"}`,
+        primaryProtocol === "snowluma" ? `${firstLabel} OneBot WS：${accounts.primary?.onebotWsUrl || "未填"}` : `${firstLabel} OneBot 路径：${accounts.primary?.onebotPath || "/onebot"}`,
+        primaryProtocol === "snowluma" ? `${firstLabel} WebUI / noVNC：${accounts.primary?.webuiPort || "未填"} / ${accounts.primary?.noVncPort || "未填"}` : "",
         "",
-        `备用 A QQ：${standby.qq || "未填，登录后可自动识别"}`,
-        `备用 A 协议端：${standbyProtocol === "snowluma" ? "SnowLuma" : "NapCat"}`,
-        `备用 A 协议端容器：${standby.protocolContainer || standby.napcatContainer || "未填"}`,
-        standbyProtocol === "snowluma" ? `备用 A OneBot WS：${standby.onebotWsUrl || "未填"}` : `备用 A OneBot 路径：${standby.onebotPath || "/onebot"}`,
-        standbyProtocol === "snowluma" ? `备用 A WebUI / noVNC：${standby.webuiPort || "未填"} / ${standby.noVncPort || "未填"}` : "",
-        `备用 A 启用：${standby.enabled === false ? "停用（仍可管理登录，但不参与聊天接管）" : "启用"}`,
-        `主备切换：${accounts.failover?.enabled === false ? "关闭" : "打开"}`,
-        `实际接管能力：${effectiveFailover ? "可在主号异常时切到备用" : "关闭/无可用备用，不会自动切换"}`,
+        `${secondLabel} QQ：${standby.qq || "未填，登录后可自动识别"}`,
+        `${secondLabel} 协议端：${standbyProtocol === "snowluma" ? "SnowLuma" : "NapCat"}`,
+        `${secondLabel} 协议端容器：${standby.protocolContainer || standby.napcatContainer || "未填"}`,
+        standbyProtocol === "snowluma" ? `${secondLabel} OneBot WS：${standby.onebotWsUrl || "未填"}` : `${secondLabel} OneBot 路径：${standby.onebotPath || "/onebot"}`,
+        standbyProtocol === "snowluma" ? `${secondLabel} WebUI / noVNC：${standby.webuiPort || "未填"} / ${standby.noVncPort || "未填"}` : "",
+        `${secondLabel} 启用：${standby.enabled === false ? independent ? "停用（仍可管理登录，不处理消息）" : "停用（仍可管理登录，但不参与聊天接管）" : "启用"}`,
+        independent ? `工作方式：${accounts.topology === "function_split" ? "功能分工" : "协作聊天"}；两个账号独立工作` : `主备切换：${accounts.failover?.enabled === false ? "关闭" : "打开"}`,
+        independent ? "" : `实际接管能力：${effectiveFailover ? "可在主号异常时切到备用" : "关闭/无可用备用，不会自动切换"}`,
         "",
-        `当前接管：${healthPayload?.activeAccountId || healthPayload?.accounts?.activeAccountId || "未知"}`
+        `${independent ? "默认路由" : "当前接管"}：${healthPayload?.activeAccountId || healthPayload?.accounts?.activeAccountId || "未知"}`
       ];
       return lines.filter(Boolean).join("\n");
     }
@@ -3614,7 +3006,7 @@
         detail.textContent = `${formatBytes(item.size)} · ${new Date(item.modifiedAt).toLocaleString()}`;
         const actions = document.createElement("div");
         actions.className = "row";
-        actions.style.marginTop = "8px";
+        actions.classList.add("mt-8");
         const open = document.createElement("button");
         open.className = "secondary";
         open.textContent = desktop ? "在 Finder 中显示" : "下载";
@@ -3723,20 +3115,27 @@
     };
 
     async function saveConfig(buttonId = "saveBtn", { focusAccounts = false } = {}) {
+      if (["account-status", "account-functions"].includes(activePage)) return saveRegistryEditor();
+      if (registryState.contexts[activePage]) return saveRegistryContext(activePage);
       const scope = saveScopeByButton[buttonId] || currentScope();
       if (!cfg) { toast("配置尚未加载，暂不能保存", "bad"); return; }
+      if (conflictedScopes.has(scope) && !confirm("配置曾在其他窗口更新。已保留你的草稿；确认在最新配置基础上保存此区域的修改？")) return;
       setBusy(buttonId, true, "保存中...");
+      scopeFeedback.set(scope, "正在保存此区域…"); renderSaveState();
       try {
+        const patch = collectScopedPatch(scope);
         const res = await api("/api/config", {
           method: "PATCH",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(collectScopedPatch(scope))
+          body: JSON.stringify({ ...patch, expectedRevision: cfg.revision })
         });
         cfg = res.config || cfg;
         dirtyScopes.delete(scope);
+        conflictedScopes.delete(scope);
         if (scope === "qa:persona") { promptDrafts.clear(); renderPromptEditor(); }
         renderSaveState();
         const message = `${scopeNames[scope] || "配置"}已保存${res.restartRequired ? "；部分项需重启" : "并热生效"}`;
+        scopeFeedback.set(scope, message);
         if (scope === "account-functions") $("accountFunctionsFeedback").textContent = message;
         if (!dirty) $("saveState").textContent = message;
         toast(message);
@@ -3747,10 +3146,13 @@
           renderOverview();
         }
       } catch (err) {
+        if (/配置.*(更新|变化)|409/.test(err.message)) conflictedScopes.add(scope);
+        scopeFeedback.set(scope, `保存失败：${err.message}；草稿未丢失。`);
         if (scope === "account-functions") $("accountFunctionsFeedback").textContent = `未保存：${err.message}`;
         toast(`保存失败：${err.message}`, "bad");
         $("saveState").textContent = `${scopeNames[scope] || "当前页面"}保存失败：${err.message}`;
         $("opsResult").textContent = `保存失败：${err.message}`;
+        renderSaveState();
         throw err;
       } finally {
         setBusy(buttonId, false);
@@ -3775,9 +3177,17 @@
     }
 
     let adminSessionToken = "";
+    let adminSessionRequest = null;
+    async function ensureAdminSession() {
+      if (adminSessionToken) return adminSessionToken;
+      if (!adminSessionRequest) adminSessionRequest = api("/api/admin/session").then((result) => {
+        if (!result.token) throw new Error("本机管理会话不可用");
+        return adminSessionToken = result.token;
+      }).finally(() => { adminSessionRequest = null; });
+      return adminSessionRequest;
+    }
     async function sensitiveApi(path, method, body) {
-      if (!adminSessionToken) adminSessionToken = (await api("/api/admin/session")).token || "";
-      if (!adminSessionToken) throw new Error("本机管理会话不可用");
+      await ensureAdminSession();
       return api(path, {
         method,
         headers: { "content-type": "application/json", "x-hermes-qq-admin": adminSessionToken },
@@ -3788,6 +3198,7 @@
     function apiCenterChanged() {
       apiCenterDirty = true;
       dirtyScopes.add("api-center");
+      for (const key of Object.keys(apiTests)) delete apiTests[key];
       $("apiCenterState").textContent = "API 方案有未保存的修改；线上绑定尚未改变。";
       renderSaveState();
       renderApiCapabilityCards();
@@ -3875,54 +3286,120 @@
     function renderApiCapabilityCards() {
       if (!apiCenterDraft) return;
       const host = $("apiCapabilityCards"); host.replaceChildren();
+      const bindings = $("apiBindingRows"); bindings.replaceChildren();
       for (const [capability, title, kind] of [["chat", "问答", "chat"], ["task", "任务", "chat"], ["vision", "识图", "vision"], ["asr", "语音识别", "asr"], ["tts", "语音合成", "tts"], ["search", "联网搜索", "search"]]) {
         const card = document.createElement("div"); card.className = "card api-capability";
         const heading = document.createElement("strong"); heading.textContent = title;
-        const select = document.createElement("select"); select.setAttribute("aria-label", `${title}方案`);
+        const binding = document.createElement("div"); binding.className = "api-binding-row";
+        const label = document.createElement("label"); label.textContent = title;
+        const select = document.createElement("select"); select.id = `apiBinding-${capability}`; label.htmlFor = select.id; select.setAttribute("aria-label", `${title}方案`);
         if (capability === "task") { const inherit = document.createElement("option"); inherit.value = "inherit-chat"; inherit.textContent = "继承问答方案"; select.appendChild(inherit); }
         const items = kind === "search" ? apiCenterDraft.searchProfiles : apiCenterDraft.profiles.filter((item) => item.kind === kind && (capability !== "tts" || item.model !== "mimo-v2.5-tts-voiceclone"));
         for (const item of items) { const option = document.createElement("option"); option.value = item.id; option.textContent = `${item.name}${kind === "search" ? "" : ` · ${item.model || "默认模型"}`}`; select.appendChild(option); }
         select.value = capability === "search" ? apiCenterDraft.searchBinding : apiCenterDraft.bindings[capability];
-        select.addEventListener("change", () => { if (capability === "search") { apiCenterDraft.searchBinding = select.value; selectedApiSearch = select.value; renderApiSearch(); } else apiCenterDraft.bindings[capability] = select.value; apiCenterChanged(); });
-        const hint = document.createElement("div"); hint.className = "hint";
+        select.addEventListener("change", () => {
+          if (capability === "search") { apiCenterDraft.searchBinding = select.value; selectedApiSearch = select.value; renderApiSearch(); }
+          else apiCenterDraft.bindings[capability] = select.value;
+          apiCenterChanged();
+        });
+        binding.append(label, select); bindings.appendChild(binding);
+        const name = document.createElement("span"); name.className = "binding-name"; name.textContent = select.selectedOptions[0]?.textContent || "尚未绑定方案";
         const profile = apiCenterDraft.profiles.find((item) => item.id === select.value);
         const connection = apiCenterDraft.connections.find((item) => item.id === profile?.connectionId);
         const credential = connection && apiCredentialStatus[connection.id];
         const search = apiCenterDraft.searchProfiles.find((item) => item.id === select.value);
-        hint.textContent = capability === "task" && select.value === "inherit-chat" ? "使用问答连接；执行强度仍按任务复杂度决定。" : kind === "search" ? (search?.provider === "mimo-web-search" ? `MiMo 官方联网插件 · ${search.model} · 调用可能计费` : "独立网页搜索；不使用 MiMo 官方插件。") : `${connection?.provider || "请选择连接"} · ${credential === "configured" ? "凭据已配置" : credential === "missing" ? "缺少凭据" : credential === "unavailable" ? "凭据不可用" : "外部凭据"}`;
+        const hint = document.createElement("div"); hint.className = "hint";
+        hint.textContent = capability === "task" && select.value === "inherit-chat" ? "使用问答连接；执行强度按任务复杂度决定。" : kind === "search" ? (search?.provider === "mimo-web-search" ? `MiMo 官方联网插件 · ${search.model} · 调用可能计费` : "独立网页搜索") : `${connection?.provider || "请选择连接"} · ${credential === "configured" ? "凭据已配置" : credential === "missing" ? "缺少凭据" : credential === "unavailable" ? "凭据不可用" : "外部凭据未在此页验证"}`;
         const row = document.createElement("div"); row.className = "row";
+        const edit = document.createElement("button"); edit.className = "ghost"; edit.textContent = "修改绑定";
+        edit.addEventListener("click", () => { select.focus(); $("apiBindingsEditor").scrollIntoView({ behavior: "smooth", block: "start" }); });
         const test = document.createElement("button"); test.className = "secondary"; test.textContent = "测试草稿";
         test.addEventListener("click", () => testApiCapability(capability, test));
         const result = document.createElement("span"); result.className = "hint"; result.textContent = apiTests[capability] || "尚未测试";
-        row.append(test, result); card.append(heading, select, hint, row); host.appendChild(card);
+        row.append(edit, test, result); card.append(heading, name, hint, row); host.appendChild(card);
       }
     }
 
-    async function refreshApiCenter() {
-      if (apiCenterDirty) return;
+    async function refreshApiCenter({ preserveDirty = false } = {}) {
+      if (apiCenterDirty && !preserveDirty) return;
       const result = await sensitiveApi("/api/api-center", "GET");
-      apiCenterDraft = structuredClone(result.center);
+      const oldRevision = apiCenterRevision;
+      const localDraft = apiCenterDirty ? structuredClone(apiCenterDraft) : null;
+      apiCenterDraft = localDraft || structuredClone(result.center);
+      apiCenterSaved = structuredClone(result.center);
+      registryState.modelCenter = structuredClone(result.center); registryState.modelLoadedAt = Date.now();
       apiCenterRevision = result.revision;
+      apiCenterConflicted = Boolean(localDraft && (apiCenterConflicted || (oldRevision && oldRevision !== result.revision)));
       apiCredentialStatus = result.credentialStatus || {};
       apiCenterLastLoaded = Date.now();
-      $("apiCenterState").textContent = "已加载当前方案；修改后点击所属区域的保存按钮。";
+      $("apiCenterState").textContent = apiCenterConflicted
+        ? "API 方案已在其他窗口变化；你的草稿仍在。请核对后再保存，避免覆盖同一区域的新设置。"
+        : localDraft ? "已刷新线上 API 方案；本页未保存的草稿仍在。" : "已加载当前方案；修改后点击所属区域的保存按钮。";
+      renderSaveState();
       renderApiConnection(); renderApiProfile(); renderApiSearch(); renderApiCapabilityCards();
+    }
+
+    function mergeApiCenterDraft(base, local, saved) {
+      // Only unchanged submitted fields become clean. Rebase edits made while
+      // awaiting PATCH (including other regions, additions and deletions).
+      if (JSON.stringify(local) === JSON.stringify(base)) return structuredClone(saved);
+      if (Array.isArray(base) && Array.isArray(local) && Array.isArray(saved)) {
+        const keyed = (items) => items.every((item) => item && typeof item.id === "string");
+        if (keyed(base) && keyed(local) && keyed(saved)) {
+          const before = new Map(base.map((item) => [item.id, item]));
+          const remote = new Map(saved.map((item) => [item.id, item]));
+          const merged = local.map((item) => mergeApiCenterDraft(before.get(item.id), item, remote.get(item.id))).filter((item) => item !== undefined);
+          for (const item of saved) if (!before.has(item.id) && !local.some((entry) => entry.id === item.id)) merged.push(structuredClone(item));
+          return merged;
+        }
+      }
+      const object = (value) => value && typeof value === "object" && !Array.isArray(value);
+      if (object(base) && object(local) && object(saved)) {
+        const merged = {};
+        for (const key of new Set([...Object.keys(saved), ...Object.keys(local), ...Object.keys(base)])) {
+          const value = mergeApiCenterDraft(base[key], local[key], saved[key]);
+          if (value !== undefined) merged[key] = value;
+        }
+        return merged;
+      }
+      return structuredClone(local);
     }
 
     async function saveApiCenter(buttonId) {
       if (!apiCenterDraft) return toast("API 方案尚未加载", "bad");
+      if (apiCenterConflicted && !confirm("API 方案曾在其他窗口修改。草稿已保留；确认在最新线上配置基础上保存当前区域？")) return;
       setBusy(buttonId, true, "保存中...");
       try {
-        const result = await sensitiveApi("/api/api-center", "PATCH", { revision: apiCenterRevision, center: apiCenterDraft });
-        apiCenterDraft = structuredClone(result.center);
+        const draftBeforeSave = structuredClone(apiCenterDraft);
+        const scoped = structuredClone(apiCenterSaved);
+        if (buttonId === "apiConnectionSave") scoped.connections = draftBeforeSave.connections;
+        else if (buttonId === "apiProfileSave") scoped.profiles = draftBeforeSave.profiles;
+        else if (buttonId === "apiBindingsSave") { scoped.bindings = draftBeforeSave.bindings; scoped.searchBinding = draftBeforeSave.searchBinding; }
+        else if (buttonId === "apiSearchSave") scoped.searchProfiles = draftBeforeSave.searchProfiles;
+        const result = await sensitiveApi("/api/api-center", "PATCH", { revision: apiCenterRevision, center: scoped });
+        const currentDraft = apiCenterDraft;
+        apiCenterSaved = structuredClone(result.center);
+        apiCenterDraft = mergeApiCenterDraft(scoped, currentDraft, result.center);
         apiCenterRevision = result.revision;
+        const hadConflict = apiCenterConflicted;
         apiCredentialStatus = result.credentialStatus || {};
-        apiCenterDirty = false; dirtyScopes.delete("api-center"); renderSaveState();
-        $("apiCenterState").textContent = "已保存并热生效；当前生成中的回复不受影响。";
+        apiCenterDirty = JSON.stringify(apiCenterDraft) !== JSON.stringify(apiCenterSaved);
+        apiCenterConflicted = hadConflict && apiCenterDirty;
+        if (apiCenterConflicted) conflictedScopes.add("api-center"); else conflictedScopes.delete("api-center");
+        if (apiCenterDirty) dirtyScopes.add("api-center"); else dirtyScopes.delete("api-center");
+        renderSaveState();
+        $("apiCenterState").textContent = apiCenterDirty ? "已保存提交的修改；保存期间的新修改及其他 API 草稿仍未保存。" : "已保存并热生效；当前生成中的回复不受影响。";
         renderApiConnection(); renderApiProfile(); renderApiSearch(); renderApiCapabilityCards();
         toast("API 方案已保存");
-        await refreshAll({ silent: true });
-      } catch (error) { $("apiCenterState").textContent = `未保存：${error.message}`; toast(error.message, "bad"); }
+        await refreshAll({ silent: true, selfSavedScope: "api-center" });
+      } catch (error) {
+        if (/API 配置已在别处更新/.test(error.message)) {
+          await refreshApiCenter({ preserveDirty: true }).catch(() => {});
+          apiCenterConflicted = true;
+        }
+        $("apiCenterState").textContent = `未保存：${error.message}。草稿仍在；请核对最新方案后重试。`;
+        toast(error.message, "bad");
+      }
       finally { setBusy(buttonId, false); }
     }
 
@@ -4203,7 +3680,7 @@
 
     async function peerPingAccounts(buttonId = "peerPingBtn") {
       setBusy(buttonId, true, "验活中...");
-      $("opsResult").textContent = "正在让主备账号互发 Hermes 诊断私聊，用来确认发送和接收是否真实可用...";
+      $("opsResult").textContent = "正在让两个账号互发 Hermes 诊断私聊，用来确认发送和接收是否真实可用...";
       try {
         const result = await api("/api/accounts/peer-ping", { method: "POST" });
         $("opsResult").textContent = JSON.stringify(result, null, 2);
@@ -4432,6 +3909,7 @@
       };
       move($("accountStatusCard"), $("accountStatusMount"));
       const advancedConnection = document.createElement("details");
+      advancedConnection.id = "accountConnectionDetails";
       advancedConnection.className = "connection-settings";
       const connectionSummary = document.createElement("summary");
       connectionSummary.textContent = "连接设置 · 协议端、容器与端口";
@@ -4446,17 +3924,22 @@
       const failoverTitle = document.createElement("h3");
       failoverTitle.textContent = "主备接管规则";
       failoverCard.append(failoverTitle, failover);
-      $("accountFunctionsMount").appendChild(failoverCard);
-      move($("interBotCard"), $("accountFunctionsMount"));
+      const failoverRuleDetails = document.createElement("details"); failoverRuleDetails.id = "failoverRuleDetails"; failoverRuleDetails.className = "panel-details";
+      const failoverRuleSummary = document.createElement("summary"); failoverRuleSummary.textContent = "主备接管规则"; failoverRuleDetails.append(failoverRuleSummary, failoverCard);
+      $("accountFunctionsMount").appendChild(failoverRuleDetails);
+      const interBotRuleDetails = document.createElement("details"); interBotRuleDetails.id = "interBotRuleDetails"; interBotRuleDetails.className = "panel-details";
+      const interBotRuleSummary = document.createElement("summary"); interBotRuleSummary.textContent = "双账号接话规则"; interBotRuleDetails.appendChild(interBotRuleSummary);
+      move($("interBotCard"), interBotRuleDetails);
+      $("accountFunctionsMount").appendChild(interBotRuleDetails);
       moveContents("page-model", "legacyApiFields");
       moveContents("page-prompt", "qa-persona");
       moveContents("page-behavior", "qa-behavior");
       const standbyMode = $("accounts.standbys.0.behaviorMode")?.closest(".field");
       if (standbyMode) {
         const modeCard = document.createElement("div");
-        modeCard.className = "card settings-block";
+        modeCard.className = "card settings-block"; modeCard.id = "standbyBehaviorCard";
         const title = document.createElement("h3");
-        title.textContent = "备用号发言档位";
+        title.textContent = "账号 2 发言档位";
         const modeGrid = document.createElement("div");
         modeGrid.className = "form-grid";
         modeGrid.appendChild(standbyMode);
@@ -4469,6 +3952,8 @@
       move($("visionSettingsCard"), $("visionMount"));
       for (const id of ["vision.provider", "vision.model", "vision.toolsets", "vision.timeoutMs"]) move($(id)?.closest(".field"), $("legacyApiFields"));
       move($("voice-api-panel"), $("legacyApiFields"));
+      // Keep the existing handlers wired, but expose only the page-level save action.
+      for (const id of ["saveAccountsBtn", "savePromptBtn", "saveStyleProfilesBtn", "saveBehaviorBtn", "saveTimingBtn", "saveVisionBtn", "saveVoiceBtn", "saveTaskBtn", "saveAutomationBtn", "saveArchiveBtn", "saveReviewerBtn", "saveIntegrityBtn", "refreshAccountsBtn", "refreshAccountsTopBtn", "peerPingBtn"]) $(id)?.classList.add("hidden");
       const timing = document.createElement("div");
       timing.className = "card settings-block";
       const timingTitle = document.createElement("h3");
@@ -4484,6 +3969,48 @@
       timingSave.textContent = "保存活跃度与回复节奏";
       timing.appendChild(timingSave);
       $("qa-behavior").appendChild(timing);
+      timingSave.classList.add("hidden");
+      const disclose = (label, id) => {
+        const details = document.createElement("details"); details.className = "panel-details"; details.id = id;
+        const summary = document.createElement("summary"); summary.textContent = label; details.appendChild(summary);
+        return details;
+      };
+      const personaGrid = $("qa-persona").querySelector(".grid.two");
+      const promptExtras = disclose("提示词建议与风格预设", "promptAdvancedDetails");
+      move(personaGrid.children[1], promptExtras);
+      move($("styleProfileSelect")?.closest(".card"), promptExtras);
+      personaGrid.classList.remove("two");
+      $("qa-persona").appendChild(promptExtras);
+      const qaAdvanced = disclose("高级群聊行为 · 社交判断、学习与动态回复", "qaBehaviorAdvancedDetails");
+      const qaGrid = $("qa-behavior").querySelector(".grid.two");
+      for (const card of [...qaGrid.children].slice(2)) move(card, qaAdvanced);
+      for (const id of ["standbyBehaviorCard", "learningModeCard"]) move($(id), qaAdvanced);
+      move(timing, qaAdvanced);
+      $("qa-behavior").appendChild(qaAdvanced);
+      const visionCard = $("visionSettingsCard");
+      const visionAdvanced = disclose("高级识图行为", "visionBehaviorAdvancedDetails");
+      for (const id of ["vision.aiJudge.enabled", "vision.aggressiveFollowup", "vision.contextAssist", "vision.describeWhenUncertain"]) move($(id)?.closest(".switch-row"), visionAdvanced);
+      visionCard.insertBefore(visionAdvanced, visionCard.querySelector("details"));
+      const voiceGrid = $("voice-behavior-panel").querySelector(".grid.two");
+      const voiceCard = voiceGrid.children[0];
+      const voicePresets = disclose("群友可切换的预设音色", "voicePresetsDetails");
+      move($("voiceAllowedVoices")?.closest(".settings-block"), voicePresets);
+      voiceCard.appendChild(voicePresets);
+      const voiceAdvanced = disclose("音色设计与本人语音克隆", "voiceAdvancedDetails");
+      move(voiceGrid.children[1], voiceAdvanced);
+      voiceGrid.classList.remove("two");
+      $("voice-behavior-panel").appendChild(voiceAdvanced);
+      const taskGrid = $("page-tasks").querySelector(".grid.two");
+      const taskSettings = disclose("任务权限与运行参数", "taskSettingsDetails");
+      move($("taskMode.enabled")?.closest(".card"), taskSettings);
+      taskGrid.classList.remove("two");
+      $("page-tasks").appendChild(taskSettings);
+      const archiveAdvanced = disclose("存档目录与检索参数", "archiveAdvancedDetails");
+      move($("chatArchive.baseDir")?.closest(".form-grid"), archiveAdvanced);
+      $("chatArchive.enabled")?.closest(".card")?.appendChild(archiveAdvanced);
+      const archiveDanger = disclose("清理存档 · 不可撤销", "archiveDangerDetails");
+      move($("clearArchiveBtn"), archiveDanger);
+      $("chatArchive.enabled")?.closest(".card")?.appendChild(archiveDanger);
       move($("memoryIntegrityCard"), $("page-memory"));
       const quick = document.createElement("details");
       quick.className = "connection-settings";
@@ -4495,7 +4022,20 @@
       const overview = $("page-overview");
       const quickCards = overview.lastElementChild;
       if (quickCards?.classList.contains("grid")) { quick.appendChild(quickCards); overview.appendChild(quick); }
+      for (const field of document.querySelectorAll(".field")) {
+        const label = field.querySelector(":scope > label");
+        const control = field.querySelector(":scope > input, :scope > select, :scope > textarea");
+        if (label && control?.id && !label.htmlFor) label.htmlFor = control.id;
+      }
+      for (const row of document.querySelectorAll(".switch-row")) {
+        const control = row.querySelector('input[type="checkbox"]');
+        if (control && !control.hasAttribute("aria-label") && row.tagName !== "LABEL") control.setAttribute("aria-label", row.querySelector("strong")?.textContent?.trim() || "切换设置");
+      }
+      for (const label of document.querySelectorAll(".field > label")) {
+        label.textContent = label.textContent.replace(/\s+ms$/, "（毫秒）").replace(/\s+bytes$/, "（字节）");
+      }
       updateAccountTopologyHint();
+      advancedConnection.addEventListener("toggle", renderSaveState);
     }
 
     function switchTab(group, tab) {
@@ -4529,6 +4069,7 @@
       $("saveBtn").disabled = name === "api-center" || !scopeNames[currentScope()] || !cfg;
       $("saveBtn").textContent = `保存${scopeNames[currentScope()] || "当前板块"}`;
       renderSaveState();
+      renderRegistryContexts(true);
       if (name === "backup") refreshDesktopBackup().catch((error) => toast(error.message, "bad"));
       if (name === "voice") refreshVoiceSecretStatus().catch(() => {});
       if (name === "api-center" && (!apiCenterDraft || (!apiCenterDirty && Date.now() - apiCenterLastLoaded > 15000))) refreshApiCenter().catch((error) => { $("apiCenterState").textContent = `加载失败：${error.message}`; });
@@ -4590,7 +4131,13 @@
       buildAutomationDays();
       buildVoicePresets();
       for (const field of document.querySelectorAll("#page-automation input, #page-automation select, #page-automation textarea, #page-automation button, #page-voice input, #page-voice select, #page-voice textarea, #page-voice button")) field.disabled = true;
-      $("refreshBtn").addEventListener("click", () => refreshAll().catch((e) => showFatalError(e.message)));
+      $("refreshBtn").addEventListener("click", () => refreshStatusOnly().catch((e) => showFatalError(e.message)));
+      $("reloadConfigBtn").addEventListener("click", async () => {
+        try {
+          await refreshAll();
+          if (activePage === "api-center") await refreshApiCenter({ preserveDirty: true });
+        } catch (error) { showFatalError(error.message); }
+      });
       $("saveBtn").addEventListener("click", () => saveConfig("saveBtn").catch(() => {}));
       for (const id of ["saveModelBtn", "saveSearchBtn", "saveVisionBtn", "savePromptBtn", "saveArchiveBtn", "saveTaskBtn", "saveReviewerBtn", "saveIntegrityBtn", "saveTimingBtn", "saveVoiceApiBtn"]) $(id).addEventListener("click", () => saveConfig(id).catch(() => {}));
       $("saveAccountsBtn").addEventListener("click", () => saveConfig("saveAccountsBtn", { focusAccounts: true }).catch(() => {}));
@@ -4622,8 +4169,8 @@
       $("setVoiceSecretBtn").addEventListener("click", () => setVoiceCredential().catch(() => {}));
       $("deleteVoiceSecretBtn").addEventListener("click", () => deleteVoiceCredential().catch(() => {}));
       $("testVoiceApiBtn").addEventListener("click", () => testVoiceApi().catch(() => {}));
-      $("refreshAccountsBtn").addEventListener("click", () => refreshAll().catch((e) => showFatalError(e.message)));
-      $("refreshAccountsTopBtn").addEventListener("click", () => refreshAll().catch((e) => showFatalError(e.message)));
+      $("refreshAccountsBtn").addEventListener("click", () => refreshStatusOnly().catch((e) => showFatalError(e.message)));
+      $("refreshAccountsTopBtn").addEventListener("click", () => refreshStatusOnly().catch((e) => showFatalError(e.message)));
       $("autoRefreshBtn").addEventListener("click", () => {
         autoRefresh = !autoRefresh;
         $("autoRefreshBtn").textContent = `自动刷新：${autoRefresh ? "开" : "关"}`;
@@ -4633,7 +4180,7 @@
       for (const btn of document.querySelectorAll("[data-tabs] [data-tab]")) btn.addEventListener("click", () => switchTab(btn.closest("[data-tabs]").dataset.tabs, btn.dataset.tab));
       for (const btn of document.querySelectorAll("[data-jump]")) btn.addEventListener("click", () => switchPage(btn.dataset.jump));
       for (const el of document.querySelectorAll("input, textarea, select")) {
-        if (el.closest("#page-api-center")) continue;
+        if (el.closest("#page-api-center") || el.matches("[data-console-theme]")) continue;
         if (el.id === "memorySearch" || el.id === "memoryDetailSearch" || el.id === "archiveSearch" || el.id === "send.groupSelect" || el.id === "modelPreset" || el.id === "aiProfileSelect" || el.id === "styleProfileSelect" || el.id === "promptAccountSelect" || el.id === "voiceSecretInput" || el.id.startsWith("send.") || el.id.startsWith("backup") || el.id.startsWith("desktop")) continue;
         el.addEventListener("input", markDirty);
         el.addEventListener("change", markDirty);
@@ -4689,9 +4236,9 @@
       $("testAiBtn2").addEventListener("click", () => testAi("testAiBtn2").catch((e) => toast(e.message, "bad")));
       $("testSearchBtn").addEventListener("click", () => testSearch("testSearchBtn").catch((e) => toast(e.message, "bad")));
       $("testSearchBtn2").addEventListener("click", () => testSearch("testSearchBtn2").catch((e) => toast(e.message, "bad")));
-      $("overviewProbePrimaryBtn").addEventListener("click", () => probeAccount("primary", "overviewProbePrimaryBtn").catch((e) => toast(e.message, "bad")));
-      $("overviewRestartProtocolBtn").addEventListener("click", () => restartAccountProtocol("primary", "overviewRestartProtocolBtn").catch((e) => toast(e.message, "bad")));
-      $("overviewRefreshQrBtn").addEventListener("click", () => refreshAccountQr("primary", "overviewRefreshQrBtn").catch((e) => toast(e.message, "bad")));
+      $("overviewProbePrimaryBtn").addEventListener("click", () => probeAccount($("overviewProbePrimaryBtn").dataset.accountId || "primary", "overviewProbePrimaryBtn").catch((e) => toast(e.message, "bad")));
+      $("overviewRestartProtocolBtn").addEventListener("click", () => restartAccountProtocol($("overviewRestartProtocolBtn").dataset.accountId || "primary", "overviewRestartProtocolBtn").catch((e) => toast(e.message, "bad")));
+      $("overviewRefreshQrBtn").addEventListener("click", () => refreshAccountQr($("overviewRefreshQrBtn").dataset.accountId || "primary", "overviewRefreshQrBtn").catch((e) => toast(e.message, "bad")));
       $("overviewRebuildNapcatBtn").addEventListener("click", () => rebuildNapcatStable("overviewRebuildNapcatBtn").catch((e) => toast(e.message, "bad")));
       $("restartActiveProtocolBtn").addEventListener("click", () => {
         const account = activeAccountRow();
@@ -4925,8 +4472,683 @@
     window.addEventListener("error", (e) => showFatalError(`前端脚本错误：${e.message || e.error || "unknown error"}`));
     window.addEventListener("unhandledrejection", (e) => showFatalError(`异步加载错误：${e.reason?.message || e.reason || "unknown rejection"}`));
 
+    // Dynamic registry UI. Drafts contain only editable, credential-free fields and
+    // stay in memory across polling/navigation; no login material is persisted here.
+    const registryState = {
+      loaded: false, revision: null, epoch: 0, items: [], groups: [], statuses: [], selected: "", tab: "identity",
+      drafts: new Map(), contexts: { qa: "", vision: "", voice: "" },
+      error: "", busy: false, refreshing: null, wizard: null, wizards: new Map(), operations: new Map(), groupDraft: null, modelCenter: null, modelLoadedAt: 0, modelError: ""
+    };
+    const registryTabs = { identity: "身份与连接", features: "功能", sendTypes: "发送内容", scope: "会话范围", models: "模型与语音" };
+    const registryFeatures = { chat: "聊天问答", task: "正式任务", proactive: "主动参与", automation: "自动化", webSearch: "联网搜索", vision: "识图", asr: "语音识别", learning: "学习模式" };
+    const registrySendTypes = { text: "文字", image: "图片", record: "语音", video: "视频", file: "文件" };
+    const registryIdentityKeys = ["displayName", "qq", "protocol", "managed", "onebotWsUrl", "onebotPath", "protocolContainer", "napcatContainer", "webuiPort", "noVncPort", "vncPort", "snowlumaImage", "styleProfileId", "promptOverride", "behaviorMode"];
+    const registryPolicyKeys = ["displayName", "styleProfileId", "promptOverride", "features", "sendTypes", "scope", "modelBindings", "voice", "behaviorMode"];
+
+    function registryStatus(id) {
+      const rows = registryState.statuses;
+      const snapshot = (Array.isArray(rows) ? rows.find((item) => item.id === id || item.accountId === id) : rows?.[id]) || {};
+      const diagnostic = (Array.isArray(statusData?.health?.accounts) ? statusData.health.accounts.find((item) => item.id === id) : null) || {};
+      return { ...diagnostic, ...snapshot, routeState: snapshot.routeState || snapshot.status || diagnostic.routeState };
+    }
+    function registryItem(id = registryState.selected) { return registryState.items.find((item) => item.id === id); }
+    function registryGroup(id) { return registryState.groups.find((group) => group.memberIds?.includes(id)); }
+    function registryEffective(item) {
+      const group = registryGroup(item?.id);
+      return group ? { ...item, ...group.policy } : item;
+    }
+    function registryEditable(item) {
+      const result = {};
+      for (const key of [...registryIdentityKeys, "features", "sendTypes", "scope", "modelBindings", "voice"]) {
+        if (item[key] !== undefined) result[key] = structuredClone(item[key]);
+      }
+      result.features = { ...Object.fromEntries(Object.keys(registryFeatures).map((key) => [key, false])), ...result.features };
+      result.sendTypes = { text: true, image: true, record: true, video: true, file: true, ...result.sendTypes };
+      result.scope = { groups: true, private: true, groupMode: "all", groupIds: [], ...result.scope };
+      result.modelBindings = { chat: "", task: "", vision: "", asr: "", tts: "", search: "", ...result.modelBindings };
+      result.voice = { mode: "inherit", preset: "", ...result.voice };
+      return result;
+    }
+    function registryDraft(id = registryState.selected) {
+      if (!registryState.drafts.has(id)) {
+        const item = registryItem(id);
+        if (!item) return null;
+        const value = registryEditable(item);
+        registryState.drafts.set(id, { value, base: structuredClone(value), dirty: new Set(), conflict: false, revision: registryState.revision });
+      }
+      return registryState.drafts.get(id);
+    }
+    function registrySet(object, path, value) {
+      const parts = path.split(".");
+      const last = parts.pop();
+      let current = object;
+      for (const part of parts) current = current[part] ||= {};
+      current[last] = value;
+    }
+    function registryGet(object, path) { return path.split(".").reduce((value, key) => value?.[key], object); }
+    function registryButton(label, run, kind = "secondary") {
+      const button = document.createElement("button");
+      button.type = "button"; button.className = kind; button.textContent = label;
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try { await run(); } catch (error) { if (!error.registryReported) registryFeedback(error.message, true); }
+        finally { button.disabled = false; }
+      });
+      return button;
+    }
+    function registryFeedback(message, error = false) {
+      for (const node of document.querySelectorAll("[data-registry-feedback]")) {
+        node.textContent = message; node.className = error ? "alert" : "hint";
+      }
+      if (error) toast(message, "bad");
+    }
+    async function registryRequest(path, method = "POST", body = {}) {
+      const result = await api(path, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      if (result.ok === false) throw new Error(result.error || result.message || "操作未完成");
+      return result;
+    }
+    function rebaseRegistryDraft(id, draft, item, revision) {
+      if (!item || item.archived) { draft.conflict = true; draft.revision = revision; return; }
+      const latest = registryEditable(item);
+      const base = draft.base || registryEditable(registryItem(id) || item);
+      const merged = structuredClone(latest);
+      for (const path of draft.dirty) {
+        const local = registryGet(draft.value, path);
+        const remote = registryGet(latest, path);
+        if (JSON.stringify(registryGet(base, path)) !== JSON.stringify(remote) && JSON.stringify(local) !== JSON.stringify(remote)) draft.conflict = true;
+        registrySet(merged, path, structuredClone(local));
+      }
+      draft.value = merged; draft.base = latest; draft.revision = revision;
+    }
+    async function refreshAccountRegistry({ configSnapshot = null, selfSavedScope = "" } = {}) {
+      if (registryState.refreshing) return registryState.refreshing;
+      registryState.refreshing = (async () => {
+        try {
+          await Promise.all([...registryState.operations.values()].filter((operation) => ["queued", "running"].includes(operation.status)).map(async (operation) => {
+            try {
+              const result = await api(`/api/accounts/operations/${encodeURIComponent(operation.id)}`);
+              if (result.operation?.accountId === operation.accountId) registryState.operations.set(operation.accountId, result.operation);
+            } catch { /* Preserve the pending operation; never re-submit it automatically. */ }
+          }));
+          let result, config, models, readEpoch;
+          for (let attempt = 0; attempt < 4; attempt += 1) {
+            models = null;
+            readEpoch = registryState.epoch;
+            result = await api(`/api/accounts?ts=${Date.now()}`);
+            if (result.ok === false || !Array.isArray(result.items) || result.revision == null) throw new Error(result.error || "账号接口响应不完整");
+            config = configSnapshot?.revision === result.revision ? configSnapshot : cfg?.revision === result.revision ? cfg : await api(`/api/config?ts=${Date.now()}`);
+            if (config.revision !== result.revision || readEpoch !== registryState.epoch) continue;
+            if (Date.now() - registryState.modelLoadedAt > 15000 || registryState.revision !== result.revision) {
+              try { models = await sensitiveApi("/api/api-center", "GET"); }
+              catch { registryState.modelError = "API 方案未能加载；已有绑定和草稿保留，可到 API 管理重试。"; }
+            }
+            if (readEpoch === registryState.epoch) break;
+          }
+          if (config?.revision !== result?.revision || readEpoch !== registryState.epoch) throw new Error("配置持续变化，请稍后重试");
+          // Commit only matching config/registry snapshots. A successful write
+          // invalidates earlier reads, including requests from another pane.
+          for (const [id, draft] of registryState.drafts) {
+            const item = result.items.find((item) => item.id === id);
+            // Focused controls retain listeners bound to this draft object.
+            // Rebase it in place even before the first edit after a refresh.
+            if ((!item || item.archived) && !draft.dirty.size) registryState.drafts.delete(id);
+            else rebaseRegistryDraft(id, draft, item, result.revision);
+          }
+          const groupDraft = registryState.groupDraft;
+          if (groupDraft && groupDraft.revision !== result.revision) {
+            const oldGroup = registryState.groups.find((group) => group.id === groupDraft.value.id);
+            const newGroup = (result.failoverGroups || []).find((group) => group.id === groupDraft.value.id);
+            if (!groupDraft.isNew && JSON.stringify(oldGroup) !== JSON.stringify(newGroup)) groupDraft.conflict = true;
+            groupDraft.revision = result.revision;
+          }
+          const configChanged = cfg?.revision !== config.revision;
+          if (configChanged) for (const scope of dirtyScopes) if (scope !== selfSavedScope) conflictedScopes.add(scope);
+          cfg = config;
+          registryState.revision = result.revision;
+          registryState.items = result.items.filter((item) => !item.archived);
+          registryState.groups = result.failoverGroups || [];
+          registryState.statuses = result.statuses || [];
+          registryState.loaded = true; registryState.error = "";
+          if (models?.center) { registryState.modelCenter = structuredClone(models.center); registryState.modelLoadedAt = Date.now(); registryState.modelError = ""; }
+          if (!registryItem()) registryState.selected = registryState.items[0]?.id || "";
+          if (configChanged) fillConfig({ preserveDirty: true });
+          renderAutomationTargetPicker();
+        } catch (error) {
+          if (!cfg && configSnapshot) cfg = configSnapshot;
+          registryState.error = `账号管理加载失败：${error.message}。已有草稿保留，请重试。`;
+        }
+        renderRegistryLists(); renderRegistryEditor(); renderRegistryContexts(); renderRegistrySaveState();
+      })().finally(() => { registryState.refreshing = null; });
+      return registryState.refreshing;
+    }
+    function registryField(host, labelText, path, value, change, { type = "text", options, hint = "", disabled = false } = {}) {
+      const wrapper = document.createElement("div"); wrapper.className = "field";
+      const label = document.createElement("label"); label.textContent = labelText;
+      const control = document.createElement(options ? "select" : type === "textarea" ? "textarea" : "input");
+      if (!options && type !== "textarea") control.type = type;
+      control.dataset.registryField = path;
+      if (options) {
+        const choices = [...options];
+        if (value && !choices.some(([key]) => key === value)) choices.push([value, `${value}（现有值 / 方案缺失）`]);
+        for (const [key, name] of choices) { const option = document.createElement("option"); option.value = key; option.textContent = name; control.append(option); }
+      }
+      if (type === "checkbox") control.checked = value === true;
+      else control.value = Array.isArray(value) ? value.join("\n") : value ?? "";
+      control.disabled = disabled;
+      control.addEventListener(type === "checkbox" || options ? "change" : "input", () => {
+        let next = type === "checkbox" ? control.checked : type === "number" ? (control.value === "" ? null : Number(control.value)) : control.value;
+        if (path === "scope.groupIds") next = [...new Set(control.value.split(/[\s,，]+/).filter(Boolean))];
+        change(path, next);
+      });
+      // Nesting the control in its label supplies a stable accessible name even
+      // when the same account has editors in more than one page.
+      label.append(control); wrapper.append(label);
+      if (hint) { const note = document.createElement("p"); note.className = "hint"; note.textContent = hint; wrapper.append(note); }
+      host.append(wrapper); return control;
+    }
+    function registryModelOptions(key) {
+      const center = registryState.modelCenter || apiCenterSaved || {};
+      const profiles = key === "search" ? center.searchProfiles || [] : (center.profiles || []).filter((item) => item.kind === ({ task: "chat" }[key] || key) && item.model !== "mimo-v2.5-tts-voiceclone");
+      return [["", "继承全局方案"], ...(key === "task" ? [["inherit-chat", "继承本账号问答"]] : []), ...profiles.map((item) => [item.id, item.name || item.id])];
+    }
+    function registryFields(host, value, tab, change, { policy = false, disabled = false } = {}) {
+      const field = (label, path, options = {}) => registryField(host, label, path, registryGet(value, path), change, { disabled, ...options });
+      if (tab === "identity") {
+        field("机器人自称（不修改 QQ 昵称）", "displayName");
+        field("风格预设", "styleProfileId", { options: [["", "继承全局风格"], ...(cfg?.styleProfiles?.profiles || []).map((item) => [item.id, item.name || item.id])] });
+        field("账号专属提示词（留空继承）", "promptOverride", { type: "textarea" });
+        field("发言档位", "behaviorMode", { options: [["", "继承全局"], ["restrained", "克制"], ["normal", "正常"], ["lively", "活跃"]] });
+        if (!policy) {
+          field("预期 QQ（可留空，登录后识别）", "qq");
+          field("协议", "protocol", { options: [["snowluma", "SnowLuma"], ["napcat", "NapCat"]] });
+          field("由本机托管协议端", "managed", { type: "checkbox", hint: "关闭表示接入已有外部 OneBot；不会创建或管理容器。" });
+          field("正向 OneBot WebSocket（两种协议均支持）", "onebotWsUrl", { hint: "只填写不含凭据的 ws:// 或 wss:// 地址；凭据在协议端配置。" });
+          field("反向 OneBot 路径", "onebotPath");
+          for (const [path, label] of [["protocolContainer", "协议容器"], ["napcatContainer", "NapCat 容器（兼容）"], ["webuiPort", "WebUI 端口"], ["noVncPort", "noVNC 端口"], ["vncPort", "VNC 端口"], ["snowlumaImage", "SnowLuma 镜像"]]) field(label, path, { type: path.endsWith("Port") ? "number" : "text", disabled: disabled || value.managed === false });
+        }
+      } else if (tab === "features" || tab === "sendTypes") {
+        for (const [key, label] of Object.entries(tab === "features" ? registryFeatures : registrySendTypes)) field(label, `${tab}.${key}`, { type: "checkbox" });
+      } else if (tab === "scope") {
+        field("参与群聊", "scope.groups", { type: "checkbox" }); field("参与私聊", "scope.private", { type: "checkbox" });
+        field("群聊范围", "scope.groupMode", { options: [["all", "所有群"], ["allowlist", "仅指定群"]] });
+        field("允许的群号（一行一个）", "scope.groupIds", { type: "textarea", hint: "仅指定群模式使用此清单；空清单表示不参与任何群。" });
+      } else if (tab === "models") {
+        for (const [key, label] of [["chat", "问答"], ["task", "任务"], ["vision", "识图"], ["asr", "语音识别"], ["tts", "语音合成"], ["search", "联网搜索"]]) field(`${label}方案`, `modelBindings.${key}`, { options: registryModelOptions(key) });
+        field("语音输出模式", "voice.mode", { options: [["inherit", "继承全局"], ["off", "关闭"], ["mixed", "文字与语音混合"], ["force", "优先语音"]] });
+        field("预设音色", "voice.preset", { options: [["", "继承全局音色"], ...VOICE_PRESET_IDS.map((id) => [id, id])] });
+      }
+    }
+    function registryValidate(value, keys) {
+      if (keys.includes("displayName") && (!String(value.displayName || "").trim() || String(value.displayName).length > 60)) throw new Error("机器人自称须为 1–60 字");
+      if (keys.includes("qq") && value.qq && !/^\d{5,20}$/.test(value.qq)) throw new Error("QQ 须为 5–20 位数字或留空");
+      if (keys.includes("scope") && (value.scope?.groupIds || []).some((id) => !/^\d{1,20}$/.test(id))) throw new Error("群号须为 1–20 位数字");
+      if (keys.includes("onebotWsUrl") && value.onebotWsUrl) {
+        const url = new URL(value.onebotWsUrl);
+        if (!["ws:", "wss:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error("OneBot 地址须为不含密码、查询凭据的 ws:// 或 wss:// 地址");
+      }
+      for (const key of keys.filter((key) => key.endsWith("Port"))) if (value[key] != null && (!Number.isInteger(value[key]) || value[key] < 1 || value[key] > 65535)) throw new Error("端口须为 1–65535 或留空");
+    }
+    function registryTabKeys(tab) { return tab === "identity" ? registryIdentityKeys : tab === "models" ? ["modelBindings", "voice"] : [tab]; }
+    function registryPatch(draft, keys) {
+      registryValidate(draft.value, keys);
+      const patch = {};
+      for (const key of keys) if (draft.value[key] !== undefined) patch[key] = structuredClone(draft.value[key]);
+      return patch;
+    }
+    async function saveRegistryPatch(id, keys, cleanTab) {
+      const draft = registryDraft(id);
+      if (!draft || registryState.error) throw new Error(registryState.error || "请选择账号");
+      if (registryGroup(id) && keys.some((key) => registryPolicyKeys.includes(key))) throw new Error("此账号使用接管组共享策略，请在高级接管组中修改共享字段");
+      if (draft.conflict) {
+        await refreshAccountRegistry();
+        if (registryState.error) throw new Error(registryState.error);
+        if (!confirm("配置已更新。草稿仍完整保留；确认只把当前标签覆盖到最新配置？其他账号和标签不会保存。")) return;
+      }
+      try {
+        const patch = registryPatch(draft, keys);
+        const result = await registryRequest(`/api/accounts/${encodeURIComponent(id)}`, "PATCH", { expectedRevision: registryState.revision, patch });
+        registryState.revision = result.revision ?? registryState.revision;
+        // Preserve other tab drafts and apply only the saved fields locally.
+        Object.assign(registryItem(id), patch);
+        for (const path of [...draft.dirty]) if (keys.includes(path.split(".")[0]) && JSON.stringify(registryGet(draft.value, path)) === JSON.stringify(registryGet(patch, path))) draft.dirty.delete(path);
+        draft.revision = registryState.revision; draft.conflict = false;
+        await refreshAccountRegistry();
+        registryFeedback(`${cleanTab || "当前标签"}已保存；其他标签草稿保留。`);
+      } catch (error) {
+        if (error.status === 409) { draft.conflict = true; await refreshAccountRegistry(); }
+        registryFeedback(`保存失败：${error.message}。草稿完整保留。`, true);
+        error.registryReported = true;
+        throw error;
+      }
+    }
+    async function saveRegistryEditor() {
+      if (registryState.busy) return;
+      registryState.busy = true; renderRegistrySaveState();
+      try { await saveRegistryPatch(registryState.selected, registryTabKeys(registryState.tab), registryTabs[registryState.tab]); }
+      finally { registryState.busy = false; renderRegistrySaveState(); }
+    }
+    function registrySelect(id, tab = registryState.tab) {
+      registryState.selected = id; registryState.tab = tab;
+      renderRegistryLists(); renderRegistryEditor(true); renderRegistrySaveState();
+    }
+    function syncRegistryDraftControls(host, value, group = null) {
+      for (const control of host.querySelectorAll("[data-registry-field]")) {
+        const path = control.dataset.registryField;
+        if (["selected", "context"].includes(path) || registryGet(value, path) === undefined) continue;
+        const transport = registryIdentityKeys.includes(path) && !registryPolicyKeys.includes(path);
+        control.disabled = !!group && !transport;
+        if (["protocolContainer", "napcatContainer", "webuiPort", "noVncPort", "vncPort", "snowlumaImage"].includes(path) && value.managed === false) control.disabled = true;
+        if (control === document.activeElement) continue;
+        const next = registryGet(value, path);
+        if (control.tagName === "SELECT" && path.startsWith("modelBindings.")) {
+          const options = registryModelOptions(path.split(".")[1]);
+          if (next && !options.some(([id]) => id === next)) options.push([next, `${next}（现有值 / 方案缺失）`]);
+          control.replaceChildren(...options.map(([id, label]) => { const option = document.createElement("option"); option.value = id; option.textContent = label; return option; }));
+        }
+        if (control.type === "checkbox") control.checked = next === true;
+        else control.value = Array.isArray(next) ? next.join("\n") : next ?? "";
+      }
+    }
+    function renderRegistrySaveState() {
+      if (!$("dynamicAccountEditor")) return;
+      const pending = [...registryState.drafts.values()].reduce((count, draft) => count + (draft.dirty.size ? 1 : 0), 0);
+      if (pending) $("saveState").textContent = `账号草稿：${pending} 个账号未保存${dirtyScopes.size ? " · 另有全局草稿" : ""}`;
+      for (const button of document.querySelectorAll('#nav [data-page="account-functions"], #nav [data-page="account-status"]')) button.classList.toggle("has-unsaved", pending > 0);
+      if (["account-status", "account-functions"].includes(activePage)) {
+        $("saveBtn").classList.add("hidden");
+        $("pageActionState").textContent = registryState.error || "每个账号独立工作；使用编辑器中的按钮，只保存当前标签。";
+      }
+      if (registryState.contexts[activePage]) $("saveBtn").classList.add("hidden");
+      const button = $("registrySaveTab");
+      if (button) button.disabled = registryState.busy || !registryState.loaded || !!registryState.error || !!registryGroup(registryState.selected);
+    }
+    function renderRegistryLists() {
+      for (const host of document.querySelectorAll("[data-registry-list]")) {
+        const expanded = new Set([...host.querySelectorAll("details[open]")].map((node) => node.dataset.accountDetail));
+        host.replaceChildren();
+        if (!registryState.loaded || registryState.error) {
+          const warning = document.createElement("p"); warning.className = "alert"; warning.textContent = registryState.error || "正在加载账号…"; host.append(warning);
+          host.append(registryButton("重新加载", refreshAccountRegistry));
+          if (!registryState.loaded) continue;
+        }
+        if (!registryState.items.length) { const empty = document.createElement("p"); empty.className = "hint"; empty.textContent = "还没有账号。从添加账号开始；账号数量不设上限。"; host.append(empty); }
+        for (const item of registryState.items) {
+          const status = registryStatus(item.id); const group = registryGroup(item.id);
+          const operation = registryState.operations.get(item.id);
+          const card = document.createElement("article"); card.className = "account-manager-card";
+          const head = document.createElement("div"); head.className = "account-manager-head";
+          const title = document.createElement("strong"); title.textContent = item.displayName || item.id;
+          const badge = document.createElement("span"); badge.className = `pill ${item.enabled === false ? "" : status.connected ? "good" : "bad"}`;
+          badge.textContent = item.enabled === false ? "已暂停参与" : status.connected ? "OneBot 已连接" : "未连接"; head.append(title, badge);
+          const info = document.createElement("p"); info.className = "hint";
+          info.textContent = `${item.id} · QQ ${status.qq || item.qq || "待登录识别"} · ${item.protocol || "SnowLuma"} · ${item.managed === false ? "外部接入" : "本机托管"}${item.protocolEnabled === false ? " · 协议配置已停用" : ""}${group ? ` · 接管组：${group.name}` : " · 独立账号"}${registryState.drafts.get(item.id)?.dirty.size ? " · 有草稿" : ""}`;
+          const health = document.createElement("p"); health.className = "hint";
+          health.textContent = status.statusReason || status.statusText || (status.connected ? "连接不等于收发验证；可执行只读检测。" : "等待连接或登录；检测不会发送 QQ 消息。");
+          if (operation) health.textContent += ` · 协议操作：${({ queued: "排队中", running: "执行中", completed: "已完成", failed: "失败" })[operation.status] || operation.status}${operation.error ? `（${operation.error}）` : ""}`;
+          const actions = document.createElement("div"); actions.className = "row account-actions";
+          actions.append(registryButton(item.id === registryState.selected ? "正在编辑" : "编辑账号", () => { registrySelect(item.id); switchPage("account-functions"); }),
+            registryButton(item.enabled === false ? "恢复参与" : "暂停参与", () => registryAction(item, item.enabled === false ? "resume" : "pause")),
+            registryButton("检测（不发消息）", () => registryAction(item, "probe")));
+          const webui = registrySafeLink(status.webui?.url || status.webuiUrl);
+          if (webui) { const link = document.createElement("a"); link.className = "pill"; link.href = webui; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = "打开登录 WebUI"; actions.append(link); }
+          const details = document.createElement("details"); details.className = "panel-details";
+          details.dataset.accountDetail = item.id; details.open = expanded.has(item.id);
+          const summary = document.createElement("summary"); summary.textContent = "维护与移除"; details.append(summary);
+          const note = document.createElement("p"); note.className = "hint"; note.textContent = "暂停只停止 bot 参与，不退出 QQ；停止协议中断连接；移除归档配置，不删除登录数据。"; details.append(note);
+          const maintenance = document.createElement("div"); maintenance.className = "row account-actions";
+          if (item.managed !== false) maintenance.append(registryButton("部署 / 启动协议", () => openRegistryWizard(item.id, 2)), registryButton("重启协议", () => registryAction(item, "protocol/restart")), registryButton("停止协议", () => registryAction(item, "protocol/stop"), "danger"), registryButton("重置登录", () => registryAction(item, "login/reset"), "danger"));
+          maintenance.append(registryButton("移除账号", () => registryAction(item, "remove"), "danger")); details.append(maintenance);
+          const evidence = document.createElement("div"); evidence.className = "account-health";
+          for (const [label, key] of [["QQ 身份", "identity"], ["OneBot", "onebot"], ["API", "api"], ["群聊发送", "groupSend"], ["群聊接收", "groupReceive"], ["私聊发送", "privateSend"], ["私聊接收", "privateReceive"]]) {
+            const capability = status.capabilities?.[key] || status.diagnosis?.capabilities?.[key];
+            const detail = document.createElement("div"); const labelNode = document.createElement("span"); labelNode.className = "hint"; labelNode.textContent = label;
+            const result = document.createElement("span"); result.textContent = capability?.status === "ok" ? "已验证" : capability?.reason || "未验证"; detail.append(labelNode, result); evidence.append(detail);
+          }
+          details.append(evidence);
+          const last = document.createElement("p"); last.className = "hint"; last.textContent = `最近消息：${fmtAgo(status.lastMessageAt)} · 最近帧：${fmtAgo(status.lastFrameAt)} · 路由：${status.routeState || "未知"}`; details.append(last);
+          if (status.needsLogin && item.protocol === "napcat" && status.qrcode?.exists) { const qr = document.createElement("img"); qr.className = "qr"; qr.alt = `${item.displayName || item.id} 登录二维码`; qr.src = `/qrcode/${encodeURIComponent(item.id)}.png?ts=${Date.now()}`; details.append(qr); }
+          card.append(head, info, health, actions, details); host.append(card);
+        }
+      }
+    }
+    function registrySafeLink(value) {
+      try { const url = new URL(value); return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password ? url.href : ""; } catch { return ""; }
+    }
+    async function registryAction(item, action) {
+      if (registryState.error) throw new Error(registryState.error);
+      const confirmations = {
+        "protocol/stop": "停止协议会中断此账号连接，但保留配置和登录数据。确认？",
+        "protocol/restart": "重启协议会短暂中断此账号连接。确认？",
+        "login/reset": "重置此账号登录状态，需要重新登录。确认？",
+        remove: "移除将归档此账号配置并停止参与，不删除登录数据。请先处理接管组成员关系。确认？"
+      };
+      if (confirmations[action] && !confirm(confirmations[action])) return;
+      const result = await registryRequest(`/api/accounts/${encodeURIComponent(item.id)}${action === "remove" ? "" : `/${action}`}`, action === "remove" ? "DELETE" : "POST", { expectedRevision: registryState.revision });
+      if (result.operationId) registryState.operations.set(item.id, result.operation || { id: result.operationId, accountId: item.id, status: "queued" });
+      if (action === "remove") registryState.drafts.delete(item.id);
+      await refreshAccountRegistry(); registryFeedback(result.operationId ? "协议操作已提交；请在账号卡片查看进度，不会自动重复提交。" : "操作已完成，状态已刷新。");
+    }
+    function renderRegistryEditor(force = false) {
+      const host = $("dynamicAccountEditor"); if (!host) return;
+      // Polling must never replace any focused control, including save/tab buttons.
+      if (!force && registryItem() && host.querySelector('[data-registry-field="selected"]')?.value === registryState.selected && host.contains(document.activeElement)) {
+        const draft = registryDraft(); const group = registryGroup(registryState.selected);
+        if (draft) syncRegistryDraftControls(host, group ? registryEditable(registryEffective(registryItem())) : draft.value, group);
+        return;
+      }
+      host.replaceChildren();
+      const item = registryItem(); if (!item) { host.textContent = "选择一个账号开始编辑，或添加账号。"; return; }
+      const draft = registryDraft(); const group = registryGroup(item.id);
+      const picker = document.createElement("div"); picker.className = "form-grid";
+      registryField(picker, "正在编辑的账号", "selected", item.id, (_path, id) => registrySelect(id), { options: registryState.items.map((row) => [row.id, `${row.displayName || row.id} · ${row.id}`]) }); host.append(picker);
+      const tabs = document.createElement("div"); tabs.className = "subnav"; tabs.setAttribute("role", "tablist"); tabs.setAttribute("aria-label", "账号设置标签");
+      for (const [key, label] of Object.entries(registryTabs)) {
+        const button = registryButton(label, () => registrySelect(item.id, key));
+        button.classList.toggle("active", key === registryState.tab); button.setAttribute("role", "tab"); button.setAttribute("aria-selected", String(key === registryState.tab));
+        button.addEventListener("keydown", (event) => { if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return; event.preventDefault(); const keys = Object.keys(registryTabs); const next = keys[(keys.indexOf(key) + (event.key === "ArrowRight" ? 1 : keys.length - 1)) % keys.length]; registrySelect(item.id, next); host.querySelector('[role="tab"][aria-selected="true"]')?.focus(); });
+        tabs.append(button);
+      }
+      host.append(tabs);
+      if (group) { const note = document.createElement("p"); note.className = "warning"; note.textContent = `共享身份与功能由接管组「${group.name}」管理；QQ 和连接仍属于此账号。请在下方接管组编辑共享策略。`; host.append(note); }
+      const fields = document.createElement("div"); fields.className = "form-grid";
+      registryFields(fields, group ? registryEditable(registryEffective(item)) : draft.value, registryState.tab, (path, value) => {
+        registrySet(draft.value, path, value); draft.dirty.add(path); renderRegistrySaveState();
+        if (path === "managed") renderRegistryEditor(true);
+      }, { disabled: !!group });
+      host.append(fields);
+      const note = document.createElement("p"); note.className = draft.conflict ? "warning" : "hint"; note.dataset.registryFeedback = ""; note.setAttribute("role", "status");
+      note.textContent = draft.conflict ? "配置修订已变化。草稿保留；保存前将刷新并请求确认。" : registryState.tab === "models" && registryState.modelError ? registryState.modelError : "只保存当前标签，不保存其他账号或其他标签。模型只引用 API 管理中的方案，不包含密钥。"; host.append(note);
+      const save = registryButton(`保存${registryTabs[registryState.tab]}`, saveRegistryEditor, ""); save.id = "registrySaveTab"; host.append(save);
+      if (group && registryState.tab === "identity") {
+        const transportKeys = registryIdentityKeys.filter((key) => !registryPolicyKeys.includes(key));
+        for (const control of fields.querySelectorAll("[data-registry-field]")) if (transportKeys.includes(control.dataset.registryField)) control.disabled = false;
+        save.textContent = "保存此账号连接"; save.disabled = false;
+        const transportSave = registryButton("保存此账号连接", () => saveRegistryPatch(item.id, transportKeys, "此账号连接"), "");
+        transportSave.disabled = !!registryState.error; save.replaceWith(transportSave);
+      }
+      renderRegistrySaveState();
+    }
+    function renderRegistryContexts(force = false) {
+      for (const page of ["qa", "vision", "voice"]) {
+        const host = document.querySelector(`[data-registry-context="${page}"]`); if (!host) continue;
+        if (!force && registryItem(registryState.contexts[page]) && host.contains(document.activeElement)) {
+          const draft = registryDraft(registryState.contexts[page]); const group = registryGroup(registryState.contexts[page]);
+          if (draft) syncRegistryDraftControls(host, group ? registryEditable(registryEffective(registryItem(registryState.contexts[page]))) : draft.value, group);
+          continue;
+        }
+        host.replaceChildren();
+        const selected = registryState.contexts[page];
+        const picker = document.createElement("div"); picker.className = "form-grid";
+        registryField(picker, "设置作用域", "context", selected, (_path, id) => {
+          registryState.contexts[page] = id; renderRegistryContexts(true); renderSaveState();
+        }, { options: [["", "全局默认（仅影响继承账号）"], ...registryState.items.map((item) => [item.id, `${item.displayName || item.id} · ${item.id}`])] }); host.append(picker);
+        const globalPanel = $(`page-${page}`).querySelector(".registry-global"); globalPanel.hidden = !!selected;
+        // The old prompt picker remains available only for the global prompt.
+        if (page === "qa" && !selected) {
+          $("promptAccountPicker").classList.add("hidden");
+          if (selectedPromptAccountId !== "default") { selectedPromptAccountId = "default"; renderPromptEditor(); }
+        }
+        if (!selected) {
+          const note = document.createElement("p"); note.className = "hint"; note.textContent = "以下是全局默认；选择账号可编辑其独立功能、方案和身份。暂停账号请到账号状态操作。"; host.append(note); continue;
+        }
+        const item = registryItem(selected); const draft = registryDraft(selected);
+        if (!item || !draft) { host.append(document.createTextNode("账号已被移除；草稿仍保留，请重新选择账号。")); continue; }
+        const group = registryGroup(selected); const value = group ? registryEditable(registryEffective(item)) : draft.value;
+        const note = document.createElement("p"); note.className = group || draft.conflict ? "warning" : "hint"; note.dataset.registryFeedback = ""; note.setAttribute("role", "status");
+        note.textContent = group ? `此账号继承接管组「${group.name}」的共享策略，请到账号功能的高级接管组中修改。` : draft.conflict ? "修订冲突：草稿已保留，保存前需核对。" : "仅保存此账号当前页字段，不修改全局配置。"; host.append(note);
+        const fields = document.createElement("div"); fields.className = "form-grid";
+        const change = (path, next) => { registrySet(draft.value, path, next); draft.dirty.add(path); renderRegistrySaveState(); };
+        const field = (label, path, options = {}) => registryField(fields, label, path, registryGet(value, path), change, { disabled: !!group, ...options });
+        if (page === "qa") {
+          field("机器人自称", "displayName");
+          field("账号提示词（留空继承全局 / 风格）", "promptOverride", { type: "textarea" });
+          field("风格预设", "styleProfileId", { options: [["", "继承全局风格"], ...(cfg?.styleProfiles?.profiles || []).map((profile) => [profile.id, profile.name || profile.id])] });
+          for (const key of ["chat", "proactive", "webSearch", "learning"]) field(registryFeatures[key], `features.${key}`, { type: "checkbox" });
+          for (const key of ["chat", "search"]) field(`${key === "chat" ? "问答" : "搜索"}方案`, `modelBindings.${key}`, { options: registryModelOptions(key) });
+        } else if (page === "vision") {
+          field("启用此账号识图", "features.vision", { type: "checkbox" });
+          field("识图方案", "modelBindings.vision", { options: registryModelOptions("vision") });
+        } else {
+          field("启用此账号语音识别", "features.asr", { type: "checkbox" });
+          field("允许发送语音", "sendTypes.record", { type: "checkbox" });
+          for (const key of ["asr", "tts"]) field(`${key === "asr" ? "语音识别" : "语音合成"}方案`, `modelBindings.${key}`, { options: registryModelOptions(key) });
+          field("语音输出模式", "voice.mode", { options: [["inherit", "继承全局"], ["off", "关闭"], ["mixed", "文字与语音混合"], ["force", "优先语音"]] });
+          field("预设音色", "voice.preset", { options: [["", "继承全局音色"], ...VOICE_PRESET_IDS.map((id) => [id, id])] });
+        }
+        host.append(fields);
+        const save = registryButton("保存此账号当前页", () => saveRegistryContext(page), ""); save.disabled = !!group || !!registryState.error; host.append(save);
+        host.append(registryButton("打开完整账号编辑器", () => { registrySelect(selected, page === "qa" ? "identity" : "models"); switchPage("account-functions"); }));
+      }
+    }
+    async function saveRegistryContext(page) {
+      const id = registryState.contexts[page]; const draft = registryDraft(id); if (!draft) throw new Error("请选择账号");
+      // Context pages may touch a subset of a nested tab. Send only those leaves,
+      // not unsaved values from the full editor's other controls.
+      const paths = page === "qa" ? ["displayName", "styleProfileId", "promptOverride", "features.chat", "features.proactive", "features.webSearch", "features.learning", "modelBindings.chat", "modelBindings.search"]
+        : page === "vision" ? ["features.vision", "modelBindings.vision"]
+        : ["features.asr", "sendTypes.record", "modelBindings.asr", "modelBindings.tts", "voice.mode", "voice.preset"];
+      if (registryGroup(id)) throw new Error("请在接管组中修改共享策略");
+      if (registryState.error) throw new Error(registryState.error);
+      if (draft.conflict) {
+        await refreshAccountRegistry();
+        if (!confirm("修订已变化。确认在最新配置上仅保存此账号当前页字段？草稿不会丢失。")) return;
+      }
+      const patch = {}; const saved = registryItem(id);
+      // Backends merge account patches, but starting nested maps from the latest
+      // saved account also protects siblings on replace-style implementations.
+      for (const path of paths) {
+        const root = path.split(".")[0];
+        if (path.includes(".") && !patch[root]) patch[root] = structuredClone(saved[root] || {});
+        registrySet(patch, path, structuredClone(registryGet(draft.value, path)));
+      }
+      registryValidate(patch, Object.keys(patch));
+      try {
+        const result = await registryRequest(`/api/accounts/${encodeURIComponent(id)}`, "PATCH", { expectedRevision: registryState.revision, patch });
+        for (const path of paths) if (JSON.stringify(registryGet(draft.value, path)) === JSON.stringify(registryGet(patch, path))) draft.dirty.delete(path);
+        Object.assign(saved, patch); draft.revision = result.revision ?? registryState.revision; draft.conflict = false;
+        registryState.revision = draft.revision;
+        await refreshAccountRegistry(); registryFeedback("此账号当前页已保存；其他草稿保留。");
+      } catch (error) {
+        if (error.status === 409) { draft.conflict = true; await refreshAccountRegistry(); }
+        registryFeedback(`保存失败：${error.message}。草稿保留。`, true); error.registryReported = true; throw error;
+      }
+    }
+    function openRegistryWizard(id = "", step = 1) {
+      if (registryState.error || !registryState.loaded) throw new Error(registryState.error || "账号配置尚未加载");
+      if (id && registryState.wizards.has(id)) registryState.wizard = registryState.wizards.get(id);
+      if (!registryState.wizard || (id && id !== registryState.wizard.id) || registryState.wizard.complete) {
+        registryState.wizard = { step, id, value: { displayName: "新机器人", qq: "", protocol: "snowluma", managed: true, onebotWsUrl: "", onebotPath: "" }, operationId: "", verified: false, busy: false, error: "", complete: false };
+      }
+      if (registryState.wizard.id) registryState.wizards.set(registryState.wizard.id, registryState.wizard);
+      renderRegistryWizard(); if (!$("registryWizard").open) $("registryWizard").showModal();
+    }
+    function renderRegistryWizard() {
+      const host = $("registryWizard"); const wizard = registryState.wizard; if (!wizard) return;
+      host.replaceChildren();
+      const heading = document.createElement("h3"); heading.textContent = wizard.complete ? "账号已启用" : "添加账号"; host.append(heading);
+      const steps = document.createElement("div"); steps.className = "registry-steps";
+      for (const [index, title] of ["创建配置", "部署协议", "登录与验证", "启用参与"].entries()) { const item = document.createElement("span"); item.className = `pill ${wizard.step === index + 1 ? "active" : ""}`; item.textContent = `${index + 1} · ${title}`; item.setAttribute("aria-current", wizard.step === index + 1 ? "step" : "false"); steps.append(item); }
+      host.append(steps);
+      const note = document.createElement("p"); note.className = wizard.error ? "alert" : "hint"; note.setAttribute("role", "status"); note.textContent = wizard.error || "创建不会部署，也不会自动启用。只有验证登录后才允许参与；本流程不发送测试消息。"; host.append(note);
+      const fields = document.createElement("div"); fields.className = "form-grid"; host.append(fields);
+      const actions = document.createElement("div"); actions.className = "row"; host.append(actions);
+      const run = (label, callback) => {
+        const button = registryButton(label, async () => {
+          if (wizard.busy) return;
+          wizard.busy = true; wizard.error = "";
+          try { await callback(); }
+          catch (error) { wizard.error = `${error.message}。已完成的步骤保留，可重试。`; }
+          finally { wizard.busy = false; renderRegistryWizard(); }
+        }, ""); button.disabled = wizard.busy; actions.append(button); return button;
+      };
+      if (wizard.step === 1) {
+        const change = (path, value) => registrySet(wizard.value, path, value);
+        for (const [label, path, options] of [["机器人自称", "displayName", {}], ["预期 QQ（可留空）", "qq", {}], ["协议", "protocol", { options: [["snowluma", "SnowLuma"], ["napcat", "NapCat"]] }], ["接入方式", "managed", { options: [["true", "本机托管（自动分配端口 / 容器）"], ["false", "外部已有 OneBot"]] }], ["外部正向 WebSocket（可选）", "onebotWsUrl", {}], ["反向 OneBot 路径（可选）", "onebotPath", {}]]) registryField(fields, label, path, path === "managed" ? String(wizard.value.managed) : wizard.value[path], (key, value) => change(key, key === "managed" ? value === "true" : value), { ...options, disabled: wizard.busy });
+        run("创建配置并继续", async () => {
+          registryValidate(wizard.value, registryIdentityKeys);
+          if (wizard.value.managed === false && !wizard.value.onebotWsUrl) throw new Error("外部账号须填写已有协议端的正向 OneBot WS 地址");
+          const result = await registryRequest("/api/accounts", "POST", { expectedRevision: registryState.revision, account: { ...wizard.value, enabled: false, protocolEnabled: true } });
+          wizard.id = result.account?.id || result.item?.id || result.accountId || result.id || "";
+          if (!wizard.id) throw new Error("创建响应缺少账号 ID；请刷新账号列表，不要重复创建");
+          registryState.wizards.set(wizard.id, wizard);
+          wizard.step = 2; await refreshAccountRegistry(); registrySelect(wizard.id);
+        });
+      } else if (wizard.step === 2) {
+        const item = registryItem(wizard.id); const text = document.createElement("p"); text.className = "hint";
+        text.textContent = item?.managed === false ? "外部协议由你自行运行。本步骤不会部署、停止或重启外部服务。" : wizard.operationId ? `部署操作：${wizard.operationId}。可关闭窗口稍后继续查询，不会重复部署。` : "服务器将为本账号创建独立容器、端口和数据卷；不会影响其他账号。"; fields.append(text);
+        if (item?.managed === false) run("外部协议已准备，继续", async () => { wizard.step = 3; });
+        else if (!wizard.operationId) run("部署 / 启动此账号", async () => {
+          const result = await registryRequest(`/api/accounts/${encodeURIComponent(wizard.id)}/provision`, "POST", { expectedRevision: registryState.revision });
+          if (!result.operationId) throw new Error("部署响应缺少操作 ID，请刷新状态后确认");
+          wizard.operationId = result.operationId;
+          await registryPollProvision(wizard);
+        });
+        else run("查询部署进度", () => registryPollProvision(wizard));
+      } else if (wizard.step === 3) {
+        const status = registryStatus(wizard.id); const item = registryItem(wizard.id);
+        const text = document.createElement("p"); text.className = "hint"; text.textContent = `账号 ${item?.displayName || wizard.id} · QQ ${status.qq || item?.qq || "待识别"}。在协议 WebUI 登录后检测；不会发送 QQ 消息。`; fields.append(text);
+        for (const [url, label] of [[status.webui?.url || status.webuiUrl, "打开登录 WebUI"], [status.noVnc?.url, "打开 QQ 桌面"]]) {
+          const safe = registrySafeLink(url); if (!safe) continue;
+          const link = document.createElement("a"); link.href = safe; link.target = "_blank"; link.rel = "noreferrer"; link.className = "pill"; link.textContent = label; fields.append(link);
+        }
+        if (item?.protocol === "napcat" && status.qrcode?.exists && !wizard.verified) { const qr = document.createElement("img"); qr.className = "qr"; qr.alt = "此账号登录二维码"; qr.src = `/qrcode/${encodeURIComponent(wizard.id)}.png?ts=${Date.now()}`; fields.append(qr); }
+        run("检测登录并继续（不发消息）", async () => {
+          const result = await registryRequest(`/api/accounts/${encodeURIComponent(wizard.id)}/probe`, "POST", { expectedRevision: registryState.revision });
+          await refreshAccountRegistry();
+          const current = result.account || registryStatus(wizard.id);
+          const qq = String(result.probe?.loginInfo?.user_id || result.probe?.loginInfo?.data?.user_id || current.actualQq || current.qq || "");
+          const identityOk = current.capabilities?.identity?.status === "ok" || !!result.probe?.loginInfo;
+          if (!current.connected || !identityOk || !qq || current.needsLogin || current.wrongAccountLoggedIn || (item?.qq && String(item.qq) !== qq)) throw new Error("尚未确认已登录且 QQ 身份匹配，请完成登录后重试");
+          wizard.verified = true; wizard.step = 4;
+        });
+      } else {
+        const text = document.createElement("p"); text.className = "success"; text.textContent = wizard.complete ? "此账号已恢复参与；可在账号功能中独立配置功能、会话范围和模型。" : "登录验证通过。启用后账号按自身配置独立工作，不自动加入任何接管组。"; fields.append(text);
+        const current = registryItem(wizard.id);
+        if (current) {
+          const defaults = document.createElement("p"); defaults.className = "hint";
+          defaults.textContent = `当前功能：${Object.entries(registryFeatures).filter(([key]) => current.features?.[key]).map(([, label]) => label).join("、") || "无"}；可发送：${Object.entries(registrySendTypes).filter(([key]) => current.sendTypes?.[key]).map(([, label]) => label).join("、") || "无"}；群聊：${current.scope?.groups ? current.scope.groupMode === "allowlist" ? "仅指定群" : "所有群" : "关闭"}；私聊：${current.scope?.private ? "开启" : "关闭"}。空模型绑定继承全局。`;
+          fields.append(defaults);
+        }
+        if (!wizard.complete) run("启用此账号参与", async () => {
+          if (!wizard.verified) throw new Error("请先验证登录");
+          await registryRequest(`/api/accounts/${encodeURIComponent(wizard.id)}/resume`, "POST", { expectedRevision: registryState.revision });
+          wizard.complete = true; await refreshAccountRegistry(); registrySelect(wizard.id);
+        });
+      }
+      const close = registryButton(wizard.complete ? "完成" : "暂时关闭（保留进度）", () => host.close()); actions.append(close);
+      if (wizard.id && !wizard.complete && !wizard.busy) actions.append(registryButton("稍后配置功能", () => { host.close(); registrySelect(wizard.id, "features"); switchPage("account-functions"); }));
+      if (wizard.id && !wizard.busy) actions.append(registryButton("再添加一个账号", () => { registryState.wizard = null; openRegistryWizard(); }));
+    }
+    async function registryPollProvision(wizard) {
+      const result = await api(`/api/accounts/operations/${encodeURIComponent(wizard.operationId)}`);
+      const operation = result.operation;
+      if (!operation) throw new Error("找不到部署操作");
+      if (operation.accountId !== wizard.id) throw new Error("部署操作与当前账号不匹配");
+      if (["failed", "error", "cancelled"].includes(operation.status)) { wizard.operationId = ""; throw new Error(operation.error || "部署失败"); }
+      if (["completed", "complete", "succeeded", "success", "done"].includes(operation.status)) { wizard.step = 3; await refreshAccountRegistry(); }
+      else wizard.error = `部署进行中：${operation.stage || operation.status}。稍后点击查询进度，无需重复部署。`;
+    }
+    function registryPolicyFrom(item) {
+      const editable = registryEditable(item || {}); const policy = {};
+      for (const key of registryPolicyKeys) if (editable[key] !== undefined) policy[key] = structuredClone(editable[key]);
+      return policy;
+    }
+    function registryNewGroup() {
+      const item = registryItem() || registryState.items[0];
+      if (!item) throw new Error("请先添加账号");
+      registryState.groupDraft = { revision: registryState.revision, conflict: false, isNew: true, tab: "identity", value: {
+        id: `group_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`, name: "新接管组", memberIds: registryGroup(item.id) ? [] : [item.id], policyAccountId: registryGroup(item.id) ? "" : item.id,
+        policy: registryPolicyFrom(item), settings: { enabled: true, primaryRecoveryFirst: true, switchAfterMs: 15000, minSwitchIntervalMs: 300000, messageStaleMs: 120000, standbyFreshMs: 120000, switchBackWhenPrimaryHealthy: true, announceTakeover: true, autoAdoptUnknownStandby: true, primaryRecoveryRequiresNewMessage: true, announceInGroups: false, groupNoticeCooldownMs: 300000, groupNoticeActiveWindowMs: 21600000, groupNoticeMaxGroups: 8 }
+      } };
+      renderRegistryGroups();
+    }
+    function renderRegistryGroups() {
+      const host = $("registryGroupHost"); if (!host) return; host.replaceChildren();
+      const note = document.createElement("p"); note.className = "hint"; note.textContent = "默认所有账号独立。只有同组成员按顺序接管同一个 bot，组内共享身份、功能与自我记忆；QQ、连接、登录数据不共享。一个账号只能属于一个组。"; host.append(note);
+      const toolbar = document.createElement("div"); toolbar.className = "row"; toolbar.append(registryButton("新建接管组", registryNewGroup));
+      for (const group of registryState.groups) toolbar.append(registryButton(group.name || group.id, () => { registryState.groupDraft = { revision: registryState.revision, conflict: false, isNew: false, tab: "identity", value: structuredClone(group) }; renderRegistryGroups(); })); host.append(toolbar);
+      const draft = registryState.groupDraft; if (!draft) return; const value = draft.value;
+      const fields = document.createElement("div"); fields.className = "form-grid";
+      registryField(fields, "接管组名称", "name", value.name, (_path, name) => { value.name = name; }); host.append(fields);
+      const membersTitle = document.createElement("h4"); membersTitle.textContent = "成员顺序（第一个为优先账号）"; host.append(membersTitle);
+      for (const item of registryState.items) {
+        const row = document.createElement("label"); row.className = "registry-member";
+        const checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.checked = value.memberIds.includes(item.id);
+        const other = registryState.groups.find((group) => group.id !== value.id && group.memberIds.includes(item.id)); checkbox.disabled = !!other;
+        checkbox.addEventListener("change", () => { value.memberIds = checkbox.checked ? [...value.memberIds, item.id] : value.memberIds.filter((id) => id !== item.id); if (!value.memberIds.includes(value.policyAccountId)) value.policyAccountId = value.memberIds[0] || ""; renderRegistryGroups(); });
+        row.append(checkbox, document.createTextNode(`${item.displayName || item.id}${other ? `（已属于 ${other.name}）` : ""}`)); host.append(row);
+      }
+      value.memberIds.forEach((id, index) => {
+        const row = document.createElement("div"); row.className = "row";
+        const name = document.createElement("span"); name.textContent = `${index + 1}. ${registryItem(id)?.displayName || id}`; row.append(name);
+        const move = (offset) => { const next = index + offset; [value.memberIds[index], value.memberIds[next]] = [value.memberIds[next], value.memberIds[index]]; renderRegistryGroups(); };
+        const up = registryButton("上移", () => move(-1)); up.disabled = index === 0;
+        const down = registryButton("下移", () => move(1)); down.disabled = index === value.memberIds.length - 1; row.append(up, down); host.append(row);
+      });
+      const policyPicker = document.createElement("div"); policyPicker.className = "form-grid";
+      registryField(policyPicker, "策略账号（共享身份来源）", "policyAccountId", value.policyAccountId, (_path, id) => { value.policyAccountId = id; }, { options: value.memberIds.map((id) => [id, registryItem(id)?.displayName || id]) }); host.append(policyPicker);
+      host.append(registryButton("从策略账号复制身份与功能", () => { if (confirm("用策略账号的配置替换当前组共享策略草稿？")) { value.policy = registryPolicyFrom(registryItem(value.policyAccountId)); renderRegistryGroups(); } }));
+      const tabs = document.createElement("div"); tabs.className = "subnav";
+      for (const [key, title] of Object.entries(registryTabs)) { const button = registryButton(title, () => { draft.tab = key; renderRegistryGroups(); }); button.classList.toggle("active", draft.tab === key); tabs.append(button); } host.append(tabs);
+      const policyFields = document.createElement("div"); policyFields.className = "form-grid";
+      registryFields(policyFields, value.policy, draft.tab, (path, next) => registrySet(value.policy, path, next), { policy: true }); host.append(policyFields);
+      const settings = document.createElement("details"); settings.className = "panel-details"; const summary = document.createElement("summary"); summary.textContent = "接管时机与保护"; settings.append(summary);
+      const settingsFields = document.createElement("div"); settingsFields.className = "form-grid";
+      for (const [key, title, type] of [["enabled", "自动接管", "checkbox"], ["switchBackWhenPrimaryHealthy", "优先账号恢复后切回", "checkbox"], ["switchAfterMs", "故障等待（毫秒）", "number"], ["minSwitchIntervalMs", "最小切换间隔（毫秒）", "number"], ["standbyFreshMs", "候选账号新鲜度（毫秒）", "number"]]) registryField(settingsFields, title, key, value.settings?.[key], (_path, next) => { (value.settings ||= {})[key] = next; }, { type }); settings.append(settingsFields); host.append(settings);
+      const state = document.createElement("p"); state.className = draft.conflict ? "warning" : "hint"; state.dataset.registryFeedback = ""; state.setAttribute("role", "status");
+      state.textContent = draft.conflict ? "接管组修订已变化；草稿保留，保存前需确认。" : value.legacySelfMemory ? "迁移的原接管组继续使用原共享 botSelf 记忆；不会重建或删除。" : "新组使用独立 botSelfByGroup 记忆，不覆盖原共享记忆。"; host.append(state);
+      const actions = document.createElement("div"); actions.className = "row";
+      actions.append(registryButton("保存此接管组", saveRegistryGroup, ""), registryButton("关闭编辑（放弃组草稿）", () => { if (confirm("放弃接管组未保存修改？")) { registryState.groupDraft = null; renderRegistryGroups(); } }));
+      if (!draft.isNew) actions.append(registryButton("解散接管组", async () => {
+        if (!confirm("解散后成员恢复独立策略；共享历史记忆不会删除。确认？")) return;
+        await registryRequest(`/api/account-groups/${encodeURIComponent(value.id)}`, "DELETE", { expectedRevision: registryState.revision }); registryState.groupDraft = null; await refreshAccountRegistry(); renderRegistryGroups();
+      }, "danger")); host.append(actions);
+    }
+    async function saveRegistryGroup() {
+      const draft = registryState.groupDraft; if (!draft || registryState.error) throw new Error(registryState.error || "请选择接管组");
+      const value = draft.value;
+      if (!value.name?.trim() || value.name.length > 60) throw new Error("组名称须为 1–60 字");
+      if (value.memberIds.length < 2 || !value.memberIds.includes(value.policyAccountId)) throw new Error("接管组至少需要两个成员，策略账号必须在组内");
+      registryValidate(value.policy, registryPolicyKeys);
+      for (const key of ["switchAfterMs", "minSwitchIntervalMs", "standbyFreshMs"]) if (!Number.isSafeInteger(value.settings?.[key]) || value.settings[key] < 1000) throw new Error("接管时间须为至少 1000 毫秒的整数");
+      if (draft.conflict) { await refreshAccountRegistry(); if (!confirm("配置已变化，确认在最新修订上保存当前组？组草稿仍保留。")) return; }
+      try {
+        await registryRequest(draft.isNew ? "/api/account-groups" : `/api/account-groups/${encodeURIComponent(value.id)}`, draft.isNew ? "POST" : "PATCH", { expectedRevision: registryState.revision, group: value });
+        registryState.groupDraft = null; await refreshAccountRegistry(); renderRegistryGroups(); registryFeedback("接管组已保存。");
+      } catch (error) { if (error.status === 409) { draft.conflict = true; await refreshAccountRegistry(); } registryFeedback(`组保存失败：${error.message}。草稿保留。`, true); error.registryReported = true; throw error; }
+    }
+    function mountAccountRegistry() {
+      const legacy = document.createElement("div"); legacy.id = "registryLegacy"; legacy.inert = true; legacy.hidden = true;
+      for (const id of ["accountStatusMount", "accountFunctionsMount"]) { while ($(id).firstChild) legacy.append($(id).firstChild); }
+      for (const id of ["standbyBehaviorCard", "legacyNapcatTools", "accounts.primary.styleProfileId", "accounts.standbys.0.styleProfileId"]) { const node = $(id); if (node) legacy.append(node.closest(".field") || node); }
+      document.body.append(legacy);
+      for (const [mount, editable] of [["accountStatusMount", false], ["accountFunctionsMount", true]]) {
+        const toolbar = document.createElement("div"); toolbar.className = "row panel-intro";
+        toolbar.append(registryButton("添加账号", () => openRegistryWizard(), ""), registryButton("刷新账号", refreshAccountRegistry)); $(mount).append(toolbar);
+        if (editable) { const editor = document.createElement("div"); editor.id = "dynamicAccountEditor"; editor.className = "card"; $(mount).append(editor); }
+        const list = document.createElement("div"); list.className = "registry-list"; list.dataset.registryList = ""; $(mount).append(list);
+      }
+      const groups = document.createElement("details"); groups.className = "card registry-group"; groups.id = "registryGroups";
+      const summary = document.createElement("summary"); summary.textContent = "高级 · 可选接管组"; groups.append(summary);
+      const groupHost = document.createElement("div"); groupHost.id = "registryGroupHost"; groups.append(groupHost);
+      groups.addEventListener("toggle", () => { if (groups.open) renderRegistryGroups(); }); $("accountFunctionsMount").append(groups);
+      const dialog = document.createElement("dialog"); dialog.id = "registryWizard"; dialog.setAttribute("aria-label", "添加账号四步向导"); document.body.append(dialog);
+      dialog.addEventListener("cancel", (event) => { event.preventDefault(); dialog.close(); });
+      for (const page of ["qa", "vision", "voice"]) {
+        const section = $(`page-${page}`); const globals = document.createElement("div"); globals.className = "registry-global";
+        while (section.firstChild) globals.append(section.firstChild);
+        const context = document.createElement("div"); context.className = "card registry-context"; context.dataset.registryContext = page;
+        section.append(context, globals);
+      }
+      window.addEventListener("beforeunload", (event) => {
+        if ([...registryState.drafts.values()].some((draft) => draft.dirty.size) || registryState.groupDraft || (registryState.wizard && !registryState.wizard.id)) { event.preventDefault(); event.returnValue = ""; }
+      });
+      renderRegistryContexts(); renderRegistryLists();
+    }
+
     mountAdminPanels();
     wireEvents();
+    mountAccountRegistry();
     refreshAll().catch(async (error) => {
       showFatalError(`桥接暂不可用：${error.message}。备份与迁移页仍可用于启动或恢复服务。`);
       await refreshDesktopBackup();

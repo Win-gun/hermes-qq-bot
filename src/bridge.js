@@ -3,6 +3,7 @@ import http from "node:http";
 import https from "node:https";
 import path from "node:path";
 import os from "node:os";
+import net from "node:net";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -17,7 +18,10 @@ import {
 import { publicTask, TaskRuntime } from "./task-runtime.js";
 import { ensureRequestedTaskArtifacts, taskRequestsPdf } from "./task-artifacts.js";
 import { ReplyCoordinator } from "./reply-coordinator.js";
-import { accountCanChat, accountCanOfferTask, accountTopology, botModeForAccount, botSelfSlot, systemPromptForAccount } from "./bot-capabilities.js";
+import { accountCanChat, accountCanOfferTask, accountIdentityForPrompt, accountTopology, botModeForAccount, botSelfSlot, systemPromptForAccount, configForAccountCapabilities } from "./bot-capabilities.js";
+import { registryConfig, normalizeAccountRegistry, accountItems, accountGroup, effectiveAccount, newAccount, mergeAccountPatch, syncLegacyAccountPatch, accountScopeAllows, publicAccount } from "./account-registry.js";
+import { accountDeliveryDecision, GroupSendCoordinator } from "./account-delivery.js";
+import { botCommandText, botCommandFeedback, groupCommandBots, routeBotCommand, GroupBotMembership } from "./bot-command-routing.js";
 import { automationOccurrenceKey, dueAutomationRules, matchAutomationCommand, validateAutomationRules } from "./automation-rules.js";
 import { synthesizeSpeechFile, transcribeAudioFile } from "./voice-service.js";
 import { voiceApiEnvironment, voiceApiKeyAvailable } from "./voice-credentials.js";
@@ -43,6 +47,8 @@ const rootDir = resourceRoot;
 const commandCwd = process.env.HERMES_QQ_HOME ? stateRoot : resourceRoot;
 const configPath = path.join(stateRoot, "config.json");
 const fallbackConfigPath = path.join(resourceRoot, "config.example.json");
+let configRevision = randomBytes(16).toString("hex");
+let registryMigrationPending = false;
 const dataDir = path.join(stateRoot, "data");
 const publicDir = path.join(resourceRoot, "public");
 const memoryPath = path.join(dataDir, "memory.json");
@@ -235,6 +241,9 @@ function existingQrPath() {
 }
 
 function syncNapcatQrFromContainerForAccount(accountId = "primary", currentConfig = null) {
+  currentConfig ||= loadConfig();
+  const account = accountById(currentConfig, accountId);
+  if (!account || account.managed === false) return "";
   const paths = accountQrPaths(accountId);
   const container = napcatContainerForAccount(currentConfig, accountId);
   try {
@@ -321,8 +330,11 @@ function qrFileInfo({ sync = false } = {}) {
 function loadConfig() {
   const chosen = fs.existsSync(configPath) ? configPath : fallbackConfigPath;
   const raw = fs.readFileSync(chosen, "utf8");
-  const cfg = JSON.parse(raw);
-  if (cfg.apiCenter?.connections?.length) applyApiCenterBindings(cfg, normalizeApiCenter(cfg));
+  const source = JSON.parse(raw);
+  registryMigrationPending ||= source.accounts?.version !== 2;
+  const cfg = registryConfig(source);
+  for (const key of Object.keys(cfg)) if (key.startsWith("__")) delete cfg[key];
+  if (cfg.apiCenter?.connections?.length) applyApiCenterBindings(cfg, normalizeApiCenter(cfg), "");
   cfg.__path = chosen;
   return cfg;
 }
@@ -341,6 +353,7 @@ function loadMemory() {
 }
 
 function saveMemory(memory) {
+  ensureRegistryMigrationSnapshot();
   fs.mkdirSync(dataDir, { recursive: true });
   const tmp = `${memoryPath}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(memory, null, 2)}\n`);
@@ -350,15 +363,31 @@ function saveMemory(memory) {
 function saveConfig(config) {
   const target = configPath;
   fs.mkdirSync(path.dirname(target), { recursive: true });
+  ensureRegistryMigrationSnapshot();
   if (fs.existsSync(target)) {
     const backup = `${target}.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`;
     fs.copyFileSync(target, backup);
   }
-  const copy = JSON.parse(JSON.stringify(config || {}));
-  delete copy.__path;
+  const copy = registryConfig(config, { strict: true });
+  for (const key of Object.keys(copy)) if (key.startsWith("__")) delete copy[key];
   const tmp = `${target}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(copy, null, 2)}\n`);
   fs.renameSync(tmp, target);
+  configRevision = randomBytes(16).toString("hex");
+}
+
+function ensureRegistryMigrationSnapshot() {
+  const target = configPath;
+  if (registryMigrationPending) {
+    // Read paths never migrate disk state. Preserve both originals before the
+    // first v2 write (including any memory normalization at startup).
+    const snapshot = path.join(dataDir, "account-registry-migration", new Date().toISOString().replace(/[:.]/g, "-"));
+    fs.mkdirSync(snapshot, { recursive: true, mode: 0o700 });
+    const original = fs.existsSync(target) ? target : fallbackConfigPath;
+    fs.copyFileSync(original, path.join(snapshot, "config.json"));
+    if (fs.existsSync(memoryPath)) fs.copyFileSync(memoryPath, path.join(snapshot, "memory.json"));
+    registryMigrationPending = false;
+  }
 }
 
 function replaceConfigInPlace(target, next) {
@@ -389,6 +418,24 @@ function groupMemory(memory, groupId) {
   memory.groups[gid].pendingMemoryMessages ||= [];
   memory.groups[gid].lastSummarizedMessageAt ||= 0;
   return memory.groups[gid];
+}
+
+// Keep shared people/facts/archive intact. Addressed /bot controls only create
+// a behavior overlay for that logical bot; legacy group settings are fallback.
+function groupSettings(memory, groupId, config = {}, { write = false, scoped = false } = {}) {
+  const shared = groupMemory(memory, groupId).settings;
+  const id = config.__activeAccountId;
+  if (!id || String(groupId).startsWith("private:")) return shared;
+  const group = accountGroup(config, id);
+  const key = group ? `group:${group.id}` : `account:${id}`;
+  const existing = shared.botSettings?.[key];
+  if (write && (scoped || existing)) {
+    shared.botSettings ||= {};
+    return shared.botSettings[key] ||= Object.fromEntries(
+      ["quietUntil", "behaviorMode", "voiceReplyMode", "voicePreset", "voicePresetUpdatedAt", "learningMode"].filter((field) => shared[field] !== undefined).map((field) => [field, shared[field]])
+    );
+  }
+  return existing ? { ...shared, ...existing } : shared;
 }
 
 function dedupePush(list, value, max = 12) {
@@ -713,7 +760,10 @@ function formatMessageTime(value, config = {}, { includeDate = true } = {}) {
 
 function shortMessageForPrompt(item, config = {}) {
   const time = formatMessageTime(item.sentAtMs || item.at || item.sentAt, config, { includeDate: true });
-  const sender = item.sender || item.user_id || "群友";
+  const account = item.isBot && accountTopology(config) !== "failover"
+    ? configuredAccountDefinitions(config).find((candidate) => candidate.id === item.accountId || (candidate.qq && candidate.qq === asStringId(item.user_id)))
+    : null;
+  const sender = account ? `机器人「${account.displayName || account.id}」` : item.sender || item.user_id || "群友";
   const senderId = asStringId(item.user_id);
   const reply = asArray(item.replyContexts).find((ctx) => ctx && (ctx.resolved || ctx.messageId));
   const replyLabel = reply
@@ -767,12 +817,18 @@ function asStringId(value) {
 }
 
 function conversationIdFromEvent(event) {
-  if (event?.message_type === "private") return `private:${asStringId(event.user_id)}`;
+  if (event?.message_type === "private") {
+    const userId = asStringId(event.user_id);
+    if (event.__accountGroupId) return `private:${userId}:group:${safePathSegment(event.__accountGroupId)}`;
+    return event.__independentAccounts && event.__accountId
+      ? `private:${userId}:${safePathSegment(event.__accountId)}`
+      : `private:${userId}`;
+  }
   return asStringId(event?.group_id);
 }
 
 function conversationLabelFromEvent(event) {
-  if (event?.message_type === "private") return `private:${asStringId(event.user_id)}`;
+  if (event?.message_type === "private") return conversationIdFromEvent(event);
   return `group:${asStringId(event?.group_id)}`;
 }
 
@@ -820,9 +876,34 @@ function stableMessageFingerprint(event, text) {
     event?.message_type || "",
     conversation,
     sender,
+    event?.message_id ? `message:${asStringId(event.message_id)}` : "",
     time,
     clampText(payload || text || "", 500)
   ].join("|");
+}
+
+function accountScopedInboundKey(event, text, config, accountId, { mentioned = false, quotedBotAccountId = "" } = {}) {
+  const fingerprint = stableMessageFingerprint(event, text);
+  const group = accountGroup(config, accountId);
+  return `${fingerprint}|${group ? `failover:${group.id}` : `account:${accountId}`}`;
+}
+
+function accountReceivesMessage(config, accountId, activeAccountId) {
+  return accountTopology(config) !== "failover" || accountId === activeAccountId;
+}
+
+function claimConversationMessage(seen, event, text, { ttlMs = 5 * 60_000 } = {}) {
+  const currentAt = Date.now();
+  for (const [key, at] of seen) if (currentAt - at > ttlMs) seen.delete(key);
+  const conversation = conversationIdFromEvent(event);
+  const sender = asStringId(event?.user_id);
+  const messageId = asStringId(event?.message_id);
+  const key = messageId
+    ? `${conversation}|${sender}|message:${messageId}`
+    : stableMessageFingerprint(event, text);
+  if (seen.has(key)) return false;
+  seen.set(key, currentAt);
+  return true;
 }
 
 function decodeCqValue(value) {
@@ -1443,26 +1524,27 @@ function addPendingMemoryMessage(memory, event, senderName, text, config) {
 }
 
 function memoryExtractionPrompt({ config, groupId, gm, messages }) {
-  const botSelf = ensureBotSelfMemory(gm, { ...config, __activeAccountId: config.accounts?.primary?.id || "primary", __activeAccountDisplayName: config.accounts?.primary?.displayName || config.persona?.displayName });
+  const independentBots = accountTopology(config) !== "failover";
+  const botSelf = independentBots ? null : ensureBotSelfMemory(gm, { ...config, __activeAccountId: config.accounts?.primary?.id || "primary", __activeAccountDisplayName: config.accounts?.primary?.displayName || config.persona?.displayName });
   const sampleUsers = Object.entries(gm.users || {})
     .slice(-12)
     .map(([id, user]) => `${user.lastName || id}(${id}) 外号:${(user.aliases || user.names || []).slice(-4).join("、") || "无"} 性格:${[...(user.personality || []), ...(user.style || [])].slice(-4).join("；") || "无"} 强梗:${[...(user.coreMemes || []), ...(user.memes || [])].slice(-4).join("；") || "无"} 雷点:${(user.boundaries || []).slice(-3).join("；") || "无"}`)
     .join("\n");
-  const botSelfText = [
+  const botSelfText = botSelf ? [
     `身份:${(botSelf.identity || []).slice(-3).join("；")}`,
     `性格:${(botSelf.personality || []).slice(-4).join("；")}`,
     `口吻:${(botSelf.speechStyle || []).slice(-4).join("；")}`,
     `最近说过:${(botSelf.recentMessages || []).slice(-4).map((m) => m.text || m).join(" / ")}`,
     `已有立场:${(botSelf.stances || []).slice(-5).map((s) => `${s.topic}:${s.stance}`).join("；") || "无"}`
-  ].join("\n");
+  ].join("\n") : "";
   const recentMessages = messages.map((m) => `[${formatMessageTime(m.sentAtMs || m.sentAt || m.at, config)}] message_id=${m.message_id || "未知"} ${m.sender}(${m.user_id}): ${m.text}`).join("\n");
   const maxPatchItems = Number(config.memory?.aiExtraction?.maxPatchItems || 8);
-  return `你是 QQ 聊天记忆提取器。请从新增聊天里提取“以后聊天有用”的记忆，重点做清晰画像：外号、性格、强相关梗、雷点、互动建议，以及 bot 自己是谁/说过什么。尽量多记，但过滤隐私和明显一次性胡话。
+  return `你是 QQ 聊天记忆提取器。请从新增聊天里提取“以后聊天有用”的记忆，重点做清晰画像：外号、性格、强相关梗、雷点、互动建议${independentBots ? "；各 bot 的自我身份不在此批次提取" : "，以及 bot 自己是谁/说过什么"}。尽量多记，但过滤隐私和明显一次性胡话。
 
 【会话ID】${groupId}
 
 【bot 自我记忆】
-${botSelfText || "（暂无）"}
+${botSelfText || (independentBots ? "（独立账号各自保管，不在共享提取器中展示）" : "（暂无）")}
 
 【已有用户概况】
 ${sampleUsers || "（暂无）"}
@@ -1838,9 +1920,9 @@ function compactMemory(memory, groupId, config, currentSenderId = "") {
   return sections.filter(Boolean).join("\n");
 }
 
-function compactHistory(items) {
+function compactHistory(items, config = {}) {
   return items
-    .map((m) => `${m.sender}: ${m.text}`)
+    .map((m) => shortMessageForPrompt(m, config))
     .filter(Boolean)
     .join("\n");
 }
@@ -1919,7 +2001,7 @@ function normalizeBehaviorMode(value) {
 }
 
 function behaviorMode(memory, groupId, config) {
-  const saved = normalizeBehaviorMode(groupMemory(memory, groupId).settings?.behaviorMode);
+  const saved = normalizeBehaviorMode(groupSettings(memory, groupId, config).behaviorMode);
   return saved || normalizeBehaviorMode(config.behaviorModes?.default) || "normal";
 }
 
@@ -2199,8 +2281,21 @@ function recordBotMessage({ historyByGroup, lastBotMessageByGroup, groupId, text
 }
 
 function lastBotMessageForAccount(lastBotMessageByGroup, groupId, accountId, config) {
-  if (accountTopology(config) === "failover") return lastBotMessageByGroup.get(asStringId(groupId));
+  const group = accountGroup(config, accountId);
+  if (group) {
+    const messages = group.memberIds.map((id) => lastBotMessageByGroup.get(`${asStringId(groupId)}:account:${id}`)).filter(Boolean);
+    const legacy = lastBotMessageByGroup.get(asStringId(groupId));
+    if (legacy && (sameLogicalAccount(config, legacy.accountId, accountId) || (group.legacySelfMemory && !legacy.accountId))) messages.push(legacy);
+    return messages.sort((a, b) => Number(b.at || 0) - Number(a.at || 0))[0];
+  }
   return lastBotMessageByGroup.get(`${asStringId(groupId)}:account:${accountId}`);
+}
+
+function sameLogicalAccount(config, left, right) {
+  if (!left || !right) return false;
+  if (left === right) return true;
+  const group = accountGroup(config, left);
+  return Boolean(group && group.memberIds.includes(right));
 }
 
 function lastNonBotMessagesSince(history, sinceAt) {
@@ -2298,7 +2393,14 @@ function scoreImplicitReplyAgainstBotMessage({ history, current, botMessage, con
 function detectImplicitReplyToBot({ history, current, lastBotMessage, config }) {
   const cfg = config.implicitReply || {};
   if (cfg.enabled === false) return { matched: false, confidence: 0, reason: "disabled" };
-  const quotedBot = asArray(current?.replyContexts).find((ctx) => ctx?.isBot);
+  const independent = accountTopology(config) !== "failover";
+  const accountId = config.__activeAccountId || config.accounts?.primary?.id || "primary";
+  const ownQq = asStringId(accountById(config, accountId)?.qq);
+  const belongsToThisBot = (item) => !independent || (
+    item?.accountId ? sameLogicalAccount(config, item.accountId, accountId) : Boolean((ownQq && asStringId(item?.user_id || item?.senderId) === ownQq)
+      || configuredAccountDefinitions(config).some((account) => sameLogicalAccount(config, account.id, accountId) && account.qq && account.qq === asStringId(item?.user_id || item?.senderId)))
+  );
+  const quotedBot = asArray(current?.replyContexts).find((ctx) => ctx?.isBot && belongsToThisBot(ctx));
   if (quotedBot) {
     return {
       matched: true,
@@ -2312,15 +2414,16 @@ function detectImplicitReplyToBot({ history, current, lastBotMessage, config }) 
   const nowMs = Date.now();
   const windowMs = Number(cfg.windowMs || 8 * 60_000);
   const maxRecentBotMessages = Math.max(1, Math.min(12, Number(cfg.recentBotMessages || 6)));
-  const candidates = orderedHistory(history)
+  const accountHistory = independent ? asArray(history).filter((item) => !item?.isBot || belongsToThisBot(item)) : history;
+  const candidates = orderedHistory(accountHistory)
     .filter((item) => item?.isBot && nowMs - Number(item.at || 0) <= windowMs)
     .slice(-maxRecentBotMessages)
     .reverse();
-  if (lastBotMessage && nowMs - Number(lastBotMessage.at || 0) <= windowMs && !candidates.includes(lastBotMessage)) {
+  if (lastBotMessage && belongsToThisBot(lastBotMessage) && nowMs - Number(lastBotMessage.at || 0) <= windowMs && !candidates.includes(lastBotMessage)) {
     candidates.unshift(lastBotMessage);
   }
   if (!candidates.length) return { matched: false, confidence: 0, reason: "no recent bot message" };
-  const scored = candidates.map((botMessage) => scoreImplicitReplyAgainstBotMessage({ history, current, botMessage, config }));
+  const scored = candidates.map((botMessage) => scoreImplicitReplyAgainstBotMessage({ history: accountHistory, current, botMessage, config }));
   scored.sort((a, b) => b.confidence - a.confidence || Number(b.botMessage?.at || 0) - Number(a.botMessage?.at || 0));
   const best = scored[0];
 
@@ -3310,10 +3413,10 @@ function rankSearchResults(results, query, config) {
 async function webSearch(query, config) {
   const provider = String(config.webSearch?.provider || "google").toLowerCase();
   if (provider === "mimo-web-search") {
-    const center = normalizeApiCenter(config);
-    const selected = center.searchProfiles.find((item) => item.id === center.searchBinding);
+    const resolved = resolveApiCapability(config, "search");
+    const selected = resolved.profile;
     if (selected?.provider !== "mimo-web-search") throw new Error("MiMo 联网方案未绑定");
-    const connection = center.connections.find((item) => item.id === selected.connectionId);
+    const connection = resolved.connection;
     if (!connection) throw new Error("MiMo 联网连接不存在");
     const credentialEnv = connection.apiKeyEnv || "MIMO_API_KEY";
     const apiKey = connection.credentialSource === "keychain" ? getApiSecret(connection.credentialRef)
@@ -3380,7 +3483,7 @@ async function webSearch(query, config) {
 }
 
 async function buildWebSearchContext(decision, config) {
-  if (!decision?.matched) return { text: "", result: null };
+  if (!decision?.matched || config.webSearch?.enabled === false) return { text: "", result: null };
   const query = clampText(decision.query, Number(config.webSearch?.maxQueryLength || 120));
   try {
     if (config.webSearch?.provider !== "mimo-web-search" && (decision.kind === "weather" || isWeatherQuery(query))) {
@@ -3430,22 +3533,8 @@ function webSearchPreReply(decision, config) {
 
 function buildPrompt({ config, history, current, mode, memoryText = "", contextBundle = null, webSearchContext = "", archiveContext = "", learningPrompt = "" }) {
   const system = systemPromptForAccount(config, config.__activeAccountId || "primary");
-  const displayName = botDisplayName(config);
-  const accountCfg = accountFailoverConfig(config);
-  const independentBots = accountTopology(config) !== "failover";
-  const accountMappings = accountCfg.all
-    .map((account) => `${account.role === "primary" ? "主账号" : independentBots ? "独立账号" : "备用账号"} ${account.id}：${account.displayName || account.id}${account.qq ? `（QQ ${account.qq}）` : ""}`)
-    .join("\n") || "（未配置）";
-  const accountIdentity = [
-    `当前发言账号：${displayName}`,
-    `账号ID：${config.__activeAccountId || "primary"}`,
-    `账号角色：${config.__activeAccountRole || "primary"}`,
-    `账号映射：\n${accountMappings}`,
-    independentBots
-      ? "重要：你是当前账号对应的独立 bot。群友和群聊事实可共享，但不要把另一个 bot 的身份、说过的话或人格当成自己。"
-      : "重要：主备是同一个 bot 的不同登录账号；回复时要知道当前发言账号，不要混淆 QQ 身份。"
-  ].join("\n");
-  const recent = contextBundle?.recentMessages || compactHistory(history.slice(-Math.max(1, config.history?.promptRecentMessages ?? config.history?.maxMessages ?? 40)));
+  const accountIdentity = accountIdentityForPrompt(config, config.__activeAccountId || "primary");
+  const recent = contextBundle?.recentMessages || compactHistory(history.slice(-Math.max(1, config.history?.promptRecentMessages ?? config.history?.maxMessages ?? 40)), config);
   const voiceCapability = config.voice?.enabled === true && config.voice?.tts?.enabled !== false
     ? "已配置可发送 QQ 语音条；发送是否成功只能以桥接回执为准，不要自行声称声卡坏了或语音发不出。"
     : "当前未启用语音发送；不要臆测设备故障。";
@@ -3464,11 +3553,14 @@ function buildPrompt({ config, history, current, mode, memoryText = "", contextB
 这里不是群聊，不要套用群聊插科打诨优先的策略。你的优先级是：
 1. 优先理解并遵循对方的明确指令；
 2. 如果指令涉及你无法直接执行的外部操作或服务器改动，要诚实说明自己在 QQ 内不能直接完成，并给出可操作步骤；
-3. 可以保持“小跟班”的亲近语气，但不要为了人设而故意反驳、抬杠或把命令当玩笑；
+3. 可以保持当前账号的亲近语气，但不要为了人设而故意反驳、抬杠或把命令当玩笑；
 4. 私聊中的上下文、称呼、临时偏好只用于这个私聊，不要影响群聊里的互动判断；
 5. 群聊人格、群梗、群成员记忆不能覆盖主人在私聊里的直接要求；
 6. 回答要清楚、可执行、尽量短。`;
     return `${ownerSystem}
+
+【当前账号风格】
+${system || "（沿用默认风格）"}
 
 【私聊历史】
 ${recent || "（暂无）"}
@@ -3498,7 +3590,11 @@ ${currentTimeContext}
 ${formatReplyContextsForPrompt(current?.replyContexts) || "（无明确引用）"}
 
 【回复要求】
-把这条消息当作私聊指令/请求来处理。能按要求做的就明确响应；不能做的说明限制和下一步。不要把它当群聊接梗，不要输出 __SKIP__。语音请求由桥接的语音通道处理；不要自行调用语音工具，不要输出 MEDIA: 本机文件路径，也不要臆测声卡或合成状态。[record] 或 [语音] 只是未转写的占位符，绝不代表你听到了内容；没有明确的语音转写文本，就不要描述声音、语音内容或声称听到杂音。不要重复最近 bot 回复的固定开头或模板句，直接承接当前语境。只输出要发给对方的内容。`;
+把这条消息当作私聊指令/请求来处理。能按要求做的就明确响应；不能做的说明限制和下一步。不要把它当群聊接梗，不要输出 __SKIP__。语音请求由桥接的语音通道处理；不要自行调用语音工具，不要输出 MEDIA: 本机文件路径，也不要臆测声卡或合成状态。[record] 或 [语音] 只是未转写的占位符，绝不代表你听到了内容；没有明确的语音转写文本，就不要描述声音、语音内容或声称听到杂音。不要重复最近 bot 回复的固定开头或模板句，直接承接当前语境。
+
+【当前运行模式与身份（优先于旧提示词和历史）】
+${accountIdentity}
+只输出要发给对方的内容。`;
   }
   const instruction = {
     proactive: "你正在主动插话。先判断有没有必要说；如果没有很好的接话点，只输出 __SKIP__。如果要说，只接最近上下文，不要把很久以前的话硬拽回来，不超过2句。",
@@ -3562,10 +3658,12 @@ ${socialDecisionText}
 【要求】
 ${instruction}
 ${learningPrompt ? `【学习模式】\n${learningPrompt}\n` : ""}
-回答时优先遵守【bot 自我记忆】：知道自己是谁、自己的性格、能力边界、最近说过什么；如果群友问“你是谁/你刚才说了什么/你能不能看图”，要基于这里和最近原文回答。
+回答时参考【bot 自我记忆】了解性格、能力边界、最近说过什么；身份和当前职责以末尾的【当前运行模式与身份】为准。如果群友问“你是谁/你刚才说了什么/你能不能看图”，要区分当前账号和另一个 bot。
 历史和引用片段都带有原消息时间。必须区分当前消息、刚才的连续消息和很久以前检索出的内容；不能把旧事件说成刚发生，也不能把记忆中的不同 QQ 号混为同一人。
-你当前对外昵称是“${displayName}”。如果你是备用账号，不要自称主账号；如果被问为什么换号/是谁，可以简短说明这是备用号在接管。
-像真实群友一样短句输出。根据【社交判断】控制语气和长度，但不要在回复中提到这些内部标签。不要重复最近 bot 回复的固定开头、口头禅或模板句，直接承接当前语境。不会的事就承认不会；不要承诺未验证的转账、充值、管理群或媒体能力。语音请求由桥接的语音通道处理；不要自行调用语音工具，不要输出 MEDIA: 本机文件路径，也不要臆测声卡或合成状态。[record] 或 [语音] 只是未转写的占位符，绝不代表你听到了内容；没有明确的语音转写文本，就不要描述声音、语音内容或声称听到杂音。可以基于【最近群聊原文】里的图片识别结果聊图片；如果没有图片识别结果，就不要假装看到了图片细节。不要乱报底层模型；被问模型时说“我是 Hermes 接进 QQ 的 AI 群友，具体底层模型我不乱报”。最多 1 个 emoji。只输出要发到群里的内容，不要解释。`;
+像真实群友一样短句输出。根据【社交判断】控制语气和长度，但不要在回复中提到这些内部标签。不要重复最近 bot 回复的固定开头、口头禅或模板句，直接承接当前语境。不会的事就承认不会；不要承诺未验证的转账、充值、管理群或媒体能力。语音请求由桥接的语音通道处理；不要自行调用语音工具，不要输出 MEDIA: 本机文件路径，也不要臆测声卡或合成状态。[record] 或 [语音] 只是未转写的占位符，绝不代表你听到了内容；没有明确的语音转写文本，就不要描述声音、语音内容或声称听到杂音。可以基于【最近群聊原文】里的图片识别结果聊图片；如果没有图片识别结果，就不要假装看到了图片细节。不要乱报底层模型；被问模型时说“我是 Hermes 接进 QQ 的 AI 群友，具体底层模型我不乱报”。最多 1 个 emoji。
+【当前运行模式与身份（优先于旧提示词和历史）】
+${accountIdentity}
+只输出要发到群里的内容，不要解释。`;
 }
 
 async function judgeVoiceReplyIntentWithAI(text, { history = [], config }) {
@@ -3965,14 +4063,25 @@ function chatArchiveConfig(config = {}) {
 }
 
 function archiveConversationMetaFromEvent(event, config = {}) {
+  const accountId = event?.__accountId || config.__activeAccountId;
+  const group = accountId ? accountGroup(config, accountId) : null;
+  event = { ...event, __accountId: accountId,
+    __independentAccounts: event?.__independentAccounts ?? !group,
+    __accountGroupId: event?.__accountGroupId ?? (group && !group.legacySelfMemory ? group.id : "") };
   const cfg = chatArchiveConfig(config);
   const isPrivate = event?.message_type === "private";
-  const id = isPrivate ? asStringId(event?.user_id) : asStringId(event?.group_id);
+  const independent = event?.__independentAccounts ?? !accountGroup(config, event?.__accountId);
+  const id = isPrivate
+    ? (independent && event?.__accountId
+      ? `${asStringId(event.user_id)}:${safePathSegment(event.__accountId)}`
+      : asStringId(event?.user_id))
+    : asStringId(event?.group_id);
   const kind = isPrivate ? "private" : "groups";
-  const conversationId = isPrivate ? `private:${id}` : `group:${id}`;
-  const dir = path.join(cfg.baseDir, kind, safePathSegment(id || "unknown", "unknown"));
+  const conversationId = isPrivate ? conversationIdFromEvent({ ...event, __independentAccounts: independent }) : `group:${id}`;
+  const scopedId = isPrivate ? conversationId.slice("private:".length) : id;
+  const dir = path.join(cfg.baseDir, kind, archiveDirectoryId(scopedId));
   return {
-    id,
+    id: scopedId,
     kind,
     conversationId,
     dir,
@@ -4354,6 +4463,7 @@ function retrieveArchiveSnippets({ event, current, config, memory = null, groupI
     time: record.sentAt || record.time,
     type: record.type,
     sender: record.senderName || record.senderId || record.type,
+    accountId: record.accountId || "",
     text: clampText(record.text || record.summary || record.query || "", 260),
     images: asArray(record.images).filter((img) => img.description).map((img) => `图#${img.index}:${clampText(img.description, 120)}`),
     sources: asArray(record.sources).slice(0, 2).map((s) => s.link).filter(Boolean)
@@ -4379,7 +4489,9 @@ function buildArchiveContext({ event, current, history = [], memory, groupId, co
       const time = item.time ? item.time.replace("T", " ").slice(0, 16) : "";
       const imageText = item.images?.length ? ` ${item.images.join("；")}` : "";
       const sourceText = item.sources?.length ? ` 来源：${item.sources.join("；")}` : "";
-      lines.push(`- ${time} ${item.sender}: ${item.text}${imageText}${sourceText}`);
+      const botLabel = item.type === "bot_reply" && accountTopology(config) !== "failover"
+        ? ` [机器人账号：${accountById(config, item.accountId)?.displayName || item.sender}]` : "";
+      lines.push(`- ${time} ${item.sender}${botLabel}: ${item.text}${imageText}${sourceText}`);
     }
   }
   return { used: lines.length > 0, reason: decision.reason, text: lines.join("\n"), snippets };
@@ -4400,7 +4512,8 @@ function hydrateRuntimeContextFromArchives({ config, historyByGroup, lastBotMess
     for (const id of fs.readdirSync(kindDir)) {
       const messagesPath = path.join(kindDir, id, "messages.jsonl");
       if (!fs.existsSync(messagesPath)) continue;
-      const groupId = kind === "groups" ? id : `private:${id}`;
+      const archivedId = readJsonFileSafe(path.join(kindDir, id, "index.json"), {}).conversationId;
+      const groupId = kind === "groups" ? id : archivedId || `private:${id}`;
       const records = readLastJsonlRecords(messagesPath, maxMessages * 4, 4 * 1024 * 1024)
         .filter((record) => record?.type === "user_message" || record?.type === "bot_reply")
         .slice(-maxMessages);
@@ -4416,7 +4529,7 @@ function hydrateRuntimeContextFromArchives({ config, historyByGroup, lastBotMess
           receivedAt: record.receivedAt || "",
           processedAt: record.processedAt || "",
           isBot: record.type === "bot_reply",
-          accountId: record.accountId || configuredAccountDefinitions(config).find((account) => account.qq && account.qq === asStringId(record.senderId))?.id || "primary",
+          accountId: record.accountId || configuredAccountDefinitions(config).find((account) => account.qq && account.qq === asStringId(record.senderId))?.id || (accountTopology(config) === "failover" ? "primary" : ""),
           source: record.source || "archive-hydrated",
           messageId: asStringId(record.messageId),
           replyContexts,
@@ -4518,7 +4631,11 @@ function archivePathForConversationId(conversationId, config = {}) {
   if (!match) return "";
   const cfg = chatArchiveConfig(config);
   const kind = match[1] === "group" ? "groups" : "private";
-  return path.join(cfg.baseDir, kind, safePathSegment(match[2], "unknown"), "messages.jsonl");
+  return path.join(cfg.baseDir, kind, archiveDirectoryId(match[2]), "messages.jsonl");
+}
+
+function archiveDirectoryId(id) {
+  return String(id).includes(":group:") ? `ctx-${Buffer.from(String(id)).toString("base64url")}` : safePathSegment(id || "unknown", "unknown");
 }
 
 function aiArgsWithoutPrompt(config) {
@@ -4925,8 +5042,8 @@ function standbyWebuiPort(accountId) {
 }
 
 function napcatStateDirForAccount(account) {
-  if (!account || account.id === "primary" || account.role === "primary") return path.join(stateRoot, "napcat");
-  return path.join(stateRoot, account.napcatStateDir || account.napcatDataDir || account.napcatContainer || `napcat-${safePathSegment(account.id)}`);
+  if (!account) return path.join(stateRoot, "napcat");
+  return path.join(stateRoot, account.napcatStateDir || account.napcatDataDir || account.protocolContainer || account.napcatContainer || (account.id === "primary" ? "napcat" : `napcat-${safePathSegment(account.id)}`));
 }
 
 function snowlumaStateDirForAccount(account) {
@@ -4971,8 +5088,10 @@ function accountWebuiInfoForAccount(account) {
 function sanitizeUrlForLog(url) {
   try {
     const parsed = new URL(String(url));
+    parsed.username = "";
+    parsed.password = "";
     for (const key of Array.from(parsed.searchParams.keys())) {
-      if (/token|secret|password|key/i.test(key)) parsed.searchParams.set(key, "[REDACTED]");
+      if (/token|secret|password|key|auth|cookie/i.test(key)) parsed.searchParams.set(key, "[REDACTED]");
     }
     return parsed.toString();
   } catch {
@@ -4981,6 +5100,7 @@ function sanitizeUrlForLog(url) {
 }
 
 function readSnowLumaOneBotAccessToken(account, currentConfig = {}) {
+  if (account?.managed === false) return "";
   const explicit = stringValue(account?.onebotAccessToken || account?.accessToken || "").trim();
   if (explicit) return explicit;
   const qq = stringValue(account?.qq || account?.actualQq || "").trim();
@@ -5149,8 +5269,8 @@ async function dockerContainerExists(container) {
 }
 
 async function createNapcatAccountContainer(account, currentConfig) {
-  if (!account || account.role === "primary") return { ok: false, error: "primary account is managed by the existing napcat container" };
-  const container = account.napcatContainer || `napcat-${safePathSegment(account.id)}`;
+  if (!account) return { ok: false, error: "account not configured" };
+  const container = account.protocolContainer || account.napcatContainer || `napcat-${safePathSegment(account.id)}`;
   if (await dockerContainerExists(container)) return { ok: true, existed: true, container };
 
   const files = ensureStandbyNapcatFiles(account, currentConfig);
@@ -5193,10 +5313,9 @@ async function createNapcatAccountContainer(account, currentConfig) {
 }
 
 async function ensureNapcatAccountContainer(account, currentConfig) {
-  const container = account?.napcatContainer || "napcat";
-  if (!account || account.role === "primary") {
-    return { ok: await dockerContainerExists(container), existed: true, container };
-  }
+  if (account?.managed === false) return { ok: false, managed: false, error: "外部协议端不由此程序管理" };
+  if (!account) return { ok: false, error: "account not configured" };
+  const container = account.protocolContainer || account.napcatContainer || `napcat-${safePathSegment(account.id)}`;
   if (await dockerContainerExists(container)) return { ok: true, existed: true, container };
   return createNapcatAccountContainer(account, currentConfig);
 }
@@ -5252,10 +5371,10 @@ async function createSnowLumaAccountContainer(account, currentConfig) {
     "--restart", "always",
     "--privileged",
     "-e", "TZ=Asia/Shanghai",
-    "-p", `${webuiPort}:5099`,
-    "-p", `${noVncPort}:6081`,
-    "-p", `${vncPort}:5900`,
-    "-p", `${wsPort}:3001`,
+    "-p", `127.0.0.1:${webuiPort}:5099`,
+    "-p", `127.0.0.1:${noVncPort}:6081`,
+    "-p", `127.0.0.1:${vncPort}:5900`,
+    "-p", `127.0.0.1:${wsPort}:3001`,
     "-v", `${files.dataDir}:/app/data`,
     "-v", `${files.configDir}:/app/config`,
   ];
@@ -5284,6 +5403,7 @@ async function createSnowLumaAccountContainer(account, currentConfig) {
 }
 
 async function ensureSnowLumaAccountContainer(account, currentConfig) {
+  if (account?.managed === false) return { ok: false, managed: false, error: "外部协议端不由此程序管理" };
   const container = accountProtocolContainer(account, currentConfig);
   if (await dockerContainerExists(container)) return { ok: true, existed: true, container };
   return createSnowLumaAccountContainer(account, currentConfig);
@@ -5295,6 +5415,7 @@ async function ensureAccountProtocolContainer(account, currentConfig) {
 }
 
 async function restartAccountProtocol(account, currentConfig) {
+  if (account?.managed === false) return { ok: false, managed: false, error: "外部协议端不由此程序管理" };
   if (accountProtocol(account) === "snowluma") {
     const ensured = await ensureSnowLumaAccountContainer(account, currentConfig);
     if (!ensured.ok) return { ...ensured, accountId: account.id, protocol: "snowluma" };
@@ -5326,6 +5447,7 @@ async function restartAccountProtocol(account, currentConfig) {
 }
 
 async function resetNapcatLoginStateForAccount(account, currentConfig) {
+  if (account?.managed === false) return { ok: false, managed: false, error: "外部协议端不由此程序管理" };
   const resolved = account || accountById(currentConfig, "primary") || { id: "primary", role: "primary", napcatContainer: "napcat" };
   const accountId = resolved.id || "primary";
   const container = napcatContainerForAccount(currentConfig, accountId);
@@ -5447,37 +5569,83 @@ function recordAccountSend(accountId, action, { ok = false, failure = "", attemp
   }
 }
 
-function oneBotSend(ws, action, params) {
-  const echo = `hermes-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const accountId = asStringId(ws?.__hermesAccountId || "");
-  const payload = {
-    action,
-    params,
-    echo
-  };
-  oneBotSendRuntime.lastSendAttemptAt = Date.now();
-  oneBotSendRuntime.lastSendAction = action;
-  oneBotSendRuntime.lastSendFailure = "";
-  recordAccountSend(accountId, action, { attempt: true });
-  const timer = setTimeout(() => {
-    const tracker = oneBotSendTrackers.get(echo);
-    if (!tracker) return;
-    oneBotSendTrackers.delete(echo);
-    oneBotSendRuntime.lastSendFailedAt = Date.now();
+function oneBotBinding(ws, accountId = ws?.__hermesAccountId) {
+  return { id: asStringId(accountId), sessionId: ws?.__hermesSessionId };
+}
+
+function oneBotBindingCurrent(ws, binding) {
+  return Boolean(ws?.readyState === 1 && binding?.id
+    && asStringId(ws.__hermesAccountId) === binding.id
+    && ws.__hermesSessionId === binding.sessionId);
+}
+
+function oneBotSend(ws, action, params, binding = oneBotBinding(ws)) {
+  if (ws?.__hermesDispatch) {
+    return ws.__hermesDispatch(action, params, () => oneBotSendRaw(ws, action, params), binding)
+      .then(() => true)
+      .catch((err) => { if (err.code !== "ACCOUNT_SEND_BLOCKED") warn(`OneBot dispatch failed: ${err.message}`); return false; });
+  }
+  throw new Error("OneBot delivery policy is not installed");
+}
+
+function oneBotSendRaw(ws, action, params) {
+  return new Promise((resolve, reject) => {
+    const echo = `hermes-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const accountId = asStringId(ws?.__hermesAccountId || "");
+    const payload = { action, params, echo };
+    oneBotSendRuntime.lastSendAttemptAt = Date.now();
     oneBotSendRuntime.lastSendAction = action;
-    oneBotSendRuntime.lastSendFailure = `${action} 没有收到 OneBot 回执，可能发送失败或 NapCat 卡住`;
-    recordAccountSend(tracker.accountId, action, { ok: false, failure: oneBotSendRuntime.lastSendFailure });
-    warn(`onebot send no ack action=${action} echo=${echo}`);
-  }, 20_000);
-  oneBotSendTrackers.set(echo, { action, accountId, startedAt: Date.now(), timer });
-  ws.send(JSON.stringify(payload));
+    oneBotSendRuntime.lastSendFailure = "";
+    recordAccountSend(accountId, action, { attempt: true });
+    const timer = setTimeout(() => {
+      const tracker = oneBotSendTrackers.get(echo);
+      if (!tracker) return;
+      oneBotSendTrackers.delete(echo);
+      oneBotSendRuntime.lastSendFailedAt = Date.now();
+      oneBotSendRuntime.lastSendAction = action;
+      oneBotSendRuntime.lastSendFailure = `${action} 没有收到 OneBot 回执，可能发送失败或协议端卡住`;
+      recordAccountSend(tracker.accountId, action, { ok: false, failure: oneBotSendRuntime.lastSendFailure });
+      warn(`onebot send no ack action=${action} echo=${echo}`);
+      reject(new Error(oneBotSendRuntime.lastSendFailure));
+    }, 20_000);
+    oneBotSendTrackers.set(echo, { action, accountId, ws, startedAt: Date.now(), timer, resolve, reject });
+    try {
+      ws.send(JSON.stringify(payload), (error) => {
+        if (!error || !oneBotSendTrackers.has(echo)) return;
+        oneBotSendTrackers.delete(echo);
+        clearTimeout(timer);
+        recordAccountSend(accountId, action, { ok: false, failure: error.message });
+        reject(error);
+      });
+    } catch (error) {
+      oneBotSendTrackers.delete(echo);
+      clearTimeout(timer);
+      recordAccountSend(accountId, action, { ok: false, failure: error.message });
+      reject(error);
+    }
+  });
+}
+
+function clearOneBotActionsForSocket(ws, pendingActions, sendTrackers) {
+  for (const [echo, pending] of pendingActions) {
+    if (pending.ws !== ws) continue;
+    pendingActions.delete(echo);
+    pending.reject(new Error("onebot websocket closed"));
+  }
+  for (const [echo, tracker] of sendTrackers) {
+    if (tracker.ws !== ws) continue;
+    sendTrackers.delete(echo);
+    clearTimeout(tracker.timer);
+    tracker.reject?.(new Error("onebot websocket closed"));
+  }
 }
 
 function sendGroupMessageToGroup(ws, groupId, text, config) {
   const message = trimForGroup(text, config);
   if (!message) return false;
-  oneBotSend(ws, "send_group_msg", { group_id: groupId, message });
-  return true;
+  return oneBotSend(ws, "send_group_msg", { group_id: groupId, message }, {
+    id: config.__activeAccountId || ws?.__hermesAccountId, sessionId: config.__oneBotSessionId ?? ws?.__hermesSessionId
+  });
 }
 
 function sendPrivateMessageToUser(ws, userId, text, config) {
@@ -5486,16 +5654,17 @@ function sendPrivateMessageToUser(ws, userId, text, config) {
   if (!ws || ws.readyState !== 1 || !uid || !message) return false;
   const minIntervalMs = Math.max(0, Number(config.send?.privateMinIntervalMs ?? 0));
   if (minIntervalMs > 0) {
-    const lastSent = privateMessageCooldowns.get(uid) || 0;
+    const lastSent = privateMessageCooldowns.get(`${ws?.__hermesAccountId || ""}:${uid}`) || 0;
     const elapsed = Date.now() - lastSent;
     if (elapsed < minIntervalMs) {
       debug(`private cooldown uid=${uid} elapsed=${elapsed}ms < ${minIntervalMs}ms, skip`);
       return false;
     }
-    privateMessageCooldowns.set(uid, Date.now());
+    privateMessageCooldowns.set(`${ws?.__hermesAccountId || ""}:${uid}`, Date.now());
   }
-  oneBotSend(ws, "send_private_msg", { user_id: uid, message });
-  return true;
+  return oneBotSend(ws, "send_private_msg", { user_id: uid, message }, {
+    id: config.__activeAccountId || ws?.__hermesAccountId, sessionId: config.__oneBotSessionId ?? ws?.__hermesSessionId
+  });
 }
 
 function privateImageSegmentForFile(filePath) {
@@ -5504,6 +5673,9 @@ function privateImageSegmentForFile(filePath) {
 }
 
 function sendGroupMessage(ws, event, text, config, { reply = false } = {}) {
+  const binding = { id: config.__activeAccountId || event.__accountId || ws?.__hermesAccountId,
+    sessionId: config.__oneBotSessionId ?? ws?.__hermesSessionId };
+  text = botCommandFeedback(text, event);
   let message = trimForGroup(text, config);
   if (!message) return;
   if (reply && config.send?.replyToMessage !== false && event.message_id != null) {
@@ -5513,17 +5685,16 @@ function sendGroupMessage(ws, event, text, config, { reply = false } = {}) {
     const uid = asStringId(event.user_id);
     const minIntervalMs = Math.max(0, Number(config.send?.privateMinIntervalMs ?? 0));
     if (minIntervalMs > 0 && uid) {
-      const lastSent = privateMessageCooldowns.get(uid) || 0;
+      const lastSent = privateMessageCooldowns.get(`${ws?.__hermesAccountId || ""}:${uid}`) || 0;
       if (Date.now() - lastSent < minIntervalMs) {
         debug(`private cooldown (sendGroupMessage) uid=${uid}, skip`);
         return;
       }
-      privateMessageCooldowns.set(uid, Date.now());
+      privateMessageCooldowns.set(`${ws?.__hermesAccountId || ""}:${uid}`, Date.now());
     }
-    oneBotSend(ws, "send_private_msg", { user_id: event.user_id, message });
-    return;
+    return oneBotSend(ws, "send_private_msg", { user_id: event.user_id, message }, binding);
   }
-  oneBotSend(ws, "send_group_msg", { group_id: event.group_id, message });
+  return oneBotSend(ws, "send_group_msg", { group_id: event.group_id, message }, binding);
 }
 
 function splitLongMessage(text, maxLength = 1200) {
@@ -5567,16 +5738,16 @@ async function sendLongGroupMessage(ws, event, text, config, { reply = false, ma
       const uid = asStringId(event.user_id);
       const minIntervalMs = Math.max(0, Number(config.send?.privateMinIntervalMs ?? 0));
       if (minIntervalMs > 0 && uid) {
-        const lastSent = privateMessageCooldowns.get(uid) || 0;
+        const lastSent = privateMessageCooldowns.get(`${ws?.__hermesAccountId || ""}:${uid}`) || 0;
         if (Date.now() - lastSent < minIntervalMs) {
           debug(`private cooldown (sendLongGroupMessage) uid=${uid}, skip chunk ${index + 1}`);
           continue;
         }
-        privateMessageCooldowns.set(uid, Date.now());
+        privateMessageCooldowns.set(`${ws?.__hermesAccountId || ""}:${uid}`, Date.now());
       }
-      oneBotSend(ws, "send_private_msg", { user_id: event.user_id, message });
+      if (!await oneBotSend(ws, "send_private_msg", { user_id: event.user_id, message })) return false;
     } else {
-      oneBotSend(ws, "send_group_msg", { group_id: event.group_id, message });
+      if (!await oneBotSend(ws, "send_group_msg", { group_id: event.group_id, message })) return false;
     }
     if (index < chunks.length - 1 && intervalMs > 0) await sleep(intervalMs);
   }
@@ -5663,63 +5834,21 @@ function loginRecoveryConfig(config) {
 }
 
 function configuredAccountDefinitions(config) {
-  const accounts = config.accounts || {};
-  const primaryRaw = accounts.primary || {};
-  const primary = {
-    id: asStringId(primaryRaw.id || "primary") || "primary",
-    qq: asStringId(primaryRaw.qq || primaryRaw.uin || ""),
-    role: "primary",
-    displayName: stringValue(primaryRaw.displayName || primaryRaw.name || config.persona?.displayName || "Hermes小跟班").trim() || "Hermes小跟班",
-    styleProfileId: stringValue(primaryRaw.styleProfileId || "").trim(),
-    promptOverride: stringValue(primaryRaw.promptOverride || ""),
-    protocol: accountProtocol(primaryRaw),
-    onebotPath: String(primaryRaw.onebotPath || config.listen?.path || "/onebot"),
-    napcatContainer: String(primaryRaw.napcatContainer || "napcat"),
-    protocolContainer: String(primaryRaw.protocolContainer || (accountProtocol(primaryRaw) === "snowluma" ? "snowluma-primary" : primaryRaw.napcatContainer || "napcat")),
-    onebotWsUrl: String(primaryRaw.onebotWsUrl || (accountProtocol(primaryRaw) === "snowluma" ? "ws://127.0.0.1:6303" : "")),
-    webuiPort: primaryRaw.webuiPort == null ? undefined : Number(primaryRaw.webuiPort),
-    noVncPort: primaryRaw.noVncPort == null ? undefined : Number(primaryRaw.noVncPort),
-    vncPort: primaryRaw.vncPort == null ? undefined : Number(primaryRaw.vncPort),
-    snowlumaImage: String(primaryRaw.snowlumaImage || "motricseven7/snowluma:latest"),
-    snowlumaVolumes: isPlainObject(primaryRaw.snowlumaVolumes) ? deepClone(primaryRaw.snowlumaVolumes) : undefined,
-    enabled: primaryRaw.enabled !== false
-  };
-  const standbys = asArray(accounts.standbys)
-    .filter((item) => item)
-    .map((item, index) => ({
-      id: asStringId(item.id || `standby-${index + 1}`) || `standby-${index + 1}`,
-      qq: asStringId(item.qq || item.uin || ""),
-      role: "standby",
-      displayName: stringValue(item.displayName || item.name || `Hermes小跟班${index + 2}`).trim() || `Hermes小跟班${index + 2}`,
-      styleProfileId: stringValue(item.styleProfileId || "").trim(),
-      promptOverride: stringValue(item.promptOverride || ""),
-      protocol: accountProtocol(item),
-      onebotPath: String(item.onebotPath || primary.onebotPath),
-      napcatContainer: String(item.napcatContainer || `napcat-standby-${index + 1}`),
-      protocolContainer: String(item.protocolContainer || item.napcatContainer || (accountProtocol(item) === "snowluma" ? `snowluma-standby-${index + 1}` : `napcat-standby-${index + 1}`)),
-      onebotWsUrl: String(item.onebotWsUrl || (accountProtocol(item) === "snowluma" ? "ws://127.0.0.1:6301" : "")),
-      webuiPort: item.webuiPort == null ? undefined : Number(item.webuiPort),
-      noVncPort: item.noVncPort == null ? undefined : Number(item.noVncPort),
-      vncPort: item.vncPort == null ? undefined : Number(item.vncPort),
-      snowlumaImage: String(item.snowlumaImage || "motricseven7/snowluma:latest"),
-      snowlumaVolumes: isPlainObject(item.snowlumaVolumes) ? deepClone(item.snowlumaVolumes) : undefined,
-      behaviorMode: normalizeBehaviorMode(item.behaviorMode) || "normal",
-      enabled: item.enabled !== false
-    }));
-  return [primary, ...standbys];
+  return accountItems(config).map((item) => ({ ...effectiveAccount(config, item.id), role: item.role }));
 }
 
 function accountFailoverConfig(config) {
   const accounts = config.accounts || {};
   const allConfigured = configuredAccountDefinitions(config);
-  const primary = allConfigured.find((item) => item.role === "primary") || allConfigured[0];
-  const standbys = allConfigured.filter((item) => item.role === "standby" && item.enabled !== false);
+  const soleGroup = accountTopology(config) === "failover" ? normalizeAccountRegistry(config).failoverGroups[0] : null;
+  const primary = (soleGroup && allConfigured.find((item) => item.id === soleGroup.memberIds[0])) || allConfigured[0] || { id: "", enabled: false, protocolEnabled: false, role: "primary" };
+  const standbys = (soleGroup ? soleGroup.memberIds.slice(1).map((id) => allConfigured.find((item) => item.id === id)) : allConfigured.filter((item) => item.id !== primary.id)).filter((item) => item && item.enabled !== false && item.protocolEnabled !== false);
   const failover = accounts.failover || {};
   return {
     enabled: accountTopology(config) === "failover" && failover.enabled !== false && standbys.length > 0,
     primary,
     standbys,
-    all: [primary, ...standbys],
+    all: allConfigured,
     primaryRecoveryFirst: failover.primaryRecoveryFirst !== false,
     switchAfterMs: Math.max(10_000, Number(failover.switchAfterMs || 60_000)),
     messageStaleMs: Math.max(30_000, Number(failover.messageStaleMs || config.status?.messageInactiveWarnMs || 10 * 60_000)),
@@ -6014,14 +6143,14 @@ function flushDebouncedMessage(pending, config) {
   };
 }
 
-async function enqueueDebouncedMessage({ event, conversationId, senderId, senderName, text, rawText, mentioned, isPrivate, config }) {
+async function enqueueDebouncedMessage({ event, conversationId, senderId, accountId = "", senderName, text, rawText, mentioned, isPrivate, config }) {
   const cfg = messageDebounceConfig(config);
   const timing = messageTiming(event, { receivedAt: event?.__receivedAt || Date.now() });
   const singleMessage = { event, text, rawText, senderName, at: timing.sentAtMs, ...timing };
   if (!cfg.enabled) return { skip: false, event, text, rawText, messages: [singleMessage], count: 1, reason: "disabled" };
   const decision = shouldWaitForMoreInput({ text, mentioned, isPrivate, config });
   if (!decision.wait) return { skip: false, event, text, rawText, messages: [singleMessage], count: 1, reason: decision.reason };
-  const key = `${conversationId || "unknown"}:${senderId || "unknown"}`;
+  const key = `${conversationId || "unknown"}:${senderId || "unknown"}${accountTopology(config) === "failover" ? "" : `:${accountId || "unknown"}`}`;
   const now = Date.now();
   const existing = messageDebounceRuntime.get(key) || { seq: 0, messages: [], createdAt: now };
   const seq = existing.seq + 1;
@@ -6056,7 +6185,7 @@ function pendingDebouncedContext(conversationId, excludeSenderId = "") {
   const excludedKey = `${prefix}${excludeSenderId || "unknown"}`;
   const items = [];
   for (const [key, pending] of messageDebounceRuntime.entries()) {
-    if (!key.startsWith(prefix) || key === excludedKey) continue;
+    if (!key.startsWith(prefix) || key === excludedKey || key.startsWith(`${excludedKey}:`)) continue;
     const messages = asArray(pending?.messages);
     if (!messages.length) continue;
     const latest = messages.at(-1) || {};
@@ -6120,12 +6249,14 @@ function scheduleDelayedUnderstandingReply({
   memory,
   historyByGroup,
   lastBotMessageByGroup,
-  reason
+  reason,
+  isCurrent = () => true
 }) {
   const cfg = config.delayedUnderstanding || {};
+  const binding = oneBotBinding(ws, config.__activeAccountId);
   if (cfg.enabled === false || event.message_type !== "group") return false;
   const gid = asStringId(groupId);
-  const pendingKey = `${gid}:${asStringId(senderId) || "unknown"}`;
+  const pendingKey = `${gid}:${asStringId(senderId) || "unknown"}:${config.__activeAccountId || "primary"}`;
   const nowMs = Date.now();
   const waitMs = Math.max(500, Number(cfg.waitMs || 4500));
   const maxWaitMs = Math.max(waitMs, Number(cfg.maxWaitMs || 9000));
@@ -6148,17 +6279,19 @@ function scheduleDelayedUnderstandingReply({
   pending.timer = setTimeout(() => {
     if (pendingByGroup.get(pendingKey)?.token !== pending.token) return;
     pendingByGroup.delete(pendingKey);
+    if (!isCurrent()) return;
     replyCoordinator.enqueue({
       conversationId: gid,
       senderId: pending.senderId,
+      accountId: config.__activeAccountId || "primary",
       mode: "delayed",
       direct: false,
       currentMessages: [pending.current],
       messageIds: pending.current.messageIds,
       event: pending.event,
       execute: async ({ job, signal, revision }) => {
-      if (ws.readyState !== 1) return { sent: false, skipped: true };
-      if (isQuiet(memory, gid)) return { sent: false, skipped: true };
+      if (!isCurrent() || !oneBotBindingCurrent(ws, binding)) return { sent: false, skipped: true };
+      if (isQuiet(memory, gid, config)) return { sent: false, skipped: true };
       const latestHistory = historyByGroup.get(gid) || [];
       const seedIndex = latestHistory.findIndex((m) => (
         !m.isBot
@@ -6173,7 +6306,8 @@ function scheduleDelayedUnderstandingReply({
       const maxChars = Math.max(80, Number(cfg.maxChars || 700));
       const sliceEnd = Math.min(latestHistory.length, seedIndex + maxMessages + 1);
       const windowMessages = latestHistory.slice(seedIndex, sliceEnd);
-      const botAfterSeed = latestHistory.some((m, index) => index > seedIndex && m?.isBot);
+      const botAfterSeed = latestHistory.some((m, index) => index > seedIndex && m?.isBot
+        && (m.accountId ? sameLogicalAccount(config, m.accountId, config.__activeAccountId) : asStringId(m.user_id) === asStringId(pending.selfId)));
       if (cfg.skipIfBotRepliedAfterSeed !== false && botAfterSeed) {
         log(`delayed understanding skip group=${gid} reason=bot already replied`);
         return { sent: false, skipped: true };
@@ -6217,6 +6351,7 @@ function scheduleDelayedUnderstandingReply({
         archiveContext: archiveContext.text || ""
       });
       const response = trimForGroup(await callHermes(prompt, config, { signal }), config);
+      if (!isCurrent() || !oneBotBindingCurrent(ws, binding)) return { sent: false, skipped: true };
       if (signal.aborted || Number(job.contextRevision || 0) !== revision) return { retry: true };
       if (response === "__SKIP__" && config.reply?.allowSkip !== false) {
         log(`delayed understanding skip group=${gid} reason=ai skip`);
@@ -6224,7 +6359,7 @@ function scheduleDelayedUnderstandingReply({
       }
       if (!response) return { sent: false, skipped: true };
       const lastHuman = humanMessages.at(-1) || pending.current;
-      sendGroupMessage(ws, pending.event, response, config, { reply: cfg.replyToMessage === true });
+      if (!await sendGroupMessage(ws, pending.event, response, config, { reply: cfg.replyToMessage === true })) return { sent: false, skipped: true };
       recordBotMessage({
         historyByGroup,
         lastBotMessageByGroup,
@@ -6259,26 +6394,25 @@ function isGroupAdmin(event, config) {
   return roles.includes(role);
 }
 
-function quietUntil(memory, groupId) {
-  const gm = groupMemory(memory, groupId);
-  const raw = gm.settings?.quietUntil;
+function quietUntil(memory, groupId, config) {
+  const raw = groupSettings(memory, groupId, config).quietUntil;
   const until = Number(raw || 0);
   if (!Number.isFinite(until) || until < 0) return 0;
   return until;
 }
 
-function isQuiet(memory, groupId) {
-  const until = quietUntil(memory, groupId);
+function isQuiet(memory, groupId, config) {
+  const until = quietUntil(memory, groupId, config);
   return until > Date.now();
 }
 
-function repairInvalidQuietUntil(memory, groupId) {
-  const gm = groupMemory(memory, groupId);
-  const raw = gm.settings?.quietUntil;
+function repairInvalidQuietUntil(memory, groupId, config) {
+  const settings = groupSettings(memory, groupId, config, { write: true });
+  const raw = settings.quietUntil;
   if (raw == null || raw === "" || raw === 0) return false;
   const until = Number(raw);
   if (Number.isFinite(until) && until >= 0) return false;
-  gm.settings.quietUntil = 0;
+  settings.quietUntil = 0;
   saveMemory(memory);
   warn(`invalid quietUntil repaired group=${groupId} value=${JSON.stringify(raw)}`);
   return true;
@@ -6324,8 +6458,8 @@ function isWithinScheduleWindow(timeText, windowMinutes, date = new Date()) {
 
 async function handleBotCommand({ ws, event, text, config, memory, onVoiceCommand }) {
   if (config.commands?.enabled === false) return false;
-  const trimmed = String(text || "").trim().replace(/^(?:\[引用消息\]\s*)+/u, "").trim();
-  if (!trimmed.startsWith("/bot")) return false;
+  const trimmed = botCommandText(text);
+  if (!trimmed) return false;
   const args = trimmed.split(/\s+/).slice(1);
   const command = String(args[0] || "help").toLowerCase();
   const isPrivate = event.message_type === "private";
@@ -6333,11 +6467,11 @@ async function handleBotCommand({ ws, event, text, config, memory, onVoiceComman
     sendGroupMessage(ws, event, "私聊里先不处理 /bot 管理命令，你直接跟我说就行。", config, { reply: true });
     return true;
   }
-  const groupId = isPrivate ? `private:${asStringId(event.user_id)}` : asStringId(event.group_id);
+  const groupId = conversationIdFromEvent(event);
   const adminOnly = ["quiet", "mute", "安静", "shutup", "resume", "unquiet", "unmute", "醒醒", "remember", "forget", "archive", "存档", "learn", "学习", "mode", "模式", "style", "风格", "lively", "活泼", "活跃", "normal", "正常", "restrained", "克制"];
   const admin = isPrivate ? isPrivateOwner(event.user_id, config) : isGroupAdmin(event, config);
   const resumeCommands = ["resume", "unquiet", "unmute", "醒醒"];
-  if (isQuiet(memory, groupId) && (!resumeCommands.includes(command) || !admin)) {
+  if (isQuiet(memory, groupId, config) && (!resumeCommands.includes(command) || !admin)) {
     log(`command ignored while quiet group=${groupId} command=${command || "help"} admin=${admin}`);
     return true;
   }
@@ -6347,6 +6481,7 @@ async function handleBotCommand({ ws, event, text, config, memory, onVoiceComman
   }
 
   const gm = groupMemory(memory, groupId);
+  const settings = groupSettings(memory, groupId, config, { write: true, scoped: Boolean(config.__activeAccountId) });
   if (command === "voice" || command === "语音") {
     const sub = String(args[1] || "status").toLowerCase();
     const requestedMode = normalizeVoiceReplyMode(sub === "mode" ? args[2] : sub);
@@ -6359,14 +6494,14 @@ async function handleBotCommand({ ws, event, text, config, memory, onVoiceComman
         sendGroupMessage(ws, event, "语音总开关或 TTS 还没开启，请先在控制台配置。", config, { reply: true });
         return true;
       }
-      gm.settings.voiceReplyMode = requestedMode;
+      settings.voiceReplyMode = requestedMode;
       saveMemory(memory);
       sendGroupMessage(ws, event, `本会话语音模式已设为${{ off: "关闭", mixed: "混合", force: "强制" }[requestedMode]}。${requestedMode === "off" ? "仍可按 ASR 设置识别收到的语音。" : ""}`, config, { reply: true });
       return true;
     }
     if (["status", "状态", "mode"].includes(sub)) {
-      const mode = voiceReplyMode(gm.settings, config.voice);
-      const preset = gm.settings.voicePreset || config.voice?.tts?.voice || "mimo_default";
+      const mode = voiceReplyMode(settings, config.voice);
+      const preset = settings.voicePreset || config.voice?.tts?.voice || "mimo_default";
       sendGroupMessage(ws, event, `本会话语音模式：${{ off: "关闭", mixed: "混合", force: "强制" }[mode]}；音色：${preset}。\n关闭=只发文字；混合=按请求或对收到的语音酌情回语音；强制=聊天回复优先发语音。\n用法：/bot voice off|mixed|force；/bot voice preset list|音色ID；/bot voice synth 要说的话；/bot voice design 年轻 清亮 | 要说的话；/bot voice clone self 要说的话（须引用本人语音并确认）。`, config, { reply: true });
       return true;
     }
@@ -6381,14 +6516,14 @@ async function handleBotCommand({ ws, event, text, config, memory, onVoiceComman
   }
   if (command === "learn" || command === "学习") {
     const sub = String(args[1] || "status").toLowerCase();
-    if (["on", "开启"].includes(sub)) gm.settings.learningMode = true;
-    else if (["off", "关闭"].includes(sub)) gm.settings.learningMode = false;
+    if (["on", "开启"].includes(sub)) settings.learningMode = true;
+    else if (["off", "关闭"].includes(sub)) settings.learningMode = false;
     else if (!["status", "状态"].includes(sub)) {
       sendGroupMessage(ws, event, "用法：/bot learn on | off | status", config, { reply: true });
       return true;
     }
     saveMemory(memory);
-    sendGroupMessage(ws, event, `本群学习模式：${gm.settings.learningMode === true ? "开启" : "关闭"}。我只会在真的不懂群内称呼/梗时偶尔问一句。`, config, { reply: true });
+    sendGroupMessage(ws, event, `本群学习模式：${settings.learningMode === true ? "开启" : "关闭"}。我只会在真的不懂群内称呼/梗时偶尔问一句。`, config, { reply: true });
     return true;
   }
   if (command === "archive" || command === "存档") {
@@ -6443,7 +6578,7 @@ async function handleBotCommand({ ws, event, text, config, memory, onVoiceComman
       sendGroupMessage(ws, event, `当前模式：${behaviorModeLabel(currentMode)}\n用法：/bot mode lively | normal | restrained`, config, { reply: true });
       return true;
     }
-    gm.settings.behaviorMode = nextMode;
+    settings.behaviorMode = nextMode;
     saveMemory(memory);
     sendGroupMessage(ws, event, `已切到${behaviorModeDescription(nextMode)}`, config, { reply: true });
     log(`command mode group=${groupId} mode=${nextMode}`);
@@ -6456,7 +6591,7 @@ async function handleBotCommand({ ws, event, text, config, memory, onVoiceComman
       sendGroupMessage(ws, event, "用法：/bot quiet 10m，比如 30s、10m、2h。", config, { reply: true });
       return true;
     }
-    gm.settings.quietUntil = Date.now() + durationMs;
+    settings.quietUntil = Date.now() + durationMs;
     saveMemory(memory);
     sendGroupMessage(ws, event, `收到，我安静 ${formatDuration(durationMs)}。`, config, { reply: true });
     log(`command quiet group=${groupId} durationMs=${durationMs}`);
@@ -6464,7 +6599,7 @@ async function handleBotCommand({ ws, event, text, config, memory, onVoiceComman
   }
 
   if (["resume", "unquiet", "unmute", "醒醒"].includes(command)) {
-    gm.settings.quietUntil = 0;
+    settings.quietUntil = 0;
     saveMemory(memory);
     sendGroupMessage(ws, event, "我醒了，继续当赛博群友。", config, { reply: true });
     log(`command resume group=${groupId}`);
@@ -6473,10 +6608,11 @@ async function handleBotCommand({ ws, event, text, config, memory, onVoiceComman
 
   if (command === "status" || command === "状态") {
     const behaviorConfig = applyBehaviorMode(config, memory, groupId);
-    const quietLeft = quietUntil(memory, groupId) - Date.now();
+    const quietLeft = quietUntil(memory, groupId, config) - Date.now();
     const userCount = Object.keys(gm.users || {}).length;
     const factCount = (gm.facts || []).length;
     const status = [
+      `机器人：${botDisplayName(config)}${event.__botCommandAlias ? `（${event.__botCommandAlias}）` : ""}`,
       `状态：${quietLeft > 0 ? `安静中，还剩 ${formatDuration(quietLeft)}` : "在线，会聊天"}`,
       `模式：${behaviorModeLabel(behaviorConfig.__behaviorMode)}`,
       `记忆：已见过 ${userCount} 位群友，群梗/记录 ${factCount} 条`,
@@ -6527,7 +6663,8 @@ async function handleBotCommand({ ws, event, text, config, memory, onVoiceComman
       "/bot memory @某人  查看指定群友记忆",
       "/bot archive status|on|off|clear confirm  管理本群聊天存档",
       "/task status|confirm|cancel|resume  管理正式任务",
-      "/task add [任务号] <补充>  补充正在执行的任务"
+      "/task add [任务号] <补充>  补充正在执行的任务",
+      "quiet、模式、语音和学习设置仅作用于所选机器人；群友记忆和聊天存档仍由本群共用。"
     ].join("\n"),
     config,
     { reply: true }
@@ -6715,7 +6852,7 @@ function taskActionReply(command, result) {
   return taskStatusText(task);
 }
 
-async function handleTaskControl({ taskRuntime, ws, event, text, config, memory }) {
+async function handleTaskControl({ taskRuntime, ws, event, text, config, memory, claim = () => true, route = () => ({ ws, config }) }) {
   if (!taskRuntime || taskModeConfig(config).enabled === false) return false;
   const trimmed = String(text || "").trim();
   const naturalConfirm = /^(确认任务化|确认执行任务|正式执行|开始任务)$/.test(trimmed);
@@ -6723,11 +6860,13 @@ async function handleTaskControl({ taskRuntime, ws, event, text, config, memory 
   const naturalProgress = /^(?:(?:这个|那个)?任务(?:现在)?\s*)?(?:进度(?:怎么样了?)?|做到哪(?:儿)?了?|怎么样了?|什么情况|完成了吗?|弄好了吗?|还要多久)[？?。！!]*$/.test(trimmed);
   const isCommand = /^\/task(?:\s|$)/i.test(trimmed);
   const conversationId = conversationIdFromEvent(event);
-  const activeTask = taskRuntime.activeForConversation(conversationId);
-  const latestTask = taskRuntime.list({ conversationId, limit: 1 })[0] || null;
+  const accountTasks = taskRuntime.list({ conversationId, limit: 1000 }).filter((task) => !task.accountId || sameLogicalAccount(config, task.accountId, config.__activeAccountId));
+  const activeTask = accountTasks.find((task) => ["offered", "queued", "planning", "running", "waiting_permission", "reviewing", "delivering", "interrupted"].includes(task.status));
+  const latestTask = accountTasks[0] || null;
   const explicitProgressWords = /(?:任务|进度|做到哪|完成|弄好|还要多久)/.test(trimmed);
   const progressTask = activeTask || (explicitProgressWords ? latestTask : null);
   if (!naturalConfirm && !naturalCancel && !isCommand && !(naturalProgress && progressTask)) return false;
+  if (!claim(event, trimmed)) return true;
   archiveConversationEvent({
     event,
     config,
@@ -6741,6 +6880,11 @@ async function handleTaskControl({ taskRuntime, ws, event, text, config, memory 
   const command = naturalConfirm ? "confirm" : naturalCancel ? "cancel" : naturalProgress ? "status" : String(args[0] || "status").toLowerCase();
   const explicitTaskId = args.find((item) => /^task_/.test(item));
   const task = explicitTaskId ? taskRuntime.get(explicitTaskId) : activeTask || (command === "status" ? progressTask || latestTask : null);
+  if (task && (task.conversationId !== conversationId || (task.accountId && !sameLogicalAccount(config, task.accountId, config.__activeAccountId)))) return true;
+  const destination = route(task) || {};
+  const replyWs = destination.ws || ws;
+  const replyConfig = destination.config || config;
+  const replyBotId = accountById(replyConfig, replyConfig.__activeAccountId)?.qq || event?.self_id || "bot";
   const actor = { userId: asStringId(event.user_id), source: "qq" };
   let result;
   if (command === "confirm" || command === "确认") result = taskRuntime.confirm(task?.id, actor);
@@ -6756,13 +6900,15 @@ async function handleTaskControl({ taskRuntime, ws, event, text, config, memory 
     result = taskRuntime.addContext(task?.id, args.slice(startIndex).join(" "), actor);
   } else {
     const reply = taskStatusText(task);
-    sendGroupMessage(ws, event, reply, config, { reply: true });
-    archiveBotReply({ event, config, memory, text: reply, meta: { source: "task-status", user_id: event?.self_id || "bot", replyToUserId: event?.user_id, replyToSender: event?.sender?.card || event?.sender?.nickname || "" } });
+    if (await sendGroupMessage(replyWs, event, reply, replyConfig, { reply: true })) {
+      archiveBotReply({ event, config: replyConfig, memory, text: reply, meta: { source: "task-status", user_id: replyBotId, replyToUserId: event?.user_id, replyToSender: event?.sender?.card || event?.sender?.nickname || "" } });
+    }
     return true;
   }
   const reply = taskActionReply(command, result);
-  sendGroupMessage(ws, event, reply, config, { reply: true });
-  archiveBotReply({ event, config, memory, text: reply, meta: { source: `task-${command}`, user_id: event?.self_id || "bot", replyToUserId: event?.user_id, replyToSender: event?.sender?.card || event?.sender?.nickname || "" } });
+  if (await sendGroupMessage(replyWs, event, reply, replyConfig, { reply: true })) {
+    archiveBotReply({ event, config: replyConfig, memory, text: reply, meta: { source: `task-${command}`, user_id: replyBotId, replyToUserId: event?.user_id, replyToSender: event?.sender?.card || event?.sender?.nickname || "" } });
+  }
   return true;
 }
 
@@ -6985,6 +7131,9 @@ ${task.previousResultSummary ? `上一阶段结果：\n${task.previousResultSumm
 ${fileContext ? `\n主人明确授权并由桥接读取的文件内容：\n${fileContext}` : ""}
 ${research.text ? `\n联网检索证据：\n${research.text}` : ""}
 
+【当前运行模式与身份（优先于历史风格）】
+${accountIdentityForPrompt(config, taskAccount?.id || "primary")}
+
 完成后只输出 JSON，不要 Markdown 围栏：
 {
   "ok": true,
@@ -7069,9 +7218,9 @@ ${research.text ? `\n联网检索证据：\n${research.text}` : ""}
 
 // --- Hourly Chat ---
 
-const hourlyChatState = { lastSentAt: 0 };
+const hourlyChatState = { lastSentAt: 0, inFlight: false };
 
-async function runHourlyChat({ ws, config }) {
+async function runHourlyChat({ ws, config, isCurrent = () => true }) {
   if (config.hourlyChat?.enabled === false) return;
   if (ws.readyState !== 1) return;
 
@@ -7086,27 +7235,38 @@ async function runHourlyChat({ ws, config }) {
 
   const nowMs = Date.now();
   const hourMs = 3600000;
-  if (nowMs - hourlyChatState.lastSentAt < hourMs) return;
-  hourlyChatState.lastSentAt = nowMs;
+  if (hourlyChatState.inFlight || nowMs - hourlyChatState.lastSentAt < hourMs) return;
+  hourlyChatState.inFlight = true;
 
   const timeStr = localNowText();
-  const prompt = (hc.prompt || "现在时间 {{time}}。给你的主人发一条简短私聊。").replace("{{time}}", timeStr);
+  const prompt = `${systemPromptForAccount(config, config.__activeAccountId || "primary")}
+${(hc.prompt || "现在时间 {{time}}。给你的主人发一条简短私聊。").replace("{{time}}", timeStr)}
+${accountIdentityForPrompt(config, config.__activeAccountId || "primary")}
+只输出发给主人的消息，不要主动介绍账号架构。`;
 
   try {
     const response = await callHermes(prompt, config);
     const trimmed = (response || "").trim();
-    if (!trimmed || trimmed === "__SKIP__") return;
+    if (!trimmed || trimmed === "__SKIP__") {
+      hourlyChatState.lastSentAt = nowMs;
+      return;
+    }
+    if (!isCurrent()) return;
 
     for (const uid of ownerIds) {
-      sendPrivateMessageToUser(ws, uid, trimmed, config);
+      if (!await sendPrivateMessageToUser(ws, uid, trimmed, config)) throw new Error("hourly chat delivery not confirmed");
     }
+    hourlyChatState.lastSentAt = Date.now();
     log(`hourly chat sent to ${ownerIds.join(",")} text=${JSON.stringify(trimmed)}`);
   } catch (err) {
+    hourlyChatState.lastSentAt = nowMs;
     warn(`hourly chat failed: ${err.message}`);
+  } finally {
+    hourlyChatState.inFlight = false;
   }
 }
 
-async function runDailyMessages({ ws, config, memory, historyByGroup, lastEventByGroup, lastBotMessageByGroup, activeSocket, sendMessage }) {
+async function runDailyMessages({ ws, config, memory, historyByGroup, lastEventByGroup, lastBotMessageByGroup, activeSocket, isCurrent = () => true, sendMessage }) {
   const daily = config.dailyMessages;
   if (daily?.enabled === false) return;
   if (ws.readyState !== 1) return;
@@ -7127,8 +7287,8 @@ async function runDailyMessages({ ws, config, memory, historyByGroup, lastEventB
 
     for (const groupIdRaw of groups) {
       const groupId = asStringId(groupIdRaw);
-      if (activeSocket() !== ws || ws.readyState !== 1) return;
-      if (!groupId || wasDailySent(memory, groupId, key, dateKey) || isQuiet(memory, groupId)) continue;
+      if (!isCurrent() || activeSocket() !== ws || ws.readyState !== 1) return;
+      if (!groupId || wasDailySent(memory, groupId, key, dateKey) || isQuiet(memory, groupId, config)) continue;
 
       const history = historyByGroup.get(groupId) || [];
       const lastEvent = lastEventByGroup.get(groupId);
@@ -7155,8 +7315,8 @@ async function runDailyMessages({ ws, config, memory, historyByGroup, lastEventB
         });
         const response = trimForGroup(await callHermes(prompt, config), config);
         if (!response) continue;
-        if (activeSocket() !== ws || ws.readyState !== 1) return;
-        if (isQuiet(memory, groupId) || wasDailySent(memory, groupId, key, dateKey)) continue;
+        if (!isCurrent() || activeSocket() !== ws || ws.readyState !== 1) return;
+        if (isQuiet(memory, groupId, config) || wasDailySent(memory, groupId, key, dateKey)) continue;
         // Claim before sending: a lost OneBot acknowledgement must not trigger a duplicate summary.
         markDailySent(memory, groupId, key, dateKey, "sending");
         saveMemory(memory);
@@ -7206,6 +7366,7 @@ function publicConfig(config) {
     if (config.voice?.credentialSource === "keychain") keychainStored = voiceKeyAvailable;
   } catch { /* Keychain can be locked or unavailable; keep the admin page usable. */ }
   return {
+    revision: configRevision,
     botFeatures: deepClone(config.botFeatures || {}),
     styleProfiles: deepClone(config.styleProfiles || {}),
     automation: deepClone(config.automation || { enabled: false, rules: [] }),
@@ -7264,7 +7425,7 @@ function publicConfig(config) {
     adminNotifications: deepClone(config.adminNotifications || {}),
     loginRecovery: deepClone(config.loginRecovery || {}),
     observability: deepClone(config.observability || {}),
-    accounts: deepClone(config.accounts || {}),
+    accounts: publicAccountRegistry(config),
     memory: deepClone(config.memory || {}),
     prompt: { system: config.prompt?.system || "" },
     send: deepClone(config.send || {}),
@@ -7750,7 +7911,7 @@ function sanitizeConfigPatch(patch, currentConfig) {
       next.accounts.primary.role = "primary";
     }
     if (Array.isArray(patch.accounts.standbys)) {
-      next.accounts.standbys = patch.accounts.standbys.slice(0, 3).map((item, index) => {
+      next.accounts.standbys = patch.accounts.standbys.map((item, index) => {
         const current = next.accounts.standbys?.[index] || {};
         const merged = { ...current, ...(isPlainObject(item) ? item : {}) };
         return {
@@ -7844,13 +8005,35 @@ function sanitizeConfigPatch(patch, currentConfig) {
   }
   if (Object.prototype.hasOwnProperty.call(patch, "apiCenter")) {
     next.apiCenter = validateApiCenter(patch.apiCenter, currentConfig);
-    applyApiCenterBindings(next, next.apiCenter);
+    applyApiCenterBindings(next, next.apiCenter, "");
   } else if (currentConfig.apiCenter?.connections?.length && ["ai", "aiProfiles", "vision", "voice", "webSearch"].some((key) => isPlainObject(patch[key]))) {
     syncLegacyApiPatch(next, patch);
-    applyApiCenterBindings(next, next.apiCenter);
+    applyApiCenterBindings(next, next.apiCenter, "");
   }
   next.__path = currentConfig.__path || configPath;
-  return next;
+  return syncLegacyAccountPatch(currentConfig, next, patch);
+}
+
+function publicAccountRegistry(config) {
+  const registry = registryConfig(config).accounts;
+  return scrubRegistryValue({
+    version: 2, topology: registry.topology,
+    items: registry.items.map(publicAccount),
+    failoverGroups: deepClone(registry.failoverGroups),
+    primary: publicAccount(registry.primary),
+    standbys: registry.standbys.map(publicAccount),
+    failover: deepClone(registry.failover || {}),
+    diagnostics: deepClone(registry.diagnostics || {})
+  });
+}
+
+function scrubRegistryValue(value) {
+  if (Array.isArray(value)) return value.map(scrubRegistryValue);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => !/token|secret|password|credential|authorization|cookie|api.?key|auth/i.test(key))
+    .map(([key, entry]) => [key, scrubRegistryValue(entry)]));
+  if (typeof value === "string" && /^(?:https?|wss?):\/\//i.test(value)) return sanitizeUrlForLog(value);
+  return value;
 }
 
 function memorySummary(memory) {
@@ -7993,6 +8176,65 @@ async function runSocialSelfTest() {
   check(wasDailySent(dailyMemory, "123", "summary", "2026-09-24"), "legacy daily sent flag remains compatible");
   check(JSON.stringify(extractReplyMessageIds("[CQ:reply,id=123]hello")) === JSON.stringify(["123"]), "CQ reply id extraction");
   check(JSON.stringify(extractReplyMessageIds([{ type: "reply", data: { id: "456" } }])) === JSON.stringify(["456"]), "segment reply id extraction");
+  const topologyConfig = {
+    accounts: { topology: "function_split", primary: { id: "primary", qq: "90001", displayName: "甲" }, standbys: [{ id: "standby-a", qq: "90002", displayName: "乙", promptOverride: "历史风格：我喜欢短句。" }] },
+    botFeatures: { defaultMode: "all", accountModes: { primary: "task", "standby-a": "chat" } },
+    prompt: { system: "旧提示词不应覆盖当前模式。" },
+    history: { promptRecentMessages: 10 },
+    __activeAccountId: "standby-a", __activeAccountDisplayName: "乙", __activeAccountRole: "standby"
+  };
+  const topologyCurrent = { sender: "群友", user_id: "10001", text: "你是谁？", at: Date.now() };
+  const groupPrompt = buildPrompt({ config: topologyConfig, history: [{ sender: "乙", text: "以前我是备用号", at: Date.now() - 1000 }], current: topologyCurrent, mode: "reply" });
+  check(groupPrompt.includes("历史风格：我喜欢短句。") && groupPrompt.includes("账号平级，不存在主备接管"), "independent group prompt retains style and overrides legacy role");
+  check(!groupPrompt.includes("账号角色：standby") && !groupPrompt.includes("这是备用号在接管"), "independent group prompt does not instruct standby takeover");
+  const privatePrompt = buildPrompt({ config: { ...topologyConfig, privateChats: { ownerUserIds: ["10001"] } }, history: [], current: { ...topologyCurrent, isPrivate: true }, mode: "private" });
+  check(privatePrompt.includes("历史风格：我喜欢短句。") && privatePrompt.includes("账号平级，不存在主备接管"), "owner private prompt uses selected account style and topology");
+  const peerBotHistory = [{ isBot: true, accountId: "primary", user_id: "90001", text: "只有甲说过的话", at: Date.now() - 1000 }];
+  const secondaryImplicit = detectImplicitReplyToBot({
+    history: peerBotHistory,
+    current: { user_id: "10001", text: "继续", replyContexts: [{ isBot: true, senderId: "90001", text: "只有甲说过的话" }] },
+    config: topologyConfig
+  });
+  check(!secondaryImplicit.matched, "independent bot does not treat the peer's reply as its own follow-up");
+  const failoverPrompt = buildPrompt({ config: { ...topologyConfig, accounts: { ...topologyConfig.accounts, topology: "failover" } }, history: [], current: topologyCurrent, mode: "reply" });
+  check(failoverPrompt.includes("当前运行方式：主备接管") && failoverPrompt.includes("备用账号接管发言"), "failover prompt still describes genuine takeover");
+  check(accountReceivesMessage(topologyConfig, "standby-a", "primary"), "independent peer receives ordinary group messages even if primary is unavailable");
+  check(!accountReceivesMessage({ ...topologyConfig, accounts: { ...topologyConfig.accounts, topology: "failover" } }, "standby-a", "primary"), "failover standby does not process ordinary group messages");
+  const privateToPrimary = { message_type: "private", user_id: "10001", message_id: "pm1", __independentAccounts: true, __accountId: "primary" };
+  const privateToSecondary = { ...privateToPrimary, message_id: "pm2", __accountId: "standby-a" };
+  check(conversationIdFromEvent(privateToPrimary) !== conversationIdFromEvent(privateToSecondary), "independent bot private chats use separate runtime conversations");
+  check(archiveConversationMetaFromEvent(privateToPrimary, topologyConfig).messagesPath !== archiveConversationMetaFromEvent(privateToSecondary, topologyConfig).messagesPath, "independent bot private chats use separate archives");
+  check(conversationIdFromEvent({ ...privateToSecondary, __independentAccounts: false }) === "private:10001", "failover private chat keeps legacy conversation id");
+  const debounceConfig = { ...topologyConfig, messageDebounce: { minWaitMs: 2, baseWaitMs: 2, maxWaitMs: 5 } };
+  const makeDebounceEvent = (id) => ({ message_type: "group", group_id: "peer-test", user_id: "10001", message_id: id, time: Math.floor(Date.now() / 1000) });
+  const [primaryDebounce, secondaryDebounce] = await Promise.all([
+    enqueueDebouncedMessage({ event: makeDebounceEvent("m1"), conversationId: "peer-test", senderId: "10001", accountId: "primary", senderName: "群友", text: "@甲 你好", rawText: "@甲 你好", mentioned: true, config: debounceConfig }),
+    enqueueDebouncedMessage({ event: makeDebounceEvent("m2"), conversationId: "peer-test", senderId: "10001", accountId: "standby-a", senderName: "群友", text: "@乙 你好", rawText: "@乙 你好", mentioned: true, config: debounceConfig })
+  ]);
+  check(primaryDebounce.count === 1 && secondaryDebounce.count === 1 && primaryDebounce.text !== secondaryDebounce.text, "independent accounts do not debounce one user's messages together");
+  const dualMention = { message_type: "group", group_id: "peer-test", user_id: "10001", message_id: "both", time: 1234, message: "@甲 @乙 你好" };
+  check(accountScopedInboundKey(dualMention, dualMention.message, topologyConfig, "primary", { mentioned: true }) !== accountScopedInboundKey(dualMention, dualMention.message, topologyConfig, "standby-a", { mentioned: true }), "one message mentioning both independent bots is delivered to each account");
+  check(accountScopedInboundKey(dualMention, dualMention.message, topologyConfig, "primary") !== accountScopedInboundKey(dualMention, dualMention.message, topologyConfig, "standby-a"), "ordinary group messages are independently judged by every account");
+  check(accountScopedInboundKey(dualMention, dualMention.message, { ...topologyConfig, accounts: { ...topologyConfig.accounts, topology: "failover" } }, "primary", { mentioned: true }) === accountScopedInboundKey(dualMention, dualMention.message, { ...topologyConfig, accounts: { ...topologyConfig.accounts, topology: "failover" } }, "standby-a", { mentioned: true }), "failover messages remain globally deduplicated");
+  const storedMessages = new Map();
+  check(claimConversationMessage(storedMessages, dualMention, dualMention.message) && !claimConversationMessage(storedMessages, dualMention, dualMention.message), "shared archive and memory store the same human utterance once even when both bots answer");
+  const repeatedA = { ...dualMention, message_id: "repeat-a" };
+  const repeatedB = { ...dualMention, message_id: "repeat-b" };
+  check(stableMessageFingerprint(repeatedA, repeatedA.message) !== stableMessageFingerprint(repeatedB, repeatedB.message), "distinct QQ message IDs do not collapse identical text sent in one second");
+  const seenTaskControls = new Map();
+  check(claimConversationMessage(seenTaskControls, dualMention, "/task status") && !claimConversationMessage(seenTaskControls, dualMention, "/task status"), "dual-addressed task control is applied once");
+  const peerExtraction = memoryExtractionPrompt({ config: topologyConfig, groupId: "peer-test", gm: { users: {}, botSelf: { identity: ["旧主备身份不可混入"] } }, messages: [] });
+  check(!peerExtraction.includes("旧主备身份不可混入") && peerExtraction.includes("各 bot 的自我身份不在此批次提取"), "shared memory extraction excludes another bot's self identity");
+  const wsOne = {};
+  const wsTwo = {};
+  const rejected = [];
+  const pendingActions = new Map([
+    ["one", { ws: wsOne, reject: () => rejected.push("one") }],
+    ["two", { ws: wsTwo, reject: () => rejected.push("two") }]
+  ]);
+  const trackers = new Map([["one", { ws: wsOne, timer: null }], ["two", { ws: wsTwo, timer: null }]]);
+  clearOneBotActionsForSocket(wsOne, pendingActions, trackers);
+  check(rejected.join(",") === "one" && pendingActions.has("two") && trackers.has("two") && !trackers.has("one"), "one bot disconnect does not cancel the other bot's OneBot actions");
   const low = normalizeSocialDecision({ action: "reply", confidence: 0.2 }, { socialPlanner: { minConfidence: 0.55 } });
   check(low.action === "observe" && low.requestedAction === "reply", "low-confidence reply becomes observe");
   const wait = normalizeSocialDecision({ action: "wait", confidence: 0.4, intent: "followup" }, { socialPlanner: { minConfidence: 0.55 } });
@@ -8116,7 +8358,7 @@ async function main() {
     await runDryRun(config, dryMemory);
     return;
   }
-  if (normalizeMemorySchema(memory, config)) {
+  if (!registryMigrationPending && normalizeMemorySchema(memory, config)) {
     saveMemory(memory);
     log("memory schema normalized");
   }
@@ -8159,6 +8401,7 @@ async function main() {
   let lastAdminPeriodicStatusAt = adminNotificationConfig(config).periodicStatusSendOnStart ? 0 : Date.now();
   let activeAdminIncident = null;
   const accountQrNoticeKeys = new Map();
+  const independentAccountNoticeKeys = new Map();
   let lastMessageInactivePeerPingAt = 0;
   let lastMessageInactivePeerPingReason = "";
   const loginRecoveryState = {
@@ -8171,7 +8414,13 @@ async function main() {
     reason: ""
   };
   const oneBotAccounts = new Map();
+  const groupBotMembership = new GroupBotMembership();
   const wsAccountIds = new Map();
+  const storedConversationMessages = new Map();
+  const taskControlSeen = new Map();
+  const activeGroupAccounts = new Map();
+  const accountOperations = new Map();
+  const groupSendCoordinator = new GroupSendCoordinator({ minDelayMs: () => Math.max(1000, Number(config.responseQueue?.minDelayMs || 1000)) });
   let activeAccountId = accountFailoverConfig(config).primary.id;
   let activeOneBotWs = null;
   let dailyMessagesRunning = false;
@@ -8265,8 +8514,8 @@ async function main() {
     return `主号恢复了，我切回${nextName}。`;
   }
 
-  function announceAccountSwitchToGroup(groupId, previousAccount, nextAccount, reason = "") {
-    if (config.accounts?.failover?.announceInGroups === false) return false;
+  async function announceAccountSwitchToGroup(groupId, previousAccount, nextAccount, reason = "") {
+    if (accountTopology(config) !== "failover" || config.accounts?.failover?.announceInGroups === false) return false;
     const gid = asStringId(groupId);
     if (!gid || gid.startsWith("private:") || !activeOneBotWs || activeOneBotWs.readyState !== 1) return false;
     if (!shouldHandleGroup(gid, config)) return false;
@@ -8276,7 +8525,7 @@ async function main() {
     if (Date.now() - last < cooldownMs) return false;
     const message = trimForGroup(accountSwitchNoticeText(previousAccount, nextAccount, reason), config, 120);
     if (!message) return false;
-    if (!sendGroupMessageToGroup(activeOneBotWs, gid, message, config)) return false;
+    if (!await sendGroupMessageToGroup(activeOneBotWs, gid, message, config)) return false;
     lastAccountSwitchGroupNoticeAt.set(key, Date.now());
     recordBotMessage({
       historyByGroup,
@@ -8295,7 +8544,7 @@ async function main() {
     return true;
   }
 
-  function announceAccountSwitchToRecentGroups(previousAccount, nextAccount, reason = "") {
+  async function announceAccountSwitchToRecentGroups(previousAccount, nextAccount, reason = "") {
     if (config.accounts?.failover?.announceInGroups === false) return 0;
     const maxGroups = Math.max(1, Math.min(Number(config.accounts?.failover?.groupNoticeMaxGroups || 8), 30));
     const activeWindowMs = Math.max(60_000, Number(config.accounts?.failover?.groupNoticeActiveWindowMs || 6 * 60 * 60_000));
@@ -8312,12 +8561,20 @@ async function main() {
       .slice(-maxGroups);
     let sent = 0;
     for (const gid of groups) {
-      if (announceAccountSwitchToGroup(gid, previousAccount, nextAccount, reason)) sent += 1;
+      if (await announceAccountSwitchToGroup(gid, previousAccount, nextAccount, reason)) sent += 1;
     }
     return sent;
   }
 
-  function oneBotRequest(ws, action, params = {}, { timeoutMs = 10000 } = {}) {
+  function oneBotRequest(ws, action, params = {}, options = {}) {
+    if (/^send_|^upload_(?:group|private)_file$/.test(action)) {
+      if (!ws?.__hermesDispatch) return Promise.reject(new Error("OneBot delivery policy is not installed"));
+      return ws.__hermesDispatch(action, params, () => oneBotRequestRaw(ws, action, params, options), options.binding || oneBotBinding(ws));
+    }
+    return oneBotRequestRaw(ws, action, params, options);
+  }
+
+  function oneBotRequestRaw(ws, action, params = {}, { timeoutMs = 10000 } = {}) {
     return new Promise((resolve, reject) => {
       if (!ws || ws.readyState !== 1) {
         reject(new Error("onebot websocket not connected"));
@@ -8333,6 +8590,7 @@ async function main() {
         reject(new Error(`${action} timeout`));
       }, timeoutMs);
       pendingOneBotActions.set(echo, {
+        ws,
         resolve: (payload) => {
           clearTimeout(timer);
           if (isSendAction) recordAccountSend(accountId, action, { ok: true });
@@ -8352,7 +8610,7 @@ async function main() {
     const topology = accountTopology(config);
     const definitions = configuredAccountDefinitions(config);
     const eligible = definitions.filter((account) => {
-      if (account.enabled === false) return false;
+      if (account.enabled === false || !account.protocolEnabled || !accountIsSelected(account.id)) return false;
       if (role === "task" ? !accountCanOfferTask(config, account.id) : !accountCanChat(config, account.id)) return false;
       return oneBotAccounts.get(account.id)?.ws?.readyState === 1;
     });
@@ -8367,22 +8625,216 @@ async function main() {
     const standby = eligible.find((item) => item.id !== activeAccountId);
     const selected = topology === "collaboration" && allowCollaborationShare && standby && Math.random() < 0.2
       ? standby : preferred || active || eligible[0];
-    return { ...selected, ws: oneBotAccounts.get(selected.id).ws };
+    return selected ? { ...selected, ws: oneBotAccounts.get(selected.id).ws } : null;
   }
 
-  function configForReplyAccount(account) {
-    if (!account) return config;
-    return {
-      ...config,
-      __activeAccountId: account.id,
-      __activeAccountRole: account.role,
-      __activeAccountDisplayName: account.displayName
+  function configForReplyAccount(account, baseConfig = config) {
+    if (!account) return baseConfig;
+    return { ...configForAccountCapabilities(baseConfig, account.id), __activeAccountRole: account.role,
+      __oneBotSessionId: oneBotAccounts.get(account.id)?.ws?.__hermesSessionId };
+  }
+
+  function configForGroupAccount(account, groupId, baseConfig = config) {
+    // Project this account's defaults first; its logical-bot group overlay wins.
+    // Do not project again afterwards: that would reapply the account preset.
+    return applyBehaviorMode(configForReplyAccount(account, baseConfig), memory, groupId);
+  }
+
+  function selectedGroupAccount(group) {
+    let previous = activeGroupAccounts.get(group.id);
+    if (previous && !group.memberIds.includes(previous.id)) { activeGroupAccounts.delete(group.id); previous = null; }
+    const current = accountById(config, previous?.id || group.memberIds[0]);
+    const available = (item) => item && item.enabled && item.protocolEnabled && accountConnected(item.id);
+    if (!previous) {
+      const diagnosis = current && available(current) ? diagnoseAccount(current, accountStateById(current.id) || {}) : null;
+      const knownBad = diagnosis?.strongBad || ["WRONG_ACCOUNT", "LOGIN_REQUIRED", "STALE", "DEGRADED_SEND", "DEGRADED_RECEIVE"].includes(diagnosis?.routeState);
+      const selected = available(current) && !knownBad ? current : group.memberIds.map((id) => accountById(config, id)).find((item) => available(item) && standbyReadyForTakeover(item));
+      if (!selected) return "";
+      activeGroupAccounts.set(group.id, { id: selected.id, switchedAt: Date.now(), unhealthySince: 0 });
+      return selected.id;
+    }
+    const diagnosis = current ? diagnoseAccount(current, accountStateById(current.id) || {}) : null;
+    const stronglyBad = !available(current) || diagnosis?.strongBad || ["WRONG_ACCOUNT", "LOGIN_REQUIRED", "STALE", "DEGRADED_SEND", "DEGRADED_RECEIVE"].includes(diagnosis?.routeState);
+    if (!stronglyBad) previous.unhealthySince = 0;
+    else previous.unhealthySince ||= Date.now();
+    if (stronglyBad && group.settings?.enabled !== false
+      && Date.now() - previous.unhealthySince >= Math.max(1000, Number(group.settings?.switchAfterMs || 60000))
+      && Date.now() - previous.switchedAt >= Math.max(1000, Number(group.settings?.minSwitchIntervalMs || 90000))) {
+      const replacement = group.memberIds.filter((id) => id !== previous.id).map((id) => accountById(config, id)).find((item) => available(item) && standbyReadyForTakeover(item));
+      if (replacement) {
+        activeGroupAccounts.set(group.id, { id: replacement.id, switchedAt: Date.now() });
+        return replacement.id;
+      }
+    }
+    return previous.id;
+  }
+
+  function accountIsSelected(id) {
+    const group = accountGroup(config, id);
+    if (!group) return true;
+    if (accountTopology(config) === "failover") return id === activeAccountId;
+    return selectedGroupAccount(group) === id;
+  }
+
+  function accountSelectedSnapshot(id) {
+    const group = accountGroup(config, id);
+    if (!group) return true;
+    return group.memberIds.includes(id) && (accountTopology(config) === "failover" ? activeAccountId : activeGroupAccounts.get(group.id)?.id) === id;
+  }
+
+  function dispatchAccountAction(ws, action, params, send, binding = oneBotBinding(ws)) {
+    const sending = /^send_|^upload_(?:group|private)_file$/.test(action);
+    if (!sending) return Promise.resolve().then(send);
+    // CQ string transports encode file and display name separately. Expose
+    // those fields to policy checks without coercing the actual wire payload.
+    const policyMessage = (message) => {
+      if (typeof message === "string") {
+        const files = [...message.matchAll(/\[CQ:file,([^\]]*)\]/g)].map((match) => ({ type: "file", data: Object.fromEntries(
+          match[1].split(",").filter((field) => field.includes("=")).map((field) => {
+            const equals = field.indexOf("=");
+            return [field.slice(0, equals), field.slice(equals + 1).replace(/&#44;/g, ",").replace(/&#91;/g, "[").replace(/&#93;/g, "]").replace(/&amp;/g, "&")];
+          })
+        ) }));
+        return files.length ? [message, ...files] : message;
+      }
+      if (Array.isArray(message)) return message.map(policyMessage);
+      if (message?.type === "node" && message.data?.content) return { ...message, data: { ...message.data, content: policyMessage(message.data.content) } };
+      return message;
     };
+    const policyParams = { ...params, message: policyMessage(params.message ?? params.messages) };
+    const revision = configRevision;
+    const validate = () => {
+      // Capture the caller's identity before waiting for the group send slot.
+      // A recycled socket (including A -> B -> A) cannot deliver an old payload.
+      if (!oneBotBindingCurrent(ws, binding)) {
+        throw Object.assign(new Error("账号连接会话已变更，旧消息已取消"), { code: "ACCOUNT_SEND_BLOCKED" });
+      }
+      const id = binding.id;
+      const group = accountGroup(config, id);
+      const definition = accountById(config, id);
+      const diagnosis = definition ? diagnoseAccount(definition, accountStateById(id) || {}) : null;
+      const decision = accountDeliveryDecision(config, id, action, policyParams, {
+        quiet: Boolean(params.group_id && isQuiet(memory, String(params.group_id), configForReplyAccount(accountById(config, id)))),
+        activeGroupAccountId: group ? (accountTopology(config) === "failover" ? activeAccountId : selectedGroupAccount(group)) : ""
+      });
+      const invalidLogin = diagnosis && ["WRONG_ACCOUNT", "LOGIN_REQUIRED"].includes(diagnosis.routeState);
+      if (!decision.allowed || revision !== configRevision || !accountIsSelected(id) || invalidLogin) {
+        const error = new Error(decision.reason || "账号设置已更新，请重新生成回复");
+        error.code = "ACCOUNT_SEND_BLOCKED";
+        throw error;
+      }
+      if (ws.readyState !== 1 || oneBotAccounts.get(id)?.ws !== ws) throw new Error("onebot websocket not connected");
+    };
+    return groupSendCoordinator.dispatch(params.group_id, validate, () => {
+      // The coordinator awaits validation; recheck without another await at
+      // the wire boundary so a queued microtask cannot change the identity.
+      validate();
+      return send();
+    });
+  }
+
+  function validateAccountConfig(candidate) {
+    const next = registryConfig(candidate, { strict: true });
+    for (const previous of accountItems(config)) {
+      if (!accountById(next, previous.id) && accountReferences(previous.id).length) throw new Error("账号仍有活动任务、接管组或自动化引用，不能归档");
+    }
+    const individualConfig = registryConfig({ ...next, accounts: { ...next.accounts, failoverGroups: [] } });
+    for (const projection of [next, individualConfig]) {
+      for (const item of accountItems(projection)) {
+        try {
+          for (const capability of ["chat", "task", "vision", "asr", "tts", "search"]) resolveApiCapability(projection, capability, item.id);
+          configForAccountCapabilities(projection, item.id);
+        } catch { throw new Error(`账号 ${item.id} 引用的 API 模型方案不存在或类型不匹配，请先修改账号或接管组绑定`); }
+      }
+    }
+    for (const rule of next.automation?.rules || []) {
+      if (rule.accountId && !accountById(next, rule.accountId)) throw new Error("自动化引用了不存在的账号");
+      if (rule.groupId && !next.accounts.failoverGroups.some((group) => group.id === rule.groupId)) throw new Error("自动化引用了不存在的接管组");
+    }
+    return next;
+  }
+
+  function commitAccountConfig(candidate) {
+    const next = validateAccountConfig(candidate);
+    saveConfig(next);
+    replaceConfigInPlace(config, loadConfig());
+    for (const [id, state] of oneBotAccounts) {
+      const definition = accountById(config, id);
+      state.enabled = Boolean(definition?.enabled);
+      if (!definition?.protocolEnabled) state.ws?.close();
+    }
+    for (const [id, active] of activeGroupAccounts) if (!config.accounts.failoverGroups.some((group) => group.id === id && group.memberIds.includes(active.id))) activeGroupAccounts.delete(id);
+    if (accountTopology(config) !== "failover") for (const group of config.accounts.failoverGroups) selectedGroupAccount(group);
+    ensureForwardOneBotConnections();
+  }
+
+  function accountsPayload() {
+    // Elections must progress even when a failed member receives no new events.
+    if (accountTopology(config) !== "failover") for (const group of config.accounts.failoverGroups) selectedGroupAccount(group);
+    const registry = publicAccountRegistry(config);
+    return { ok: true, revision: configRevision, items: registry.items, failoverGroups: registry.failoverGroups,
+      statuses: accountSummary().map(scrubRegistryValue) };
+  }
+
+  async function allocateAccountPorts() {
+    const used = new Set([Number(config.listen?.port), Number(config.control?.port)]);
+    for (const item of accountItems(config, { includeArchived: true })) {
+      for (const port of [item.webuiPort, item.noVncPort, item.vncPort]) used.add(Number(port));
+      try { used.add(Number(new URL(item.onebotWsUrl).port)); } catch { /* reverse WS */ }
+    }
+    const ports = [];
+    for (let port = 16000; port < 65000 && ports.length < 4; port += 1) {
+      if (used.has(port)) continue;
+      const available = await new Promise((resolve) => {
+        const server = net.createServer();
+        server.once("error", () => resolve(false));
+        server.listen(port, "127.0.0.1", () => server.close(() => resolve(true)));
+      });
+      if (available) ports.push(port);
+    }
+    if (ports.length !== 4) throw new Error("没有足够的可用端口");
+    return ports;
+  }
+
+  function accountReferences(id) {
+    const references = [];
+    if ([...taskRuntime.tasks.values()].some((task) => task.accountId === id && !["completed", "failed", "cancelled"].includes(task.status))) references.push("active tasks");
+    if (config.accounts.failoverGroups.some((group) => group.memberIds.includes(id))) references.push("failover group");
+    if ((config.automation?.rules || []).some((rule) => rule.accountId === id || rule.senderAccountId === id || rule.conversationId?.endsWith(`:${id}`))) references.push("automation");
+    if (config.dailyMessages?.accountId === id) references.push("daily messages");
+    if ([...accountOperations.values()].some((operation) => operation.accountId === id && ["queued", "running"].includes(operation.status))) references.push("protocol operation");
+    return references;
+  }
+
+  function startAccountOperation(account, type) {
+    if ([...accountOperations.values()].some((operation) => operation.accountId === account.id && ["queued", "running"].includes(operation.status))) throw new Error("该账号已有协议操作进行中");
+    const operation = { id: randomBytes(16).toString("hex"), accountId: account.id, type, status: "queued", startedAt: Date.now() };
+    accountOperations.set(operation.id, operation);
+    setImmediate(async () => {
+      operation.status = "running";
+      try {
+        const current = accountById(config, account.id);
+        if (!current) throw new Error("账号已归档");
+        if (current.managed === false) {
+          operation.result = { managed: false, connected: accountConnected(current.id), message: "外部协议端不由此程序创建或停止" };
+        } else {
+          let result = type === "stop"
+            ? await runCommand("docker", ["stop", "-t", "3", accountProtocolContainer(current, config)], { timeoutMs: 20000 })
+            : await ensureAccountProtocolContainer(current, config);
+          if (type === "provision" && result?.ok && result.existed) result = await runCommand("docker", ["start", accountProtocolContainer(current, config)], { timeoutMs: 30000 });
+          if (result?.ok === false) throw new Error("协议端操作失败，请检查 Docker 和容器状态");
+          operation.result = { managed: true, ok: true };
+        }
+        operation.status = "completed";
+      } catch { operation.status = "failed"; operation.error = "协议端操作失败，请检查账号及 Docker 状态"; }
+      operation.finishedAt = Date.now();
+    });
+    return operation;
   }
 
   async function maybeInterBotFollowup({ groupId, event, speakerAccount, previousText }) {
     const options = config.botFeatures?.interBot || {};
-    if (accountTopology(config) !== "collaboration" || options.enabled !== true || isQuiet(memory, groupId)) return;
+    if (accountTopology(config) !== "collaboration" || options.enabled !== true) return;
     const probability = Math.max(0, Math.min(0.1, Number(options.probability ?? 0.03)));
     const cooldownMs = Math.max(300_000, Number(options.cooldownMs || 1_800_000));
     if (Math.random() >= probability || Date.now() - Number(interBotLastAt.get(groupId) || 0) < cooldownMs) return;
@@ -8392,12 +8844,13 @@ async function main() {
     if (!otherAccount) return;
     interBotLastAt.set(groupId, Date.now());
     const originalMessageId = asStringId(event.message_id);
-    const stillSameConversation = () => !isQuiet(memory, groupId)
+    const stillSameConversation = () => !isQuiet(memory, groupId, configForReplyAccount(otherAccount))
       && oneBotAccounts.get(otherAccount.id)?.ws?.readyState === 1
       && (!originalMessageId || asStringId(lastEventByGroup.get(groupId)?.message_id) === originalMessageId);
     await sleep(1_500);
     if (!stillSameConversation()) return;
     const otherConfig = configForReplyAccount(otherAccount);
+    const binding = oneBotBinding(oneBotAccounts.get(otherAccount.id)?.ws, otherAccount.id);
     const history = (historyByGroup.get(groupId) || []).slice(-10);
     const current = { sender: speakerAccount.displayName, user_id: speakerAccount.qq || speakerAccount.id, text: previousText, at: Date.now(), isBot: true };
     const prompt = `${buildPrompt({ config: otherConfig, history, current, mode: "implicit",
@@ -8407,23 +8860,23 @@ async function main() {
     const response = trimForGroup(await callHermes(prompt, otherConfig), otherConfig, 80);
     if (!response || response === "__SKIP__" || !stillSameConversation()) return;
     const ws = oneBotAccounts.get(otherAccount.id).ws;
-    await oneBotRequest(ws, "send_group_msg", { group_id: groupId, message: response }, { timeoutMs: 30_000 });
+    await oneBotRequest(ws, "send_group_msg", { group_id: groupId, message: response }, { timeoutMs: 30_000, binding });
     archiveBotReply({ event, config: otherConfig, memory, text: response,
       meta: { source: "inter-bot", user_id: otherAccount.qq || otherAccount.id } });
     recordBotMessage({ historyByGroup, lastBotMessageByGroup, groupId, text: response, config: otherConfig, memory,
       meta: { source: "inter-bot", user_id: otherAccount.qq || otherAccount.id } });
   }
 
-  function learningPromptForConversation(conversationId) {
-    if (conversationId.startsWith("private:") || config.learningMode?.enabled === false) return "";
+  function learningPromptForConversation(conversationId, runtimeConfig = config) {
+    if (conversationId.startsWith("private:") || runtimeConfig.learningMode?.enabled === false) return "";
     const gm = groupMemory(memory, conversationId);
-    const enabled = gm.settings?.learningMode === true
-      || asArray(config.learningMode?.groupIds).map(asStringId).includes(conversationId);
+    const settings = groupSettings(memory, conversationId, runtimeConfig);
+    const enabled = settings.learningMode ?? asArray(runtimeConfig.learningMode?.groupIds).map(asStringId).includes(conversationId);
     if (!enabled) return "";
     const date = localDateKey();
     const count = Number(gm.settings?.learningQuestions?.[date] || 0);
-    if (count >= Number(config.learningMode?.maxQuestionsPerDay || 3)) return "";
-    if (Date.now() - Number(gm.settings?.lastLearningQuestionAt || 0) < Number(config.learningMode?.minIntervalMs || 1800000)) return "";
+    if (count >= Number(runtimeConfig.learningMode?.maxQuestionsPerDay || 3)) return "";
+    if (Date.now() - Number(gm.settings?.lastLearningQuestionAt || 0) < Number(runtimeConfig.learningMode?.minIntervalMs || 1800000)) return "";
     return "仅当你真的不懂本群特有称呼、梗或事件，且现有上下文/记忆无法解答时，可以自然地问一个简短具体的问题。提问的回复最前面加 __LEARN__ 标记供系统计数；其他回复绝不能加。不要为了学习而打断讨论，不要把别人玩笑当事实。";
   }
 
@@ -8439,9 +8892,18 @@ async function main() {
     saveMemory(memory);
   }
 
+  function taskDeliveryAccount(task) {
+    const owner = accountById(config, task?.accountId);
+    if (!owner) return null;
+    const group = accountGroup(config, owner.id);
+    const selectedId = group ? (accountTopology(config) === "failover" ? activeAccountId : selectedGroupAccount(group)) : owner.id;
+    const selected = accountById(config, selectedId);
+    return selected?.enabled && selected.protocolEnabled && accountConnected(selectedId) ? { ...selected, ws: oneBotAccounts.get(selectedId).ws } : null;
+  }
+
   async function sendTaskArtifact(task, artifact) {
-    const ws = oneBotAccounts.get(task.accountId)?.ws?.readyState === 1
-      ? oneBotAccounts.get(task.accountId).ws : activeOneBotWs;
+    const ws = taskDeliveryAccount(task)?.ws;
+    const binding = oneBotBinding(ws);
     if (!ws || ws.readyState !== 1 || !artifact?.filePath || !fs.existsSync(artifact.filePath)) return false;
     const ext = path.extname(artifact.name || artifact.filePath).toLowerCase();
     const image = [".png", ".jpg", ".jpeg", ".gif", ".webp"].includes(ext);
@@ -8449,7 +8911,7 @@ async function main() {
     const video = [".mp4"].includes(ext);
     const activeAccount = accountById(config, ws?.__hermesAccountId || activeAccountId);
     let protocolFilePath = path.resolve(artifact.filePath);
-    if (activeAccount && accountProtocol(activeAccount) === "snowluma") {
+    if (activeAccount?.managed !== false && accountProtocol(activeAccount) === "snowluma") {
       const uploadDir = path.join(snowlumaStateDirForAccount(activeAccount), "data", "hermes-task-uploads", safePathSegment(task.id));
       fs.mkdirSync(uploadDir, { recursive: true });
       const hostCopy = path.join(uploadDir, path.basename(artifact.name || artifact.filePath));
@@ -8461,18 +8923,19 @@ async function main() {
         const type = image ? "image" : record ? "record" : "video";
         const message = [{ type, data: { file: `file://${protocolFilePath}` } }];
         try {
-          if (task.messageType === "private") await oneBotRequest(ws, "send_private_msg", { user_id: task.userId, message }, { timeoutMs: 30_000 });
-          else await oneBotRequest(ws, "send_group_msg", { group_id: task.groupId, message }, { timeoutMs: 30_000 });
+          if (task.messageType === "private") await oneBotRequest(ws, "send_private_msg", { user_id: task.userId, message }, { timeoutMs: 30_000, binding });
+          else await oneBotRequest(ws, "send_group_msg", { group_id: task.groupId, message }, { timeoutMs: 30_000, binding });
           return true;
         } catch (mediaError) {
+          if (mediaError.code === "ACCOUNT_SEND_BLOCKED") throw mediaError;
           if (image) throw mediaError;
           warn(`task ${type} segment unsupported; falling back to file upload task=${task.id}: ${mediaError.message}`);
         }
       }
       if (task.messageType === "private") {
-        await oneBotRequest(ws, "upload_private_file", { user_id: task.userId, file: protocolFilePath, name: artifact.name }, { timeoutMs: 45_000 });
+        await oneBotRequest(ws, "upload_private_file", { user_id: task.userId, file: protocolFilePath, name: artifact.name }, { timeoutMs: 45_000, binding });
       } else {
-        await oneBotRequest(ws, "upload_group_file", { group_id: task.groupId, file: protocolFilePath, name: artifact.name }, { timeoutMs: 45_000 });
+        await oneBotRequest(ws, "upload_group_file", { group_id: task.groupId, file: protocolFilePath, name: artifact.name }, { timeoutMs: 45_000, binding });
       }
       return true;
     } catch (err) {
@@ -8482,10 +8945,9 @@ async function main() {
   }
 
   async function notifyTask(task, notice = {}) {
-    const ws = oneBotAccounts.get(task.accountId)?.ws?.readyState === 1
-      ? oneBotAccounts.get(task.accountId).ws : activeOneBotWs;
+    const ws = taskDeliveryAccount(task)?.ws;
     if (!ws || ws.readyState !== 1) return false;
-    if (task.messageType === "group" && isQuiet(memory, task.groupId)) {
+    if (task.messageType === "group" && isQuiet(memory, task.groupId, configForReplyAccount(taskDeliveryAccount(task)))) {
       log(`task notification suppressed by quiet task=${task.id} type=${notice.type}`);
       return false;
     }
@@ -8504,8 +8966,10 @@ async function main() {
     }
     if (asArray(notice.artifacts).length && delivered < asArray(notice.artifacts).length) {
       const fallback = `有 ${asArray(notice.artifacts).length - delivered} 个任务产物未能通过 OneBot 上传，可在本机管理页“任务 / Agent”中下载。`;
-      if (task.messageType === "private") sendPrivateMessageToUser(ws, task.userId, fallback, config);
-      else sendGroupMessageToGroup(ws, task.groupId, fallback, config);
+      const sent = task.messageType === "private"
+        ? await sendPrivateMessageToUser(ws, task.userId, fallback, config)
+        : await sendGroupMessageToGroup(ws, task.groupId, fallback, config);
+      if (!sent) return false;
     }
     return true;
   }
@@ -8513,7 +8977,7 @@ async function main() {
   const taskRuntime = new TaskRuntime({
     rootDir: stateRoot,
     config: () => config,
-    execute: (task, runtime) => runHermesAgentTask(task, runtime, config),
+    execute: (task, runtime) => runHermesAgentTask(task, runtime, configForReplyAccount(accountById(config, task.accountId))),
     notify: notifyTask,
     log,
     warn
@@ -8541,11 +9005,16 @@ async function main() {
     }
     const state = accountStateById(account.id);
     const started = Date.now();
-    if (!state?.ws || state.ws.readyState !== 1) {
+    if (!state?.ws || state.ws.readyState !== 1 || state.ws.__hermesAccountId !== account.id) {
       const result = { ok: false, accountId: account.id, checkedAt: Date.now(), durationMs: Date.now() - started, error: "OneBot websocket not connected" };
       accountProbeCache.set(account.id, result);
       return result;
     }
+    const ws = state.ws;
+    const probeBinding = oneBotBinding(ws, account.id);
+    const currentSession = () => accountStateById(account.id) === state && state.ws === ws
+      && oneBotBindingCurrent(ws, probeBinding)
+      && accountById(config, account.id)?.qq === account.qq;
     const result = {
       ok: false,
       accountId: account.id,
@@ -8557,13 +9026,13 @@ async function main() {
     };
     try {
       const [loginInfo, status] = await Promise.allSettled([
-        oneBotRequest(state.ws, "get_login_info", {}, { timeoutMs }),
-        oneBotRequest(state.ws, "get_status", {}, { timeoutMs })
+        oneBotRequest(ws, "get_login_info", {}, { timeoutMs }),
+        oneBotRequest(ws, "get_status", {}, { timeoutMs })
       ]);
       if (loginInfo.status === "fulfilled") result.loginInfo = loginInfo.value;
       if (status.status === "fulfilled") result.status = status.value;
       const probedUserId = asStringId(result.loginInfo?.user_id || result.loginInfo?.data?.user_id || "");
-      if (probedUserId) {
+      if (probedUserId && currentSession()) {
         state.selfId = probedUserId;
         if (!state.qq) state.qq = probedUserId;
       }
@@ -8578,7 +9047,13 @@ async function main() {
     } finally {
       result.checkedAt = Date.now();
       result.durationMs = result.checkedAt - started;
-      accountProbeCache.set(account.id, result);
+      if (currentSession()) accountProbeCache.set(account.id, result);
+      else {
+        result.ok = false;
+        result.loginInfo = null;
+        result.status = null;
+        result.error = "account connection changed during probe";
+      }
     }
     return result;
   }
@@ -8626,6 +9101,27 @@ async function main() {
     );
   }
 
+  function acceptPeerPing(accountState, event, peerPing) {
+    if (event.message_type !== "private" || !accountById(config, accountState.id)) return false;
+    const expected = accountPeerPing.get(accountState.id);
+    const sender = expected?.expectedFrom && accountById(config, expected.expectedFrom);
+    const age = Date.now() - Number(expected?.expectedAt || 0);
+    const freshMs = Math.max(30_000, Number(config.accounts?.diagnostics?.peerPingFreshMs || 15 * 60_000));
+    if (!sender || !expected.expectedAt || age < 0 || age > freshMs
+      || peerPing.from !== sender.id || peerPing.to !== accountState.id
+      || !expected.expectedToken || peerPing.token !== expected.expectedToken
+      || expected.receivedToken === peerPing.token
+      || asStringId(event.user_id) !== accountActualQq(sender)) return false;
+    accountPeerPing.set(accountState.id, {
+      ...expected,
+      receivedAt: Date.now(),
+      receivedFrom: sender.id,
+      receivedToken: peerPing.token,
+      receivedSenderId: asStringId(event.user_id)
+    });
+    return true;
+  }
+
   async function sendPeerPing(fromAccount, toAccount) {
     const fromState = accountStateById(fromAccount.id);
     if (!fromState?.ws || fromState.ws.readyState !== 1) {
@@ -8640,10 +9136,19 @@ async function main() {
     const token = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
     const text = `[Hermes诊断] ping:${token} from:${fromAccount.id} to:${toAccount.id}`;
     const started = Date.now();
+    // A genuine receive event may arrive before the sender's OneBot ACK.
+    accountPeerPing.set(fromAccount.id, {
+      ...(accountPeerPing.get(fromAccount.id) || {}),
+      sentAt: started, sentTo: toAccount.id, sentOk: null, sentError: "", token
+    });
+    accountPeerPing.set(toAccount.id, {
+      ...(accountPeerPing.get(toAccount.id) || {}),
+      expectedAt: started, expectedFrom: fromAccount.id, expectedToken: token
+    });
     try {
       await oneBotRequest(fromState.ws, "send_private_msg", { user_id: toQq, message: text }, { timeoutMs: Number(config.accounts?.diagnostics?.peerPingSendTimeoutMs || 10000) });
       const current = accountPeerPing.get(fromAccount.id) || {};
-      accountPeerPing.set(fromAccount.id, {
+      if (current.token === token) accountPeerPing.set(fromAccount.id, {
         ...current,
         sentAt: Date.now(),
         sentTo: toAccount.id,
@@ -8651,24 +9156,18 @@ async function main() {
         sentError: "",
         token
       });
-      const targetCurrent = accountPeerPing.get(toAccount.id) || {};
-      accountPeerPing.set(toAccount.id, {
-        ...targetCurrent,
-        expectedAt: Date.now(),
-        expectedFrom: fromAccount.id,
-        expectedToken: token
-      });
       return { ok: true, from: fromAccount.id, to: toAccount.id, targetQq: toQq, durationMs: Date.now() - started };
     } catch (err) {
       const current = accountPeerPing.get(fromAccount.id) || {};
-      accountPeerPing.set(fromAccount.id, {
+      if (current.token === token) accountPeerPing.set(fromAccount.id, {
         ...current,
         sentAt: Date.now(),
         sentTo: toAccount.id,
-        sentOk: false,
+        sentOk: err.code === "ACCOUNT_SEND_BLOCKED" ? null : false,
         sentError: err.message,
         token
       });
+      if (err.code === "ACCOUNT_SEND_BLOCKED") return { ok: false, blocked: true, from: fromAccount.id, to: toAccount.id, error: err.message };
       return { ok: false, from: fromAccount.id, to: toAccount.id, targetQq: toQq, durationMs: Date.now() - started, error: err.message };
     }
   }
@@ -8698,6 +9197,7 @@ async function main() {
       });
       return { ok: true, type: "owner-send-check", from: account.id, to: ownerQq, durationMs: Date.now() - started };
     } catch (err) {
+      if (err.code === "ACCOUNT_SEND_BLOCKED") return { ok: false, blocked: true, from: account.id, error: err.message };
       const current = accountPeerPing.get(account.id) || {};
       accountPeerPing.set(account.id, {
         ...current,
@@ -8970,18 +9470,21 @@ async function main() {
     const account = accountById(config, accountId);
     const uid = asStringId(userId);
     if (!account || !uid) return { ok: false, error: "account or owner user id missing" };
+    const accountLabel = accountTopology(config) === "failover"
+      ? account.role === "primary" ? "主账号" : "备用账号"
+      : "账号";
     if (accountProtocol(account) === "snowluma") {
       const ensured = await ensureAccountProtocolContainer(account, config);
       const webui = snowlumaWebuiInfoForAccount(account);
-      sendPrivateMessageToUser(
+      const sent = await sendPrivateMessageToUser(
         ws,
         uid,
         ensured.ok
-          ? `备用账号 ${account.displayName || account.id} 使用 SnowLuma。请打开 WebUI 登录：${webui.url}\nSnowLuma 二维码由它自己的 WebUI 展示，本项目不直接转发内部二维码文件。`
-          : `备用账号 ${account.displayName || account.id} 的 SnowLuma 容器启动失败：${ensured.error || ensured.stderr || "未知错误"}`,
+          ? `${accountLabel} ${account.displayName || account.id} 使用 SnowLuma。请打开 WebUI 登录：${webui.url}\nSnowLuma 二维码由它自己的 WebUI 展示，本项目不直接转发内部二维码文件。`
+          : `${accountLabel} ${account.displayName || account.id} 的 SnowLuma 容器启动失败：${ensured.error || ensured.stderr || "未知错误"}`,
         config
       );
-      return { ok: Boolean(ensured.ok), accountId: account.id, protocol: "snowluma", webui, ensured };
+      return { ok: Boolean(ensured.ok && sent), accountId: account.id, protocol: "snowluma", webui, ensured };
     }
     let qrcode = qrFileInfoForAccount(account.id, { sync: true, currentConfig: config });
     const state = accountSummary().find((item) => item.id === account.id);
@@ -8992,7 +9495,7 @@ async function main() {
       if (account.role === "primary" && state?.connected && !force && !state.needsLogin && !state.suspectFakeOnline && !qrcode.exists) {
         await oneBotRequest(ws, "send_private_msg", {
           user_id: uid,
-          message: `主号 ${account.displayName || account.id} 当前在线，我没有刷新二维码，避免把正在用的登录态打断。\n如果确认要重新登录，发：强制刷新主号二维码`
+          message: `${accountLabel} ${account.displayName || account.id} 当前在线，我没有刷新二维码，避免把正在用的登录态打断。\n如果确认要重新登录，请指定该账号并强制刷新二维码。`
         }, { timeoutMs: 15000 });
         return { ok: false, online: true, accountId: account.id, message: "primary online; not refreshed" };
       }
@@ -9009,11 +9512,11 @@ async function main() {
     if (!qrcode.exists || !qrcode.filePath) {
       await oneBotRequest(ws, "send_private_msg", {
         user_id: uid,
-        message: `${account.displayName || account.id} 暂无二维码。你可以发“发最新${account.role === "primary" ? "主号" : "备用"}二维码”让我刷新一次。`
+        message: `${account.displayName || account.id} 暂无二维码。请指定该账号刷新登录二维码。`
       }, { timeoutMs: 15000 });
       return { ok: false, accountId: account.id, message: "qrcode not found" };
     }
-    const caption = `${account.displayName || account.id} 的登录二维码如下。\n账号：${account.id}${account.enabled === false ? "（已停用，不会参与聊天）" : ""}\n如果扫码后仍过期，发“发最新${account.role === "primary" ? "主号" : "备用"}二维码”。`;
+    const caption = `${account.displayName || account.id} 的登录二维码如下。\n账号：${account.id}${account.enabled === false ? "（已停用，不会参与聊天）" : ""}\n如果扫码后仍过期，请指定该账号刷新登录二维码。`;
     await oneBotRequest(ws, "send_private_msg", { user_id: uid, message: caption }, { timeoutMs: 15000 });
     try {
       await oneBotRequest(ws, "send_private_msg", {
@@ -9087,7 +9590,7 @@ async function main() {
   function diagnoseAccount(account, state = {}, nowMs = Date.now()) {
     const failoverCfg = accountFailoverConfig(config);
     const connected = Boolean(state.ws && state.ws.readyState === 1);
-    const active = account.id === activeAccountId;
+    const active = accountSelectedSnapshot(account.id);
     const protocol = accountProtocol(account);
     const qrcode = protocol === "napcat"
       ? qrFileInfoForAccount(account.id, { sync: false, currentConfig: config })
@@ -9124,7 +9627,9 @@ async function main() {
     const expectedFromAccount = peerPing.expectedFrom ? accountById(config, peerPing.expectedFrom) : null;
     const expectedFromActualQq = expectedFromAccount ? accountActualQq(expectedFromAccount) : "";
     const expectedFromSameQq = Boolean(actualQq && expectedFromActualQq && actualQq === expectedFromActualQq);
-    const expectedSenderConfirmed = Boolean(peerPing.expectedFrom && accountPeerPing.get(peerPing.expectedFrom)?.sentOk === true);
+    const expectedSender = peerPing.expectedFrom && accountPeerPing.get(peerPing.expectedFrom);
+    const expectedSenderConfirmed = Boolean(expectedSender?.sentOk === true
+      && expectedSender.token === peerPing.expectedToken && expectedSender.sentTo === account.id);
     const receivedExpectedToken = Boolean(peerPing.expectedToken && peerPing.receivedToken && peerPing.expectedToken === peerPing.receivedToken);
     const latestReceiveAfterExpectedAt = Math.max(Number(lastMessageAt || 0), Number(peerPing.receivedAt || 0));
     const peerReceiveMissing = Boolean(
@@ -9160,8 +9665,9 @@ async function main() {
         && !probeStatusOnlineFalse
       ))
     );
-    const primaryBlocked = account.id === failoverCfg.primary.id ? primaryRecoveryBlockedReason(failoverCfg, nowMs) : "";
-    const primaryStalled = account.id === failoverCfg.primary.id ? primaryReceiveStalledReason(failoverCfg, nowMs) : "";
+    const failoverMode = accountTopology(config) === "failover";
+    const primaryBlocked = failoverMode && account.id === failoverCfg.primary.id ? primaryRecoveryBlockedReason(failoverCfg, nowMs) : "";
+    const primaryStalled = failoverMode && account.id === failoverCfg.primary.id ? primaryReceiveStalledReason(failoverCfg, nowMs) : "";
     const hasChatMessageEvidence = Boolean(lastMessageAt && (!state.lastConnectedAt || lastMessageAt >= Number(state.lastConnectedAt || 0)));
     const hasMessageEvidence = Boolean(hasChatMessageEvidence || peerReceiveFresh);
     const noMessagesAfterConnect = Boolean(
@@ -9169,12 +9675,8 @@ async function main() {
       && !hasMessageEvidence
       && connectedForMs >= Math.max(15_000, Number(config.accounts?.diagnostics?.noMessageWarnMs || failoverCfg.switchAfterMs || 60_000))
     );
-    const activeSendFailure = Boolean(
-      active
-      && oneBotSendRuntime.lastSendFailedAt
-      && oneBotSendRuntime.lastSendFailedAt >= oneBotSendRuntime.lastSendOkAt
-      && oneBotSendRuntime.lastSendAction !== "send_private_msg"
-    );
+    const activeSendFailure = Boolean(sendState.lastGroupSendFailedAt
+      && Number(sendState.lastGroupSendFailedAt) >= Number(sendState.lastGroupSendOkAt || 0));
     const lastFrameFresh = Boolean(lastFrameAt && nowMs - lastFrameAt <= frameStaleMs);
     const recentPrivateSendOk = abilityFresh(sendState.lastPrivateSendOkAt, nowMs, sendEvidenceFreshMs);
     const recentPrivateSendFailed = Boolean(abilityFresh(sendState.lastPrivateSendFailedAt, nowMs, sendEvidenceFreshMs) && Number(sendState.lastPrivateSendFailedAt || 0) > Number(sendState.lastPrivateSendOkAt || 0));
@@ -9237,7 +9739,7 @@ async function main() {
       groupSend: recentGroupSendOk
         ? abilityItem("ok", "群聊发送可用", { at: sendState.lastGroupSendOkAt, evidence: "strong" })
         : recentGroupSendFailed || activeSendFailure
-          ? abilityItem("bad", "群聊发送异常", { at: Math.max(Number(sendState.lastGroupSendFailedAt || 0), Number(oneBotSendRuntime.lastSendFailedAt || 0)), evidence: "strong", reason: sendState.lastGroupSendFailure || oneBotSendRuntime.lastSendFailure || "最近群聊发送失败。" })
+          ? abilityItem("bad", "群聊发送异常", { at: Number(sendState.lastGroupSendFailedAt || 0), evidence: "strong", reason: sendState.lastGroupSendFailure || "最近群聊发送失败。" })
           : abilityItem("unknown", "群聊发送未验证", { evidence: "none" }),
       groupReceive: recentChatReceive
         ? abilityItem("ok", "聊天接收可用", { at: lastMessageAt, evidence: "strong", reason: "收到真实 QQ 聊天消息。" })
@@ -9303,20 +9805,20 @@ async function main() {
       canReceive = false;
       canSend = false;
       routeState = "LOGIN_REQUIRED";
-    } else if (qrFresh && !hasMessageEvidence && account.role === "primary" && !loginLooksValid) {
+    } else if (qrFresh && !hasMessageEvidence && (account.role === "primary" || !failoverMode) && !loginLooksValid) {
       level = "bad";
       status = "login_required_or_fake_online";
-      text = "主号疑似需重登";
-      reason = "主号 OneBot 虽连接，但存在新二维码且没有收到聊天消息证据。";
+      text = "账号疑似需重登";
+      reason = "OneBot 虽连接，但存在新二维码且没有收到聊天消息证据。";
       needsLogin = true;
       suspectFakeOnline = true;
       canReceive = false;
       routeState = "LOGIN_REQUIRED";
-    } else if (qrFresh && !hasMessageEvidence && account.role === "primary" && loginLooksValid) {
+    } else if (qrFresh && !hasMessageEvidence && (account.role === "primary" || !failoverMode) && loginLooksValid) {
       level = "warn";
       status = "waiting_receive_evidence";
       text = "待收消息确认";
-      reason = "主号 OneBot/API/QQ 身份正常；本地二维码文件按残留处理。暂未收到聊天消息，只作为待确认。";
+      reason = "OneBot/API/QQ 身份正常；本地二维码文件按残留处理。暂未收到聊天消息，只作为待确认。";
       needsLogin = false;
       suspectFakeOnline = false;
       canReceive = false;
@@ -9351,7 +9853,7 @@ async function main() {
       level = "bad";
       status = "send_failed";
       text = "发送失败";
-      reason = oneBotSendRuntime.lastSendFailure || "最近一次 OneBot 发送失败。";
+      reason = sendState.lastGroupSendFailure || "最近一次本账号群聊发送失败。";
       suspectFakeOnline = true;
       canSend = false;
       routeState = "DEGRADED_SEND";
@@ -9403,7 +9905,7 @@ async function main() {
       suspectFakeOnline = true;
       canSend = false;
       routeState = "DEGRADED_SEND";
-    } else if (noMessagesAfterConnect && account.role === "primary") {
+    } else if (noMessagesAfterConnect && (account.role === "primary" || !failoverMode)) {
       level = "warn";
       status = "no_receive_evidence";
       text = "缺少收消息证据";
@@ -9411,7 +9913,8 @@ async function main() {
       suspectFakeOnline = false;
       canReceive = false;
       routeState = loginLooksValid ? "ONLINE_PROBABLE" : "CONNECTED_UNKNOWN";
-    } else if (peerReceiveFresh && (peerSentFresh || ownerSentFresh)) {
+    } else if (peerReceiveFresh && ((peerSentFresh && peerPing.sentOk === true)
+      || (ownerSentFresh && peerPing.ownerSentOk === true))) {
       level = "good";
       status = "online_verified";
       text = "在线已验证";
@@ -9504,10 +10007,17 @@ async function main() {
     const wantsPrimary = /(主号|主账号|primary|小跟班(?!2))/i.test(raw);
     const configured = configuredAccountDefinitions(config);
     const firstStandby = configured.find((account) => account.role === "standby");
-    let account = null;
-    if (wantsStandby) account = firstStandby;
-    else if (wantsPrimary) account = configured.find((item) => item.role === "primary");
-    else {
+    let account = configured.find((item, index) => raw.includes(item.qq) && item.qq?.length >= 5
+      || raw.includes(item.id) && item.id?.length >= 3
+      || item.displayName?.length >= 2 && raw.includes(item.displayName)
+      || new RegExp(`账号\\s*${index + 1}(?!\\d)`).test(raw));
+    if (!account && wantsStandby) account = firstStandby;
+    else if (!account && wantsPrimary) account = configured.find((item) => item.role === "primary");
+    if (!account && accountTopology(config) !== "failover" && configured.length > 1) {
+      sendGroupMessage(ws, event, `请指定要登录的账号：${configured.map((item, index) => `账号${index + 1}「${item.displayName || item.id}」`).join("、")}。例如“发账号2二维码”。`, config, { reply: true });
+      return true;
+    }
+    if (!account) {
       account = configured.find((item) => item.role === "standby" && (item.enabled === false || !accountConnected(item.id)))
         || configured.find((item) => item.role === "primary")
         || configured[0];
@@ -9583,7 +10093,7 @@ async function main() {
   function rememberAdoptedStandbyQq(account, selfId) {
     const sid = asStringId(selfId);
     if (!account || account.role !== "standby" || !sid || account.qq) return false;
-    const list = Array.isArray(config.accounts?.standbys) ? config.accounts.standbys : [];
+    const list = Array.isArray(config.accounts?.items) ? config.accounts.items : [];
     const target = list.find((item) => asStringId(item?.id || "") === asStringId(account.id));
     if (!target || target.qq) return false;
     target.qq = sid;
@@ -9603,8 +10113,7 @@ async function main() {
     const currentId = wsAccountIds.get(ws);
     const preferredId = asStringId(ws.__hermesPreferredAccountId || "");
     const selfId = asStringId(event.self_id || event.selfId || "");
-    let account = configuredAccountBySelfId(selfId);
-    if (!account && !selfId && preferredId) account = accountById(config, preferredId);
+    let account = preferredId ? accountById(config, preferredId) : configuredAccountBySelfId(selfId);
     if (account && accountProtocol(account) === "snowluma" && preferredId !== account.id) {
       account = null;
     }
@@ -9621,13 +10130,10 @@ async function main() {
       }
     }
     if (!account && !selfId) {
-      const primaryState = oneBotAccounts.get(cfg.primary.id);
-      const reverseStandby = cfg.standbys.find((candidate) => {
-        if (accountProtocol(candidate) === "snowluma") return false;
-        const candidateState = oneBotAccounts.get(candidate.id);
-        return !candidateState?.connected;
-      });
-      account = !primaryState?.connected ? cfg.primary : (reverseStandby || cfg.primary);
+      // Reverse sockets have no identity until their first self_id. Never lend
+      // another account's state/socket to this unconfirmed connection.
+      account = { id: currentId || `pending-${randomBytes(6).toString("hex")}`,
+        role: "unknown", enabled: false, protocolEnabled: true };
     }
     if (!account && selfId && selfId !== asStringId(cfg.primary.qq)) {
       account = {
@@ -9640,9 +10146,36 @@ async function main() {
         enabled: false
       };
     }
-    if (!account) account = cfg.primary;
+    if (!account?.id) account = { id: `unknown-${randomBytes(6).toString("hex")}`, role: "unknown", enabled: false, protocolEnabled: false };
 
+    if (currentId && currentId !== account.id) {
+      clearOneBotActionsForSocket(ws, pendingOneBotActions, oneBotSendTrackers);
+      const previous = oneBotAccounts.get(currentId);
+      if (previous?.ws === ws) {
+        previous.ws = null;
+        previous.connected = false;
+        previous.readyState = null;
+        previous.lastDisconnectedAt = Date.now();
+        if (previous.role === "unknown") oneBotAccounts.delete(currentId);
+      }
+    }
     const state = oneBotAccountState(account.id, account);
+    if (currentId !== account.id || state.ws !== ws || !ws.__hermesSessionId) {
+      ws.__hermesSessionId = randomBytes(16).toString("hex");
+    }
+    const previousSocket = state.ws !== ws ? state.ws : null;
+    if (state.ws !== ws) {
+      state.lastConnectedAt = Date.now();
+      // Probe/send evidence belongs to a connection session, not a recycled ID.
+      accountProbeCache.delete(account.id);
+      accountPeerPing.delete(account.id);
+      accountSendRuntime.delete(account.id);
+      state.lastMessageAt = 0;
+      state.lastRawMessageAt = 0;
+      state.lastAcceptedMessageAt = 0;
+      state.selfId = "";
+      state.qq = "";
+    }
     state.ws = ws;
     state.connected = ws.readyState === 1;
     state.enabled = account.enabled !== false;
@@ -9654,11 +10187,14 @@ async function main() {
       if (!state.qq) state.qq = selfId;
       if (!account.qq && account.role === "standby") {
         state.adopted = true;
-        rememberAdoptedStandbyQq(account, selfId);
+        // Identity observations are runtime evidence, never a config write.
+        // Binding a QQ number requires an explicit revision-checked edit.
       }
     }
     wsAccountIds.set(ws, account.id);
     ws.__hermesAccountId = account.id;
+    if (previousSocket && previousSocket.readyState === 1) previousSocket.close();
+    if (!account.protocolEnabled) ws.close();
     return state;
   }
 
@@ -9762,6 +10298,7 @@ async function main() {
   }
 
   function primaryReceiveStalledReason(cfg, nowMs = Date.now()) {
+    if (accountTopology(config) !== "failover") return "";
     const primaryState = accountStateById(cfg.primary.id);
     if (!primaryState?.ws || primaryState.ws.readyState !== 1) return "primary websocket disconnected";
     const freshStandby = standbyWithFreshMessages(cfg, nowMs);
@@ -9825,6 +10362,7 @@ async function main() {
   }
 
   function primaryRecoveryBlockedReason(cfg, nowMs = Date.now()) {
+    if (accountTopology(config) !== "failover") return "";
     if (!cfg.primaryRecoveryRequiresNewMessage || !primaryUnhealthySince) return "";
     const primaryState = accountStateById(cfg.primary.id);
     if (!primaryState?.ws || primaryState.ws.readyState !== 1) return "primary websocket disconnected";
@@ -9867,7 +10405,10 @@ async function main() {
         snowlumaImage: account.snowlumaImage || "",
         behaviorMode: account.behaviorMode || "",
         enabled: account.enabled !== false,
-        active: account.id === activeAccountId,
+        protocolEnabled: account.protocolEnabled !== false,
+        managed: account.managed !== false,
+        archived: account.archived === true,
+        active: accountSelectedSnapshot(account.id),
         connected: Boolean(state.ws && state.ws.readyState === 1),
         readyState: state.ws?.readyState ?? state.readyState ?? null,
         lastFrameAt: state.lastFrameAt || 0,
@@ -9878,7 +10419,7 @@ async function main() {
         lastConnectedAt: state.lastConnectedAt || 0,
         lastDisconnectedAt: state.lastDisconnectedAt || 0,
         adopted: Boolean(state.adopted),
-        status: diagnosis.status,
+        status: !account.protocolEnabled ? "PROTOCOL_STOPPED" : !account.enabled ? "PAUSED" : diagnosis.status,
         statusLevel: diagnosis.level,
         statusText: diagnosis.text,
         statusReason: diagnosis.reason,
@@ -9920,7 +10461,7 @@ async function main() {
     let changed = false;
     config.accounts ||= {};
     if (!Array.isArray(config.accounts.standbys)) config.accounts.standbys = [];
-    const target = config.accounts.standbys.find((item) => asStringId(item?.id || "") === asStringId(accountId));
+    const target = config.accounts.items.find((item) => asStringId(item?.id || "") === asStringId(accountId));
     if (target && target.enabled === false) {
       target.enabled = true;
       changed = true;
@@ -9983,15 +10524,16 @@ async function main() {
       } else if (account.role === "primary") {
         queueAdminNotification(`【小跟班账号切回】\n主账号已恢复，已切回 ${account.id}。`);
       }
-      const sentCount = announceAccountSwitchToRecentGroups(previousAccount, account, reason);
-      if (!sentCount && config.accounts?.failover?.announceInGroups !== false) {
-        pendingAccountSwitchGroupNotice = {
-          previousAccount,
-          nextAccount: account,
-          reason,
-          createdAt: Date.now()
-        };
-      }
+      announceAccountSwitchToRecentGroups(previousAccount, account, reason).then((sentCount) => {
+        if (!sentCount && activeAccountId === account.id && config.accounts?.failover?.announceInGroups !== false) {
+          pendingAccountSwitchGroupNotice = {
+            previousAccount,
+            nextAccount: account,
+            reason,
+            createdAt: Date.now()
+          };
+        }
+      }).catch((error) => warn(`account switch notice failed: ${error.message}`));
     }
     return true;
   }
@@ -10000,9 +10542,13 @@ async function main() {
     const cfg = accountFailoverConfig(config);
     const primaryId = cfg.primary.id;
     if (accountTopology(config) !== "failover") {
-      if (accountById(config, activeAccountId)?.enabled === false) {
-        const replacement = configuredAccountDefinitions(config).find((item) => item.enabled !== false && accountConnected(item.id));
-        if (replacement) switchActiveAccount(replacement.id, "configured active account disabled", { force: true });
+      for (const group of config.accounts.failoverGroups) selectedGroupAccount(group);
+      const activeDefinition = accountById(config, activeAccountId);
+      if (!activeDefinition || activeDefinition.enabled === false || !accountConnected(activeAccountId)
+        || !accountCanChat(config, activeAccountId) || !accountIsSelected(activeAccountId)) {
+        const available = configuredAccountDefinitions(config).filter((item) => item.enabled !== false && accountConnected(item.id) && accountIsSelected(item.id));
+        const replacement = available.find((item) => accountCanChat(config, item.id)) || available[0];
+        if (replacement && replacement.id !== activeAccountId) switchActiveAccount(replacement.id, "default route unavailable or not chat-capable", { force: true });
       }
       return activeAccountId;
     }
@@ -10049,13 +10595,23 @@ async function main() {
   }
 
   function activeAccountRole() {
-    return accountById(config, activeAccountId)?.role || "primary";
+    return activeAccountId === accountFailoverConfig(config).primary.id ? "primary" : "standby";
   }
 
-  function flushAdminNotifications() {
-    if (activeOneBotWs?.readyState !== 1) return false;
+  async function flushAdminNotifications() {
     const cfg = adminNotificationConfig(config);
     if (!cfg.enabled || !cfg.recipients.length) return false;
+    if (accountTopology(config) !== "failover") {
+      const sender = accountSummary().find((item) => item.enabled && item.connected && !item.strongBad && item.statusLevel !== "bad");
+      const ws = sender && accountStateById(sender.id)?.ws;
+      if (ws?.readyState !== 1) return false;
+      while (pendingAdminNotifications.length) {
+        const message = pendingAdminNotifications.shift();
+        for (const userId of cfg.recipients) await sendPrivateMessageToUser(ws, userId, message, config);
+      }
+      return true;
+    }
+    if (activeOneBotWs?.readyState !== 1) return false;
     const onebotConnected = activeOneBotWs.readyState === 1;
     const failoverCfg = accountFailoverConfig(config);
     const qqLogin = classifyNapcatLogin({ onebotConnected: accountConnected(failoverCfg.primary.id) });
@@ -10079,10 +10635,11 @@ async function main() {
     }
     while (pendingAdminNotifications.length) {
       const message = pendingAdminNotifications.shift();
+      let confirmed = 0;
       for (const userId of cfg.recipients) {
-        sendPrivateMessageToUser(activeOneBotWs, userId, message, config);
+        if (await sendPrivateMessageToUser(activeOneBotWs, userId, message, config)) confirmed += 1;
       }
-      log(`admin notification sent recipients=${cfg.recipients.join(",")} text=${JSON.stringify(message).slice(0, 160)}`);
+      log(`admin notification confirmed=${confirmed}/${cfg.recipients.length}`);
     }
     return true;
   }
@@ -10097,6 +10654,7 @@ async function main() {
 
   function checkAccountQrcodeNotifications({ force = false } = {}) {
     const cfg = adminNotificationConfig(config);
+    if (accountTopology(config) !== "failover") return;
     if (!cfg.enabled || !cfg.recipients.length) return;
     if (activeAccountRole() !== "primary" || activeOneBotWs?.readyState !== 1) return;
     for (const account of configuredAccountDefinitions(config)) {
@@ -10233,7 +10791,9 @@ async function main() {
 
   async function checkLoginRecovery() {
     const cfg = loginRecoveryConfig(config);
-    if (!cfg.enabled || loginRecoveryState.inFlight) return;
+    // This legacy recovery path restarts the primary NapCat container. It must
+    // not treat an independently working account as a failed failover route.
+    if (accountTopology(config) !== "failover" || !cfg.enabled || loginRecoveryState.inFlight) return;
     const snapshot = loginRecoverySnapshot();
     if (snapshot.healthy) {
       if (loginRecoveryState.active && cfg.notifyOwner) {
@@ -10355,6 +10915,23 @@ async function main() {
   function checkAdminStatusNotification({ force = false } = {}) {
     const cfg = adminNotificationConfig(config);
     if (!cfg.enabled) return;
+    if (accountTopology(config) !== "failover") {
+      for (const account of accountSummary().filter((item) => item.enabled)) {
+        const bad = Boolean(account.needsLogin || account.strongBad || account.statusLevel === "bad");
+        const key = bad ? `bad:${account.routeState || account.status}` : "online";
+        const previous = independentAccountNoticeKeys.get(account.id);
+        if (previous === key) continue;
+        independentAccountNoticeKeys.set(account.id, key);
+        if (bad && (account.needsLogin ? cfg.notifyLoginInvalid : cfg.notifyDisconnected)) {
+          queueAdminNotification(`【Hermes 账号提醒】${account.displayName || account.id}（${account.id}）需要处理：${clampText(account.statusReason || account.statusText || "连接异常", 240)}。请在账号状态页单独检测。`);
+        } else if (!bad && previous?.startsWith("bad:") && cfg.notifyOnline) {
+          queueAdminNotification(`【Hermes 账号恢复】${account.displayName || account.id}（${account.id}）已恢复在线。`);
+        }
+      }
+      flushAdminNotifications();
+      return;
+    }
+    independentAccountNoticeKeys.clear();
     checkAccountQrcodeNotifications({ force });
     const onebotConnected = activeOneBotWs?.readyState === 1;
     const qqLogin = classifyNapcatLogin({ onebotConnected });
@@ -10425,11 +11002,21 @@ async function main() {
     queueAdminNotification(adminStatusNotificationText({ qqLogin, onebotConnected, onebotStale, config }));
   }
 
-  function checkAdminPeriodicStatus({ force = false } = {}) {
+  async function checkAdminPeriodicStatus({ force = false } = {}) {
     const cfg = adminNotificationConfig(config);
     if (!cfg.enabled || !cfg.periodicStatusEnabled || !cfg.recipients.length) return;
     const nowMs = Date.now();
     if (!force && nowMs - lastAdminPeriodicStatusAt < cfg.periodicStatusIntervalMs) return;
+    if (accountTopology(config) !== "failover") {
+      const accounts = accountSummary().filter((item) => item.enabled);
+      const sender = accounts.find((item) => item.connected && !item.strongBad && item.statusLevel !== "bad");
+      const ws = sender && accountStateById(sender.id)?.ws;
+      if (ws?.readyState !== 1) return;
+      const message = `【Hermes 多账号状态】\n${accounts.map((item) => `${item.displayName || item.id}：${item.statusText || (item.connected ? "在线" : "未连接")}`).join("\n")}`;
+      for (const userId of cfg.recipients) await sendPrivateMessageToUser(ws, userId, message, config);
+      lastAdminPeriodicStatusAt = nowMs;
+      return;
+    }
     if (activeOneBotWs?.readyState !== 1) return;
     const onebotConnected = activeOneBotWs.readyState === 1;
     const qqLogin = classifyNapcatLogin({ onebotConnected });
@@ -10447,11 +11034,12 @@ async function main() {
       runtimeStatus,
       replyCoordinator
     });
+    let confirmed = 0;
     for (const userId of cfg.recipients) {
-      sendPrivateMessageToUser(activeOneBotWs, userId, message, config);
+      if (await sendPrivateMessageToUser(activeOneBotWs, userId, message, config)) confirmed += 1;
     }
     lastAdminPeriodicStatusAt = nowMs;
-    log(`admin periodic status sent recipients=${cfg.recipients.join(",")} text=${JSON.stringify(message).slice(0, 160)}`);
+    log(`admin periodic status confirmed=${confirmed}/${cfg.recipients.length}`);
   }
 
   const adminNotificationTimer = setInterval(
@@ -10467,11 +11055,7 @@ async function main() {
 
   const adminPeriodicStatusTimer = setInterval(
     () => {
-      try {
-        checkAdminPeriodicStatus();
-      } catch (err) {
-        warn(`admin periodic status failed: ${err.message}`);
-      }
+      checkAdminPeriodicStatus().catch((err) => warn(`admin periodic status failed: ${err.message}`));
     },
     adminNotificationConfig(config).periodicStatusCheckIntervalMs
   );
@@ -10502,6 +11086,12 @@ async function main() {
   setTimeout(() => {
     probeAllAccounts({ silent: true }).catch((err) => warn(`initial account probe failed: ${err.message}`));
   }, 8000);
+  // Failover must not depend on a browser polling status or the failed account
+  // receiving another message. Each mixed-topology group advances independently.
+  setInterval(() => {
+    if (accountTopology(config) === "failover") return;
+    for (const group of config.accounts.failoverGroups) selectedGroupAccount(group);
+  }, 1000).unref();
   setTimeout(() => {
     runPeerPingDiagnostics({ silent: true }).catch((err) => warn(`initial peer ping failed: ${err.message}`));
   }, 20_000);
@@ -10603,14 +11193,19 @@ async function main() {
         const napcatSendFailed = qqLogin.status === "send_failed" || qqLogin.sendFailed;
         const activeIsStandby = activeAccountRole() === "standby";
         const accounts = accountSummary();
+        const independent = accountTopology(config) !== "failover";
+        const enabledAccounts = accounts.filter((item) => item.enabled);
+        const accountsNeedingAttention = enabledAccounts.filter((item) => item.needsLogin || item.strongBad || item.statusLevel === "bad");
         const replyCoordinatorState = replyCoordinator.snapshot();
         const primaryAccount = accounts.find((item) => item.role === "primary") || {};
         const primaryAccountNeedsAttention = Boolean(primaryAccount.needsLogin || primaryAccount.suspectFakeOnline || primaryAccount.statusLevel === "bad");
         return {
           instanceId: process.env.HERMES_QQ_INSTANCE_ID || "",
-          ok: !sendFailureActive && onebotConnected && !onebotStale && (
-            activeIsStandby || (!napcatSendFailed && !qqLogin.needsLogin)
-          ),
+          ok: independent
+            ? enabledAccounts.length > 0 && accountsNeedingAttention.length === 0
+            : !sendFailureActive && onebotConnected && !onebotStale && (
+              activeIsStandby || (!napcatSendFailed && !qqLogin.needsLogin)
+            ),
           generatedAt,
           onebotConnected,
           onebotStale,
@@ -10628,8 +11223,10 @@ async function main() {
             secondsSinceLastSendOk: oneBotSendRuntime.lastSendOkAt ? Math.round((generatedAt - oneBotSendRuntime.lastSendOkAt) / 1000) : null,
             secondsSinceLastSendFailed: oneBotSendRuntime.lastSendFailedAt ? Math.round((generatedAt - oneBotSendRuntime.lastSendFailedAt) / 1000) : null
           },
-          loginNeedsAttention: qqLogin.needsLogin || !onebotConnected || onebotStale || sendFailureActive || napcatSendFailed || Boolean(primaryRecoveryBlocked) || primaryAccountNeedsAttention,
-          primaryNeedsAttention: Boolean(primaryRecoveryBlocked || primaryReceiveStalled || primaryAccountNeedsAttention),
+          loginNeedsAttention: independent ? accountsNeedingAttention.length > 0 : qqLogin.needsLogin || !onebotConnected || onebotStale || sendFailureActive || napcatSendFailed || Boolean(primaryRecoveryBlocked) || primaryAccountNeedsAttention,
+          primaryNeedsAttention: !independent && Boolean(primaryRecoveryBlocked || primaryReceiveStalled || primaryAccountNeedsAttention),
+          accountsNeedingAttention: accountsNeedingAttention.map((item) => item.id),
+          topology: accountTopology(config),
           primaryReceiveStalled: primaryReceiveStalled || "",
           primaryRecoveryBlocked: primaryRecoveryBlocked || "",
           activeAccountId,
@@ -10693,14 +11290,30 @@ async function main() {
           return replyJson(200, { ok: true, token: adminSessionToken });
         }
         if (["/api/voice/credential", "/api/voice/test", "/api/api-center", "/api/api-center/test"].includes(url.pathname)
+          || /^\/api\/(?:accounts|account-groups)(?:\/|$)/.test(url.pathname)
+          || /^\/api\/tasks(?:\/|$)/.test(url.pathname)
           || /^\/api\/api-center\/credentials\/[0-9a-f-]+$/.test(url.pathname)) {
           if (!localAdminHost || (req.method !== "GET" && req.headers.origin !== adminOrigin) || req.headers["x-hermes-qq-admin"] !== adminSessionToken
-            || (req.method === "POST" && !/^application\/json(?:\s*;|$)/i.test(req.headers["content-type"] || ""))) {
+            || (["POST", "PATCH", "DELETE"].includes(req.method) && !/^application\/json(?:\s*;|$)/i.test(req.headers["content-type"] || ""))) {
             return replyJson(403, { ok: false, error: "admin session required" });
           }
         }
         if (req.method === "GET" && (url.pathname === "/admin" || url.pathname === "/admin/")) {
           return replyFile(path.join(publicDir, "admin.html"), "text/html; charset=utf-8");
+        }
+
+        // Match the raw path: URL.pathname would normalize traversal segments.
+        const consoleAsset = new Map([
+          ["/console.css", ["console.css", "text/css; charset=utf-8"]],
+          ["/console-theme.js", ["console-theme.js", "text/javascript; charset=utf-8"]]
+        ]).get((req.url || "").split("?")[0]);
+        if ((req.method === "GET" || req.method === "HEAD") && consoleAsset) {
+          const [name, contentType] = consoleAsset;
+          const file = path.join(publicDir, name);
+          if (!fs.existsSync(file)) return replyJson(404, { ok: false, error: "file not found" });
+          const body = fs.readFileSync(file);
+          res.writeHead(200, { "content-type": contentType, "content-length": body.length, "cache-control": "no-store", "x-content-type-options": "nosniff" });
+          return res.end(req.method === "HEAD" ? undefined : body);
         }
 
         const accountQrMatch = url.pathname.match(/^\/qrcode\/([^/]+)\.png$/);
@@ -10761,6 +11374,84 @@ async function main() {
           return replyJson(200, publicConfig(config));
         }
 
+        if ((url.pathname !== "/api/accounts/peer-ping" && /^\/api\/accounts(?:\/operations\/[a-f0-9]+|\/[^/]+(?:\/(?:pause|resume|provision|protocol\/stop))?)?$/.test(url.pathname))
+          || /^\/api\/account-groups(?:\/[^/]+)?$/.test(url.pathname)) {
+          const operationMatch = url.pathname.match(/^\/api\/accounts\/operations\/([a-f0-9]+)$/);
+          if (req.method === "GET" && operationMatch) {
+            const operation = accountOperations.get(operationMatch[1]);
+            return replyJson(operation ? 200 : 404, operation ? { ok: true, operation: { ...operation }, revision: configRevision } : { ok: false, error: "操作不存在" });
+          }
+          if (req.method === "GET" && url.pathname === "/api/accounts") return replyJson(200, accountsPayload());
+          if (req.method === "GET" && url.pathname === "/api/account-groups") return replyJson(200, { ok: true, revision: configRevision, failoverGroups: publicAccountRegistry(config).failoverGroups });
+          if (req.method === "GET") {
+            const accountMatch = url.pathname.match(/^\/api\/accounts\/([^/]+)$/);
+            const groupMatch = url.pathname.match(/^\/api\/account-groups\/([^/]+)$/);
+            const item = accountMatch ? publicAccountRegistry(config).items.find((entry) => entry.id === decodeURIComponent(accountMatch[1]))
+              : groupMatch ? publicAccountRegistry(config).failoverGroups.find((entry) => entry.id === decodeURIComponent(groupMatch[1])) : null;
+            return replyJson(item ? 200 : 404, item ? { ok: true, revision: configRevision, [accountMatch ? "account" : "group"]: item } : { ok: false, error: "账号或接管组不存在" });
+          }
+          if (!["POST", "PATCH", "DELETE"].includes(req.method)) return replyJson(405, { ok: false, error: "method not allowed" });
+          const body = await readBody();
+          if (!isPlainObject(body)) return replyJson(400, { ok: false, error: "请求必须是对象" });
+          if (body.expectedRevision !== configRevision) return replyJson(409, { ok: false, revision: configRevision, error: "账号配置已更新，请保留草稿并刷新" });
+          const next = registryConfig(config);
+          try {
+            if (url.pathname === "/api/accounts" && req.method === "POST") {
+              const ports = await allocateAccountPorts();
+              if (body.expectedRevision !== configRevision) return replyJson(409, { ok: false, revision: configRevision, error: "账号配置已更新，请保留草稿并刷新" });
+              if (!isPlainObject(body.account)) throw new Error("账号必须是对象");
+              const transport = body.account.managed === false ? {} : { webuiPort: ports[0], noVncPort: ports[1], vncPort: ports[2], onebotWsUrl: `ws://127.0.0.1:${ports[3]}` };
+              const account = newAccount(next, { ...body.account, ...transport, enabled: false, archived: false }, ports);
+              next.accounts.items.push(account);
+              commitAccountConfig(next);
+              return replyJson(201, { ...accountsPayload(), account: publicAccount(account) });
+            }
+            const match = url.pathname.match(/^\/api\/accounts\/([^/]+)(?:\/(pause|resume|provision|protocol\/stop))?$/);
+            if (match) {
+              const id = decodeURIComponent(match[1]);
+              const index = next.accounts.items.findIndex((item) => item.id === id && !item.archived);
+              if (index < 0) return replyJson(404, { ok: false, error: "账号不存在或已归档" });
+              const account = next.accounts.items[index];
+              if (req.method === "PATCH" && !match[2]) next.accounts.items[index] = mergeAccountPatch(account, body.patch);
+              else if (req.method === "DELETE" && !match[2]) {
+                const references = accountReferences(id);
+                if (references.length) return replyJson(409, { ok: false, revision: configRevision, references, error: "请先移除账号引用或结束活动任务" });
+                next.accounts.items[index] = { ...account, archived: true, enabled: false, protocolEnabled: false };
+              } else if (req.method === "POST" && ["pause", "resume"].includes(match[2])) next.accounts.items[index].enabled = match[2] === "resume";
+              else if (req.method === "POST" && ["provision", "protocol/stop"].includes(match[2])) {
+                if ([...accountOperations.values()].some((operation) => operation.accountId === id && ["queued", "running"].includes(operation.status))) return replyJson(409, { ok: false, error: "该账号已有协议操作进行中" });
+                next.accounts.items[index].protocolEnabled = match[2] === "provision";
+                commitAccountConfig(next);
+                const operation = startAccountOperation(accountById(config, id), match[2] === "provision" ? "provision" : "stop");
+                return replyJson(202, { ok: true, revision: configRevision, operation: { ...operation }, operationId: operation.id });
+              } else return replyJson(405, { ok: false, error: "method not allowed" });
+              commitAccountConfig(next);
+              return replyJson(200, accountsPayload());
+            }
+            const groupMatch = url.pathname.match(/^\/api\/account-groups(?:\/([^/]+))?$/);
+            if (groupMatch) {
+              const id = groupMatch[1] ? decodeURIComponent(groupMatch[1]) : body.group?.id;
+              const index = next.accounts.failoverGroups.findIndex((group) => group.id === id);
+              if (req.method === "DELETE" && groupMatch[1]) {
+                if (index < 0) return replyJson(404, { ok: false, error: "接管组不存在" });
+                if ((next.automation?.rules || []).some((rule) => rule.groupId === id)) return replyJson(409, { ok: false, revision: configRevision, error: "自动化仍引用此接管组，请先移除引用" });
+                next.accounts.failoverGroups.splice(index, 1);
+              } else if (["POST", "PATCH"].includes(req.method) && isPlainObject(body.group)) {
+                if (body.group.id && body.group.id !== id) throw new Error("接管组 ID 不可修改");
+                if (req.method === "POST" && index >= 0) throw new Error("接管组 ID 已存在");
+                if (req.method === "PATCH" && index < 0) return replyJson(404, { ok: false, error: "接管组不存在" });
+                const group = { ...(index >= 0 ? next.accounts.failoverGroups[index] : {}), ...body.group, id };
+                const policySource = next.accounts.items.find((item) => item.id === group.policyAccountId);
+                if (!group.policy) group.policy = Object.fromEntries(["displayName", "styleProfileId", "promptOverride", "features", "sendTypes", "scope", "modelBindings", "voice", "behaviorMode"].filter((key) => policySource?.[key] !== undefined).map((key) => [key, deepClone(policySource[key])]));
+                if (index >= 0) next.accounts.failoverGroups[index] = group; else next.accounts.failoverGroups.push(group);
+              } else throw new Error("接管组请求无效");
+              commitAccountConfig(next);
+              return replyJson(200, accountsPayload());
+            }
+            return replyJson(404, { ok: false, error: "not found" });
+          } catch (err) { return replyJson(400, { ok: false, error: /账号|接管组|模型|端口|协议|QQ|OneBot|API|prompt|绑定/.test(err.message) ? clampText(err.message, 180) : "账号配置无效", revision: configRevision }); }
+        }
+
         if (req.method === "GET" && url.pathname === "/api/api-center") {
           return replyJson(200, publicApiCenter(config));
         }
@@ -10770,8 +11461,8 @@ async function main() {
           const current = publicApiCenter(config);
           if (body.revision !== current.revision) return replyJson(409, { ok: false, error: "API 配置已在别处更新，请刷新后重试" });
           let next;
-          try { next = sanitizeConfigPatch({ apiCenter: body.center }, config); }
-          catch { return replyJson(400, { ok: false, error: "API 方案无效，请检查连接、模型和绑定" }); }
+          try { next = validateAccountConfig(sanitizeConfigPatch({ apiCenter: body.center }, config)); }
+          catch (err) { return replyJson(400, { ok: false, error: /账号 .*引用的 API/.test(err.message) ? err.message : "API 方案无效，请检查连接、模型和绑定" }); }
           saveConfig(next);
           replaceConfigInPlace(config, loadConfig());
           return replyJson(200, publicApiCenter(config));
@@ -10914,14 +11605,21 @@ async function main() {
 
         if (req.method === "PATCH" && url.pathname === "/api/config") {
           const patch = await readBody();
-          const next = sanitizeConfigPatch(patch, config);
+          if (!isPlainObject(patch)) throw new Error("patch must be an object");
+          if (Object.prototype.hasOwnProperty.call(patch, "expectedRevision") && patch.expectedRevision !== configRevision)
+            return replyJson(409, { ok: false, error: "配置已在别处更新，请刷新后重试" });
+          const configPatch = { ...patch };
+          delete configPatch.expectedRevision;
+          const next = validateAccountConfig(sanitizeConfigPatch(configPatch, config));
           const enabledAccounts = configuredAccountDefinitions(next).filter((item) => item.enabled !== false);
           saveConfig(next);
           replaceConfigInPlace(config, loadConfig());
           for (const [id, state] of oneBotAccounts) {
             const definition = accountById(config, id);
             state.enabled = Boolean(definition && definition.enabled !== false);
+            if (!definition?.protocolEnabled) state.ws?.close();
           }
+          ensureForwardOneBotConnections();
           const active = accountById(config, activeAccountId);
           const replacement = enabledAccounts.find((item) => oneBotAccounts.get(item.id)?.ws?.readyState === 1);
           if (active?.enabled === false && replacement) switchActiveAccount(replacement.id, "configured active account disabled", { force: true });
@@ -11319,23 +12017,24 @@ async function main() {
         }
 
         if (req.method === "POST" && url.pathname === "/send") {
-          if (activeOneBotWs?.readyState !== 1) {
-            return replyJson(503, { ok: false, error: "onebot not connected" });
-          }
           const body = await readBody();
+          const requestedAccountId = asStringId(body.account_id || body.accountId);
+          const sendAccount = connectedAccountForRole("chat", { preferAccountId: requestedAccountId, strictPreferred: Boolean(requestedAccountId) });
+          if (!sendAccount) return replyJson(503, { ok: false, error: requestedAccountId ? "selected chat account not connected or disabled" : "chat account not connected" });
+          const sendConfig = configForReplyAccount(sendAccount);
           const groupId = asStringId(body.group_id || body.groupId || (handlesAllGroups(config) ? "" : targetGroups(config)[0]));
           const message = String(body.message || body.text || "").trim();
           if (!groupId) return replyJson(400, { ok: false, error: "group_id is required when targetGroups allows all groups" });
           if (!shouldHandleGroup(groupId, config)) return replyJson(403, { ok: false, error: `group ${groupId} is not in targetGroups` });
           if (!message) return replyJson(400, { ok: false, error: "message is required" });
           try {
-            await oneBotRequest(activeOneBotWs, "send_group_msg", { group_id: groupId, message }, { timeoutMs: 20000 });
+            await oneBotRequest(sendAccount.ws, "send_group_msg", { group_id: groupId, message }, { timeoutMs: 20000 });
             recordBotMessage({
               historyByGroup,
               lastBotMessageByGroup,
               groupId,
               text: message,
-              config,
+              config: sendConfig,
               memory,
               meta: {
                 source: "manual",
@@ -11347,8 +12046,9 @@ async function main() {
             oneBotSendRuntime.lastSendAction = "send_group_msg";
             oneBotSendRuntime.lastSendFailure = "";
             log(`manual send group=${groupId} text=${/base64:\/\/|\[CQ:(?:record|image|video),/i.test(message) ? "[media omitted]" : JSON.stringify(message).slice(0, 160)}`);
-            return replyJson(200, { ok: true, group_id: groupId });
+            return replyJson(200, { ok: true, group_id: groupId, account_id: sendAccount.id });
           } catch (err) {
+            if (err.code === "ACCOUNT_SEND_BLOCKED") return replyJson(403, { ok: false, error: err.message, code: err.code });
             oneBotSendRuntime.lastSendAttemptAt = Date.now();
             oneBotSendRuntime.lastSendFailedAt = Date.now();
             oneBotSendRuntime.lastSendAction = "send_group_msg";
@@ -11359,23 +12059,24 @@ async function main() {
         }
 
         if (req.method === "POST" && url.pathname === "/api/send_private") {
-          if (activeOneBotWs?.readyState !== 1) {
-            return replyJson(503, { ok: false, error: "onebot not connected" });
-          }
           const body = await readBody();
+          const requestedAccountId = asStringId(body.account_id || body.accountId);
+          const sendAccount = connectedAccountForRole("chat", { preferAccountId: requestedAccountId, strictPreferred: Boolean(requestedAccountId) });
+          if (!sendAccount) return replyJson(503, { ok: false, error: requestedAccountId ? "selected chat account not connected or disabled" : "chat account not connected" });
           const userId = String(body.user_id || body.userId || "").trim();
           const message = String(body.message || body.text || "").trim();
           if (!userId) return replyJson(400, { ok: false, error: "user_id is required" });
           if (!message) return replyJson(400, { ok: false, error: "message is required" });
           try {
-            await oneBotRequest(activeOneBotWs, "send_private_msg", { user_id: userId, message }, { timeoutMs: 20000 });
+            await oneBotRequest(sendAccount.ws, "send_private_msg", { user_id: userId, message }, { timeoutMs: 20000 });
             oneBotSendRuntime.lastSendAttemptAt = Date.now();
             oneBotSendRuntime.lastSendOkAt = Date.now();
             oneBotSendRuntime.lastSendAction = "send_private_msg";
             oneBotSendRuntime.lastSendFailure = "";
             log(`manual send_private user=${userId} text=${/base64:\/\/|\[CQ:(?:record|image|video),/i.test(message) ? "[media omitted]" : JSON.stringify(message).slice(0, 160)}`);
-            return replyJson(200, { ok: true, user_id: userId });
+            return replyJson(200, { ok: true, user_id: userId, account_id: sendAccount.id });
           } catch (err) {
+            if (err.code === "ACCOUNT_SEND_BLOCKED") return replyJson(403, { ok: false, error: err.message, code: err.code });
             oneBotSendRuntime.lastSendAttemptAt = Date.now();
             oneBotSendRuntime.lastSendFailedAt = Date.now();
             oneBotSendRuntime.lastSendAction = "send_private_msg";
@@ -11397,6 +12098,7 @@ async function main() {
 
   function registerOneBotConnection(ws, req = { socket: { remoteAddress: "local" } }) {
     const initialState = identifyOneBotAccount(ws, {});
+    ws.__hermesDispatch = (action, params, send, binding) => dispatchAccountAction(ws, action, params, send, binding);
     if (initialState.enabled !== false && (!activeOneBotWs || activeOneBotWs.readyState !== 1)) {
       activeAccountId = initialState.id;
       activeOneBotWs = ws;
@@ -11405,6 +12107,8 @@ async function main() {
     runtimeStatus.lastOneBotFrameAt = runtimeStatus.lastOneBotConnectedAt;
     runtimeStatus.lastOneBotDisconnectedAt = 0;
     initialState.lastConnectedAt = runtimeStatus.lastOneBotConnectedAt;
+    const initialGroup = accountGroup(config, initialState.id);
+    if (initialGroup && accountTopology(config) !== "failover") selectedGroupAccount(initialGroup);
     log(`OneBot connected from ${req.socket?.remoteAddress || "local"} account=${initialState.id}`);
     if (initialState.id === activeAccountId) {
       checkAdminStatusNotification({ force: true });
@@ -11412,7 +12116,13 @@ async function main() {
     }
     void runScheduledDailyMessages().catch((err) => warn(`daily scheduler failed: ${err.message}`));
 
+    const liveConfig = config;
     ws.on("message", async (raw) => {
+      try {
+      if (ws.readyState !== 1) return;
+      if (ws.__hermesPreferredAccountId && forwardOneBotRuntime.get(ws.__hermesPreferredAccountId)?.ws !== ws) return;
+      const boundId = wsAccountIds.get(ws);
+      if (boundId && oneBotAccounts.get(boundId)?.ws !== ws) return;
       runtimeStatus.lastOneBotFrameAt = Date.now();
       let event;
       try {
@@ -11422,10 +12132,31 @@ async function main() {
       }
       event.__receivedAt = Date.now();
       const accountState = identifyOneBotAccount(ws, event);
+      // Bind at receipt, before roster/quote lookups can suspend this handler.
+      const inboundBinding = oneBotBinding(ws, accountState.id);
+      event.__oneBotSessionId = inboundBinding.sessionId;
+      const receivingAccount = accountById(liveConfig, accountState.id);
+      if (activeOneBotWs === ws && activeAccountId !== accountState.id) {
+        const activeState = oneBotAccounts.get(activeAccountId);
+        activeOneBotWs = activeState?.enabled !== false && activeState?.ws?.readyState === 1 ? activeState.ws : null;
+      }
+      if (boundId !== accountState.id && accountState.connected && receivingAccount && receivingAccount.enabled !== false) {
+        if (!activeOneBotWs || activeOneBotWs.readyState !== 1) {
+          activeAccountId = accountState.id;
+          activeOneBotWs = ws;
+        }
+        const group = accountGroup(liveConfig, accountState.id);
+        if (group && accountTopology(liveConfig) !== "failover") selectedGroupAccount(group);
+      }
+      const config = receivingAccount ? configForReplyAccount(receivingAccount, liveConfig) : liveConfig;
       event.__accountId = accountState.id;
+      const receivingGroup = accountGroup(liveConfig, accountState.id);
+      event.__independentAccounts = !receivingGroup;
+      event.__accountGroupId = receivingGroup && !receivingGroup.legacySelfMemory ? receivingGroup.id : "";
       accountState.lastFrameAt = runtimeStatus.lastOneBotFrameAt;
       if (event.status || event.retcode != null) {
         const pending = event.echo ? pendingOneBotActions.get(event.echo) : null;
+        if (pending && pending.ws !== ws) return;
         if (pending) {
           pendingOneBotActions.delete(event.echo);
           if (event.status === "ok" || event.retcode === 0) pending.resolve(event.data || {});
@@ -11433,6 +12164,7 @@ async function main() {
           return;
         }
         const sendTracker = event.echo ? oneBotSendTrackers.get(event.echo) : null;
+        if (sendTracker && sendTracker.ws !== ws) return;
         if (sendTracker) {
           oneBotSendTrackers.delete(event.echo);
           clearTimeout(sendTracker.timer);
@@ -11441,6 +12173,7 @@ async function main() {
             oneBotSendRuntime.lastSendAction = sendTracker.action;
             oneBotSendRuntime.lastSendFailure = "";
             recordAccountSend(sendTracker.accountId, sendTracker.action, { ok: true });
+            sendTracker.resolve?.(event.data || {});
           } else {
             const detail = event.message || event.wording || event.error || `retcode=${event.retcode}`;
             oneBotSendRuntime.lastSendFailedAt = Date.now();
@@ -11448,33 +12181,30 @@ async function main() {
             oneBotSendRuntime.lastSendFailure = clampText(`${sendTracker.action} 失败：${detail}`, 300);
             recordAccountSend(sendTracker.accountId, sendTracker.action, { ok: false, failure: oneBotSendRuntime.lastSendFailure });
             warn(`onebot send failed action=${sendTracker.action} echo=${event.echo} detail=${oneBotSendRuntime.lastSendFailure}`);
+            sendTracker.reject?.(new Error(oneBotSendRuntime.lastSendFailure));
           }
         }
         return;
       }
+      if (event.post_type === "notice" && ["group_increase", "group_decrease"].includes(event.notice_type)) groupBotMembership.invalidate(event.group_id);
       if (event.post_type !== "message" || !["group", "private"].includes(event.message_type)) return;
+      if (receivingAccount?.qq && event.self_id && String(receivingAccount.qq) !== String(event.self_id)) return;
       const isPrivate = event.message_type === "private";
       const groupId = conversationIdFromEvent(event);
       const senderId = asStringId(event.user_id);
       const selfId = asStringId(event.self_id);
+      if (!isPrivate) groupBotMembership.observe(event.group_id, selfId);
       let rawMessagePayload = event.message || event.raw_message;
       let text0 = oneBotMessageToText(rawMessagePayload);
       let text = stripSelfMention(text0, event);
       const senderName = event.sender?.card || event.sender?.nickname || senderId || "群友";
       const peerPing = parsePeerPingMessage(text0);
       if (peerPing) {
-        const current = accountPeerPing.get(accountState.id) || {};
-        accountPeerPing.set(accountState.id, {
-          ...current,
-          receivedAt: Date.now(),
-          receivedFrom: peerPing.from || senderId,
-          receivedToken: peerPing.token,
-          receivedSenderId: senderId
-        });
-        logIncomingMessage({ accountState, event, text0, senderName, disposition: "ignored-peer-ping", reason: `from=${peerPing.from || senderId}` });
+        const accepted = acceptPeerPing(accountState, event, peerPing);
+        logIncomingMessage({ accountState, event, text0, senderName, disposition: "ignored-peer-ping", reason: accepted ? `from=${peerPing.from}` : "unmatched diagnostic message" });
         return;
       }
-      if (accountState.enabled === false || accountState.role === "unknown") {
+      if (!receivingAccount || !accountScopeAllows(receivingAccount, event.message_type, event.group_id) || accountState.role === "unknown") {
         if (activeOneBotWs === ws && accountState.id !== activeAccountId) {
           activeOneBotWs = null;
           const activeState = oneBotAccounts.get(activeAccountId);
@@ -11496,10 +12226,31 @@ async function main() {
         return;
       }
       accountState.lastRawMessageAt = Date.now();
+      let botControlRoute = null;
+      if (!isPrivate && config.commands?.enabled !== false && botCommandText(text)) {
+        const members = await groupBotMembership.members(event.group_id, () => oneBotRequest(ws, "get_group_member_list", { group_id: event.group_id }, { timeoutMs: 3000 }));
+        if (!oneBotBindingCurrent(ws, inboundBinding)) return;
+        const bots = groupCommandBots(liveConfig, event.group_id, members.qqs, {
+          selectedForGroup: (group) => accountTopology(liveConfig) === "failover" ? activeAccountId : selectedGroupAccount(group),
+          connected: (id) => accountConnected(id),
+          qqForAccount: (account) => account.qq || oneBotAccounts.get(account.id)?.selfId || ""
+        });
+        botControlRoute = routeBotCommand(text, bots);
+        // Never treat an incomplete observed roster as proof that there is
+        // only one bot, or silently execute a selector against guessed aliases.
+        if (!groupBotMembership.isCurrent(event.group_id, members)) botControlRoute = {
+          accountId: bots.find((bot) => bot.available)?.id,
+          notice: "暂时无法读取本群机器人名单，未执行控制指令，请稍后重试。"
+        };
+        if (botControlRoute?.accountId !== accountState.id) return;
+        event.__botCommandTargeted = botControlRoute.targeted === true;
+        event.__botCommandAlias = botControlRoute.alias || "";
+        if (botControlRoute.text) text = botControlRoute.text;
+      }
       let mentioned = config.trigger?.replyToAt !== false && messageMentionsSelf(event, text0);
       const quotedMessageCache = new Map();
       let quotedBotAccountId = "";
-      if (!isPrivate && accountTopology(config) !== "failover" && !mentioned) {
+      if (!botControlRoute && !isPrivate && accountTopology(config) !== "failover" && !mentioned) {
         const quotedId = extractReplyMessageIds(rawMessagePayload)[0];
         if (quotedId) {
           try {
@@ -11512,115 +12263,27 @@ async function main() {
           } catch { /* unresolved quotes retain the default account route */ }
         }
       }
-      if (!isPrivate && accountTopology(config) !== "failover") {
+      if (!botControlRoute && !isPrivate && accountTopology(config) !== "failover") {
         const mentionedOtherBot = [...botIds].some((botId) => botId !== selfId && messageMentionsSelf({ ...event, self_id: botId }, text0));
         if (mentionedOtherBot && !mentioned) {
           logIncomingMessage({ accountState, event, text0, senderName, disposition: "ignored-other-bot-mention", reason: "another configured account was addressed" });
           return;
         }
-        if (quotedBotAccountId && quotedBotAccountId !== accountState.id && !mentioned) {
+        if (quotedBotAccountId && !sameLogicalAccount(config, quotedBotAccountId, accountState.id) && !mentioned) {
           logIncomingMessage({ accountState, event, text0, senderName, disposition: "ignored-other-bot-quote", reason: `quoted ${quotedBotAccountId}` });
           return;
         }
       }
-      const inboundKey = stableMessageFingerprint(event, text0);
-      let activeMessageAccount = accountState.id === activeAccountId;
+      const inboundKey = accountScopedInboundKey(event, text0, config, accountState.id, { mentioned, quotedBotAccountId });
+      if (!oneBotBindingCurrent(ws, inboundBinding)) return;
+      if (!accountIsSelected(accountState.id)) return;
       let sendWs = ws;
-      if (isPrivate && accountTopology(config) !== "failover") activeMessageAccount = true;
-      if (!isPrivate && mentioned && accountTopology(config) !== "failover") activeMessageAccount = true;
-      if (!isPrivate && quotedBotAccountId === accountState.id) activeMessageAccount = true;
-
-      if (!activeMessageAccount) {
-        if (!isPrivate && accountTopology(config) === "failover" && activeOneBotWs?.readyState !== 1) {
-          const previousActiveAccountId = activeAccountId;
-          if (switchActiveAccount(accountState.id, `active account ${previousActiveAccountId} websocket unavailable; ${accountState.id} received message`, { force: true })) {
-            activeMessageAccount = true;
-            sendWs = ws;
-            announceAccountSwitchToGroup(
-              groupId,
-              accountById(config, previousActiveAccountId) || { id: previousActiveAccountId },
-              accountById(config, activeAccountId) || { id: activeAccountId },
-              `active account ${previousActiveAccountId} websocket unavailable`
-            );
-          }
-        }
-      }
-
-      if (!activeMessageAccount) {
-        const obs = observabilityConfig();
-        if (!obs.standbyReadBackfill || isPrivate) {
-          runtimeStatus.inactiveIgnoredMessageCount += 1;
-          if (obs.logInactiveAccountMessages) {
-            logIncomingMessage({
-              accountState,
-              event,
-              text0,
-              senderName,
-              disposition: "ignored-inactive",
-              reason: isPrivate ? "inactive private account" : `active=${activeAccountId}`
-            });
-          }
-          return;
-        }
-        await sleep(obs.standbyBackfillGraceMs);
-        pruneRecentInbound();
-        const activeSeen = recentInboundMessages.get(inboundKey);
-        if (activeSeen) {
-          runtimeStatus.duplicateMessageCount += 1;
-          logIncomingMessage({
-            accountState,
-            event,
-            text0,
-            senderName,
-            disposition: "duplicate",
-            reason: `already seen by ${activeSeen.account || "another account"}`
-          });
-          return;
-        }
-        if (activeOneBotWs?.readyState !== 1) {
-          runtimeStatus.inactiveIgnoredMessageCount += 1;
-          logIncomingMessage({
-            accountState,
-            event,
-            text0,
-            senderName,
-            disposition: "ignored-inactive",
-            reason: "active websocket unavailable for sending"
-          });
-          return;
-        }
-        sendWs = activeOneBotWs;
-        markInboundSeen(inboundKey, { account: accountState.id, backfill: true });
-        accountState.lastMessageAt = Date.now();
-        accountState.lastBackfillMessageAt = accountState.lastMessageAt;
-        runtimeStatus.standbyBackfillMessageCount += 1;
-        logIncomingMessage({
-          accountState,
-          event,
-          text0,
-          senderName,
-          disposition: "accepted-backfill",
-          reason: `active ${activeAccountId} did not deliver within ${obs.standbyBackfillGraceMs}ms`
-        });
-      } else {
-        const previous = markInboundSeen(inboundKey, { account: accountState.id, backfill: false });
-        if (previous) {
-          runtimeStatus.duplicateMessageCount += 1;
-          logIncomingMessage({
-            accountState,
-            event,
-            text0,
-            senderName,
-            disposition: "duplicate",
-            reason: `already seen by ${previous.account || "another account"}`
-          });
-          return;
-        }
-        accountState.lastMessageAt = Date.now();
-        accountState.lastAcceptedMessageAt = accountState.lastMessageAt;
-        runtimeStatus.activeMessageCount += 1;
-        logIncomingMessage({ accountState, event, text0, senderName, disposition: "accepted" });
-      }
+      const previous = markInboundSeen(inboundKey, { account: accountState.id, backfill: false });
+      if (previous) { runtimeStatus.duplicateMessageCount += 1; return; }
+      accountState.lastMessageAt = Date.now();
+      accountState.lastAcceptedMessageAt = accountState.lastMessageAt;
+      runtimeStatus.activeMessageCount += 1;
+      logIncomingMessage({ accountState, event, text0, senderName, disposition: "accepted" });
       runtimeStatus.oneBotMessageCount += 1;
       runtimeStatus.lastOneBotMessageAt = Date.now();
       runtimeStatus.lastOneBotMessagePreview = clampText(`${conversationLabelFromEvent(event)} ${senderName}: ${text0 || "[非文本消息]"}`, 220);
@@ -11636,14 +12299,14 @@ async function main() {
         return;
       }
       if (!isPrivate && pendingAccountSwitchGroupNotice) {
-        if (config.accounts?.failover?.announceInGroups === false) {
+        if (accountTopology(config) !== "failover" || config.accounts?.failover?.announceInGroups === false) {
           pendingAccountSwitchGroupNotice = null;
         } else {
           const notice = pendingAccountSwitchGroupNotice;
           const maxAgeMs = Math.max(60_000, Number(config.accounts?.failover?.groupNoticeActiveWindowMs || 6 * 60 * 60_000));
           if (Date.now() - Number(notice.createdAt || 0) > maxAgeMs) {
             pendingAccountSwitchGroupNotice = null;
-          } else if (announceAccountSwitchToGroup(groupId, notice.previousAccount, notice.nextAccount, notice.reason)) {
+          } else if (await announceAccountSwitchToGroup(groupId, notice.previousAccount, notice.nextAccount, notice.reason)) {
             pendingAccountSwitchGroupNotice = null;
           }
         }
@@ -11653,24 +12316,46 @@ async function main() {
         return;
       }
 
-      if (await handleOwnerPrivateControlCommand({ ws: sendWs, event, text })) return;
+      const pausedAccount = !receivingAccount.enabled;
+      if (botControlRoute?.notice) {
+        if (!pausedAccount && !isQuiet(memory, groupId, config)) await sendLongGroupMessage(sendWs, event, botControlRoute.notice, config, { reply: true });
+        return;
+      }
+      if (!pausedAccount && await handleOwnerPrivateControlCommand({ ws: sendWs, event, text })) return;
 
-      if (await handleBotCommand({ ws: sendWs, event, text, config, memory, onVoiceCommand: async (voiceText) => {
+      if (!pausedAccount && await handleBotCommand({ ws: sendWs, event, text, config, memory, onVoiceCommand: async (voiceText) => {
         const quoted = /\bclone\s+self\b/i.test(voiceText)
           ? await resolveQuotedMessages({
               messages: [rawMessagePayload], config, botIds: [...botIds, selfId],
               getMessage: async (messageId) => oneBotRequest(ws, "get_msg", { message_id: Number(messageId) || messageId }, { timeoutMs: 15000 })
             })
           : { audioMessages: [] };
+        if (!oneBotBindingCurrent(ws, inboundBinding)) return;
         await handleVoiceCommand({ event, text: voiceText, conversationId: groupId, senderId, senderName, quotedAudio: quoted.audioMessages });
       } })) return;
 
-      if (await handleTaskControl({ taskRuntime, ws: sendWs, event, text, config, memory })) return;
+      const explicitControlTask = taskRuntime.get(text.match(/\b(task_[A-Za-z0-9_-]+)\b/)?.[1]);
+      const controlAccountId = isPrivate || mentioned ? accountState.id : (explicitControlTask ? taskDeliveryAccount(explicitControlTask)?.id : "") || "";
+      const taskControlAccount = connectedAccountForRole("task", { preferAccountId: controlAccountId, strictPreferred: Boolean(controlAccountId) });
+      const taskControlCommand = /^\/task(?:\s|$)/i.test(text);
+      if (taskControlCommand && taskControlAccount?.id !== accountState.id) return;
+      if (!pausedAccount && accountCanOfferTask(liveConfig, accountState.id) && await handleTaskControl({
+        taskRuntime, ws: sendWs, event, text,
+        config: configForReplyAccount(accountState), memory,
+        claim: (message, body) => claimConversationMessage(taskControlSeen, message, body),
+        route: (task) => {
+          const selected = task?.accountId ? taskDeliveryAccount(task) : accountById(config, accountState.id);
+          if (!selected || selected.id !== accountState.id) return null;
+          const socket = selected && oneBotAccounts.get(selected.id)?.ws?.readyState === 1
+            ? oneBotAccounts.get(selected.id).ws : sendWs;
+          return { ws: socket, config: configForReplyAccount(socket === sendWs ? accountState : selected) };
+        }
+      })) return;
 
-      repairInvalidQuietUntil(memory, groupId);
-      let quietActive = false;
-      if (!isPrivate && isQuiet(memory, groupId)) {
-        const until = quietUntil(memory, groupId);
+      repairInvalidQuietUntil(memory, groupId, config);
+      let quietActive = pausedAccount;
+      if (!isPrivate && isQuiet(memory, groupId, config)) {
+        const until = quietUntil(memory, groupId, config);
         const untilText = Number.isFinite(until) && until > 0 ? new Date(until).toISOString() : "invalid";
         quietActive = true;
         log(`quiet collect-only group=${groupId} until=${untilText}`);
@@ -11686,6 +12371,7 @@ async function main() {
       const rawReplyObservation = quietActive ? { absorbed: false } : replyCoordinator.observeMessage({
         conversationId: groupId,
         senderId,
+        accountId: accountState.id,
         current: {
           sender: senderName,
           user_id: senderId,
@@ -11717,6 +12403,7 @@ async function main() {
           event,
           conversationId: groupId,
           senderId,
+          accountId: accountState.id,
           senderName,
           text,
           rawText: text0,
@@ -11724,6 +12411,7 @@ async function main() {
           isPrivate,
           config
         });
+        if (!oneBotBindingCurrent(ws, inboundBinding)) return;
         if (debounced.skip) {
           logIncomingMessage({ accountState, event, text0, senderName, disposition: "debounced", reason: debounced.reason || "waiting for more input" });
           return;
@@ -11783,7 +12471,7 @@ async function main() {
 
       if (!text && !mentioned && !imageRefs.length) return;
 
-      const history = historyByGroup.get(groupId) || [];
+      let history = historyByGroup.get(groupId) || [];
       const provisionalCurrent = {
         sender: senderName,
         user_id: senderId,
@@ -11827,6 +12515,7 @@ async function main() {
           }
         }
       });
+      if (!oneBotBindingCurrent(ws, inboundBinding)) return;
       const currentText = appendImageDescriptions(redactSensitive(text || text0 || "[空消息]", config), imageDescriptions);
 
       const current = {
@@ -11846,6 +12535,9 @@ async function main() {
       const archivedSourceTexts = [];
       for (const source of sourceMessages) {
         const sourceEvent = source.event || event;
+        // A direct @ to both peer bots is processed by each account, but the
+        // human utterance itself belongs in shared history/archive only once.
+        if (!claimConversationMessage(storedConversationMessages, sourceEvent, source.rawText || source.text || "")) continue;
         const sourceMessageId = asStringId(sourceEvent?.message_id);
         const sourceReplyIds = extractReplyMessageIds(sourceEvent?.message || sourceEvent?.raw_message || source.rawText || "");
         const sourceReplyContexts = quotedMessages.contexts.filter((ctx) => sourceReplyIds.includes(asStringId(ctx.messageId)));
@@ -11869,21 +12561,26 @@ async function main() {
           replyContexts: sourceReplyContexts
         });
       }
-      history.push(current);
-      history.sort((a, b) => Number(a?.at || 0) - Number(b?.at || 0));
-      while (history.length > Number(config.history?.rawMaxMessages || config.history?.maxMessages || 120)) history.shift();
-      historyByGroup.set(groupId, history);
+      history = historyByGroup.get(groupId) || history;
+      if (archivedSourceTexts.length) {
+        history.push(current);
+        history.sort((a, b) => Number(a?.at || 0) - Number(b?.at || 0));
+        while (history.length > Number(config.history?.rawMaxMessages || config.history?.maxMessages || 120)) history.shift();
+        historyByGroup.set(groupId, history);
+      }
       lastEventByGroup.set(groupId, { ...event, __current: current });
 
-      for (const archived of archivedSourceTexts) {
-        const sourceEvent = archived.source.event || event;
-        updateMemoryFromMessage(memory, sourceEvent, archived.source.senderName || senderName, archived.text, config);
-        addPendingMemoryMessage(memory, sourceEvent, archived.source.senderName || senderName, archived.text, config);
-        applyConversationFeedback(memory, groupId, archived.text, config);
+      if (archivedSourceTexts.length) {
+        for (const archived of archivedSourceTexts) {
+          const sourceEvent = archived.source.event || event;
+          updateMemoryFromMessage(memory, sourceEvent, archived.source.senderName || senderName, archived.text, config);
+          addPendingMemoryMessage(memory, sourceEvent, archived.source.senderName || senderName, archived.text, config);
+          applyConversationFeedback(memory, groupId, archived.text, config);
+        }
+        summarizeOlderHistory(memory, groupId, history, config);
+        saveMemory(memory);
+        maybeUpdateMemoryWithAI({ memory, event, config });
       }
-      summarizeOlderHistory(memory, groupId, history, config);
-      saveMemory(memory);
-      maybeUpdateMemoryWithAI({ memory, event, config });
 
       if (quietActive) {
         logIncomingMessage({ accountState, event, text0, senderName, disposition: "collected-quiet", reason: "quiet mode: archived and analyzed without replying" });
@@ -11909,14 +12606,14 @@ async function main() {
       const voiceFollowup = ["followup", "repeat"].includes(standaloneVoiceRequest?.kind)
         && Boolean(priorUserAddressedBot || botRecentlyRepliedToSender);
       const voiceAddressed = isPrivate || mentioned || quotedBot || hasKeyword(text, config) || voiceFollowup;
-      const voiceRequest = voiceReplyMode(groupMemory(memory, groupId).settings, config.voice) === "off" ? null : detectVoiceReplyIntent(text0, {
+      const voiceRequest = voiceReplyMode(groupSettings(memory, groupId, config), config.voice) === "off" ? null : detectVoiceReplyIntent(text0, {
         addressed: voiceAddressed,
         addressNames: voiceNames
       }) || (shouldJudgeVoiceReplyIntent(text0, { addressed: voiceAddressed })
         ? await judgeVoiceReplyIntentWithAI(text0, { history, config })
         : null);
       if (/^\/voice(?:\s|$)/i.test(text) || voiceRequest) {
-        replyCoordinator.dropSenderJobs(groupId, senderId, "voice-request-replaces-text-reply");
+        replyCoordinator.dropSenderJobs(groupId, senderId, "voice-request-replaces-text-reply", accountState.id);
         let resolvedVoiceRequest = voiceRequest;
         if (voiceRequest && ["followup", "repeat"].includes(voiceRequest.kind)) {
           const quotedBotText = quotedMessages.contexts.find((item) => item.isBot && item.text)?.text || "";
@@ -11932,21 +12629,24 @@ async function main() {
       }
 
       if (config.automation?.enabled === true && Array.isArray(config.automation.rules)) {
-        const matchedRules = matchAutomationCommand(text, config.automation.rules, groupId);
+        // Automation scopes identify the human private chat, while reply
+        // history/archives identify each independent bot's private chat.
+        const automationConversationId = isPrivate ? `private:${senderId}` : `group:${asStringId(event.group_id)}`;
+        const matchedRules = matchAutomationCommand(text, config.automation.rules, automationConversationId);
         if (matchedRules.length) {
           const eventId = asStringId(event.message_id) || stableMessageFingerprint(event, text);
           for (const rule of matchedRules) {
             if (rule.action.kind === "task" && !taskModeConfig(config).ownerUserIds.includes(senderId)
-              && !taskModeConfig(config).allowedGroupIds.includes(asStringId(groupId))) continue;
-            const dedupeKey = `${rule.id}:${groupId}:${eventId}`;
+              && (isPrivate || !taskModeConfig(config).allowedGroupIds.includes(asStringId(event.group_id)))) continue;
+            const dedupeKey = `${rule.id}:${automationConversationId}:${eventId}`;
             if (automationCommandSeen.has(dedupeKey)) continue;
-            const cooldownKey = `${rule.id}:${groupId}`;
+            const cooldownKey = `${rule.id}:${automationConversationId}`;
             if (Date.now() - Number(automationCommandLastRun.get(cooldownKey) || 0) < 60_000) continue;
             automationCommandSeen.add(dedupeKey);
             automationCommandLastRun.set(cooldownKey, Date.now());
             if (automationCommandSeen.size > 1000) automationCommandSeen.delete(automationCommandSeen.values().next().value);
             if (automationCommandLastRun.size > 1000) automationCommandLastRun.delete(automationCommandLastRun.keys().next().value);
-            void executeAutomationRule(rule, groupId, { event, senderId, senderName, source: "command" })
+            void executeAutomationRule(rule, automationConversationId, { event, senderId, senderName, source: "command" })
               .catch((error) => warn(`automation command failed rule=${rule.id}: ${error.message}`));
           }
           return;
@@ -11956,6 +12656,7 @@ async function main() {
       const observedReply = replyCoordinator.observeMessage({
         conversationId: groupId,
         senderId,
+        accountId: accountState.id,
         current,
         event,
         messageIds: current.messageIds,
@@ -11967,15 +12668,11 @@ async function main() {
       }
 
       let behaviorConfig = applyBehaviorMode(config, memory, groupId);
-      const activeAccount = accountById(config, activeAccountId);
-      if (activeAccount?.role === "standby") {
-        behaviorConfig = applyExplicitBehaviorMode(behaviorConfig, activeAccount.behaviorMode || "normal");
-      }
       const decisionHistory = orderedHistory([
         ...history,
         ...pendingDebouncedContext(groupId, senderId)
       ]);
-      const directAccountId = (isPrivate || mentioned) ? accountState.id : "";
+      const directAccountId = accountState.id;
       const taskAccount = connectedAccountForRole("task", { preferAccountId: directAccountId, strictPreferred: Boolean(directAccountId) });
       const taskDecision = taskAccount
         ? await judgeTaskIntent({ text: current.text, event, history: decisionHistory, config })
@@ -12008,22 +12705,24 @@ async function main() {
           log(`task offer group=${groupId} task=${task.id} confidence=${taskDecision.confidence.toFixed(2)} shadow=false`);
           const offer = taskOfferText(task);
           const taskConfig = configForReplyAccount(taskAccount);
-          sendGroupMessage(taskAccount.ws, event, offer, taskConfig, { reply: true });
-          archiveBotReply({ event, config: taskConfig, memory, text: offer, meta: { source: "task-offer", user_id: taskAccount.qq || "bot", replyToUserId: senderId, replyToSender: senderName } });
+          if (await sendGroupMessage(taskAccount.ws, event, offer, taskConfig, { reply: true })) {
+            archiveBotReply({ event, config: taskConfig, memory, text: offer, meta: { source: "task-offer", user_id: taskAccount.qq || "bot", replyToUserId: senderId, replyToSender: senderName } });
+          }
           return;
         }
       }
       const chatAccount = connectedAccountForRole("chat", {
         preferAccountId: directAccountId,
         strictPreferred: Boolean(directAccountId),
-        allowCollaborationShare: !isPrivate && !mentioned && keyword
+        allowCollaborationShare: false
       });
       if (!chatAccount) {
         logIncomingMessage({ accountState, event, text0, senderName, disposition: "collected-task-only", reason: "account is task-only; no task offer matched" });
         return;
       }
+      behaviorConfig = configForGroupAccount(chatAccount, groupId, liveConfig);
       sendWs = chatAccount.ws;
-      const replyConfig = configForReplyAccount(chatAccount);
+      let replyConfig = behaviorConfig;
       const decisionContextBundle = config.reply?.useContextBundle === false
         ? null
         : buildContextBundle({ memory, groupId, history: decisionHistory, current, config: replyConfig });
@@ -12065,6 +12764,7 @@ async function main() {
       let active = false;
       let socialApplied = false;
       let socialDecision = null;
+      const activeParticipationEnabled = chatAccount.features?.proactive === true;
       const discussionDecision = !isPrivate && !mentioned && !keyword && !webSearch
         ? detectDiscussionSignal({ history: decisionHistory, current, config: behaviorConfig })
         : { matched: false, reason: "direct or tool-triggered message" };
@@ -12097,6 +12797,8 @@ async function main() {
           if (!plannerCfg.shadowMode) {
             socialApplied = true;
             if (socialDecision.action === "wait") {
+              if (!activeParticipationEnabled && !implicit) return;
+              const delayedConfigRevision = configRevision;
               scheduleDelayedUnderstandingReply({
                 pendingByGroup: delayedUnderstandingByGroup,
                 replyCoordinator,
@@ -12111,7 +12813,11 @@ async function main() {
                 memory,
                 historyByGroup,
                 lastBotMessageByGroup,
-                reason: `social planner: ${socialDecision.reason || "wait"}`
+                reason: `social planner: ${socialDecision.reason || "wait"}`,
+                isCurrent: () => configRevision === delayedConfigRevision && accountIsSelected(chatAccount.id)
+                  && accountById(liveConfig, chatAccount.id)?.enabled !== false
+                  && (implicit || accountById(liveConfig, chatAccount.id)?.features?.proactive === true)
+                  && oneBotAccounts.get(chatAccount.id)?.ws === sendWs
               });
               return;
             }
@@ -12120,14 +12826,15 @@ async function main() {
             active = !implicit;
             current.socialDecision = socialDecision;
             if (active) {
+              if (!activeParticipationEnabled) return;
               const discussionCfg = behaviorConfig.discussionParticipation || {};
               const cooldown = Number(discussionCfg.activeCooldownMs || behaviorConfig.trigger?.activeCooldownMs || 120000);
-              const last = lastActiveReplyAt.get(groupId) || 0;
+              const last = lastActiveReplyAt.get(accountState.id + ":" + groupId) || 0;
               if (nowMs - last < cooldown) {
                 log(`social planner observe group=${groupId} reason=active cooldown remainingMs=${cooldown - (nowMs - last)}`);
                 return;
               }
-              lastActiveReplyAt.set(groupId, nowMs);
+              lastActiveReplyAt.set(accountState.id + ":" + groupId, nowMs);
             }
           }
         } else if (plannerCfg.enabled && !plannerCfg.shadowMode) {
@@ -12135,8 +12842,8 @@ async function main() {
         }
       }
 
-      if (!socialApplied && !isPrivate && !mentioned && !keyword && !implicit && !webSearch && behaviorConfig.trigger?.activeReply) {
-        const last = lastActiveReplyAt.get(groupId) || 0;
+      if (activeParticipationEnabled && !socialApplied && !isPrivate && !mentioned && !keyword && !implicit && !webSearch && behaviorConfig.trigger?.activeReply) {
+        const last = lastActiveReplyAt.get(accountState.id + ":" + groupId) || 0;
         const discussionCfg = behaviorConfig.discussionParticipation || {};
         const baseProbability = Number(behaviorConfig.trigger?.activeProbability || 0);
         const boostedProbability = discussionDecision.matched
@@ -12158,6 +12865,7 @@ async function main() {
             config: behaviorConfig
           });
           if (delayed.matched) {
+            const delayedConfigRevision = configRevision;
             scheduleDelayedUnderstandingReply({
               pendingByGroup: delayedUnderstandingByGroup,
               replyCoordinator,
@@ -12172,7 +12880,9 @@ async function main() {
               memory,
               historyByGroup,
               lastBotMessageByGroup,
-              reason: delayed.reason
+              reason: delayed.reason,
+              isCurrent: () => configRevision === delayedConfigRevision && accountIsSelected(chatAccount.id)
+                && accountById(liveConfig, chatAccount.id)?.enabled && oneBotAccounts.get(chatAccount.id)?.ws === sendWs
             });
           }
           return;
@@ -12183,15 +12893,20 @@ async function main() {
           return;
         }
         if (discussionDecision.matched) log(`active discussion boost group=${groupId} probability=${boostedProbability.toFixed(2)} reason=${discussionDecision.reason}`);
-        lastActiveReplyAt.set(groupId, nowMs);
+        lastActiveReplyAt.set(accountState.id + ":" + groupId, nowMs);
       }
 
+      // An active-mode label is not a decision to reply. Shadow/disabled planners
+      // and disabled activeReply must not turn unrelated observations into jobs.
+      if (!(isPrivate || mentioned || keyword || webSearch || implicit || (active && activeParticipationEnabled))) return;
       const mode = webSearch ? "web" : isPrivate ? "private" : mentioned ? "at" : keyword ? "keyword" : implicit ? "implicit" : "active";
       log(`handling ${conversationLabelFromEvent(event)} sender=${senderName} mode=${mode}${isPrivate && isPrivateOwner(senderId, config) ? " ownerPrivate=true" : ""}${webSearch ? ` query=${JSON.stringify(webSearchDecision.query).slice(0, 120)}` : ""}${implicit ? ` confidence=${implicitDecision.confidence.toFixed(2)} reason=${implicitDecision.reason}` : ""} text=${JSON.stringify(text).slice(0, 160)}`);
 
+      const queuedConfigRevision = configRevision;
       replyCoordinator.enqueue({
         conversationId: groupId,
         senderId,
+        accountId: chatAccount.id,
         mode,
         direct: coordinatorDirect,
         currentMessages: [current],
@@ -12199,6 +12914,12 @@ async function main() {
         event,
         webSearchDecision,
         execute: async ({ job, signal, revision }) => {
+          const latestAccount = accountById(liveConfig, chatAccount.id);
+          if (!oneBotBindingCurrent(sendWs, inboundBinding) || !latestAccount || latestAccount.enabled === false || !accountCanChat(liveConfig, latestAccount.id) || !accountIsSelected(latestAccount.id)
+            || oneBotAccounts.get(latestAccount.id)?.ws !== sendWs) return { sent: false, skipped: true };
+          if (job.mode === "active" && latestAccount.features?.proactive !== true) return { sent: false, skipped: true };
+          replyConfig = configForGroupAccount(latestAccount, groupId, liveConfig);
+          const generationConfigRevision = configRevision;
           const effectiveCurrent = mergeReplyCurrents(job.currentMessages, current);
           const effectiveEvent = job.event || event;
           const effectiveSenderName = effectiveCurrent.sender || senderName;
@@ -12207,12 +12928,15 @@ async function main() {
             ...pendingDebouncedContext(groupId, senderId)
           ]);
           try {
-            if (isQuiet(memory, groupId) || sendWs.readyState !== 1) return { sent: false, skipped: true };
+            if (isQuiet(memory, groupId, replyConfig) || sendWs.readyState !== 1) return { sent: false, skipped: true };
             if (signal.aborted) throw Object.assign(new Error("reply generation aborted"), { name: "AbortError" });
             let effectiveSearchDecision = job.webSearchDecision || webSearchDecision;
             let effectiveWebSearch = job.mode === "web" || effectiveSearchDecision?.matched === true;
-            if (Number(job.contextRevision || 0) > 0) {
-              const candidate = detectWebSearchRequest(effectiveCurrent.text, config, {
+            if (replyConfig.webSearch?.enabled === false) {
+              effectiveSearchDecision = null;
+              effectiveWebSearch = false;
+            } else if (Number(job.contextRevision || 0) > 0 || queuedConfigRevision !== generationConfigRevision) {
+              const candidate = detectWebSearchRequest(effectiveCurrent.text, replyConfig, {
                 history: latestHistory,
                 current: effectiveCurrent,
                 mentioned: job.direct,
@@ -12223,14 +12947,15 @@ async function main() {
                 text: effectiveCurrent.text,
                 history: latestHistory,
                 current: effectiveCurrent,
-                config
+                config: replyConfig
               });
               effectiveWebSearch = effectiveSearchDecision.matched === true;
             }
+            if (signal.aborted || configRevision !== generationConfigRevision) return { retry: true };
             if (effectiveWebSearch && !job.preReplySent) {
-              const preReply = webSearchPreReply(effectiveSearchDecision, config);
+              const preReply = webSearchPreReply(effectiveSearchDecision, replyConfig);
               if (preReply) {
-                sendGroupMessage(sendWs, effectiveEvent, preReply, replyConfig, { reply: config.webSearch?.preReply?.replyToMessage !== false });
+                if (!await sendGroupMessage(sendWs, effectiveEvent, preReply, replyConfig, { reply: replyConfig.webSearch?.preReply?.replyToMessage !== false })) return { sent: false, skipped: true };
                 archiveBotReply({ event: effectiveEvent, config: replyConfig, memory, text: preReply, meta: { source: "web-pre-reply", user_id: chatAccount.qq || "bot", replyToUserId: senderId, replyToSender: effectiveSenderName } });
                 recordBotMessage({
                   historyByGroup,
@@ -12244,13 +12969,13 @@ async function main() {
               }
               job.preReplySent = true;
             }
-            const contextBundle = config.reply?.useContextBundle === false
+            const contextBundle = replyConfig.reply?.useContextBundle === false
               ? null
               : buildContextBundle({ memory, groupId, history: latestHistory, current: effectiveCurrent, config: replyConfig });
             const memoryText = compactMemory(memory, groupId, replyConfig, senderId);
-            const archiveContext = buildArchiveContext({ event: effectiveEvent, current: effectiveCurrent, history: latestHistory, memory, groupId, config, mode: effectiveWebSearch ? "web" : job.mode });
-            const webSearchBuilt = effectiveWebSearch ? await buildWebSearchContext(effectiveSearchDecision, config) : { text: "", result: null };
-            if (signal.aborted || Number(job.contextRevision || 0) !== revision) return { retry: true };
+            const archiveContext = buildArchiveContext({ event: effectiveEvent, current: effectiveCurrent, history: latestHistory, memory, groupId, config: replyConfig, mode: effectiveWebSearch ? "web" : job.mode });
+            const webSearchBuilt = effectiveWebSearch ? await buildWebSearchContext(effectiveSearchDecision, replyConfig) : { text: "", result: null };
+            if (signal.aborted || Number(job.contextRevision || 0) !== revision || configRevision !== generationConfigRevision) return { retry: true };
             const webSearchContext = webSearchBuilt.text || "";
             const prompt = buildPrompt({
               config: replyConfig,
@@ -12261,20 +12986,21 @@ async function main() {
               contextBundle,
               webSearchContext,
               archiveContext: archiveContext.text || "",
-              learningPrompt: learningPromptForConversation(groupId)
+              learningPrompt: learningPromptForConversation(groupId, replyConfig)
             });
             const rawResponse = await callHermes(prompt, replyConfig, { signal });
-            const learningQuestion = /^\s*__LEARN__/.test(rawResponse) && Boolean(learningPromptForConversation(groupId));
+            if (!oneBotBindingCurrent(sendWs, inboundBinding)) return { sent: false, skipped: true };
+            const learningQuestion = /^\s*__LEARN__/.test(rawResponse) && Boolean(learningPromptForConversation(groupId, replyConfig));
             const response = trimForGroup(String(rawResponse || "").replace(/^\s*__LEARN__\s*/, ""), replyConfig);
-            if (signal.aborted || Number(job.contextRevision || 0) !== revision) return { retry: true };
-            if (isQuiet(memory, groupId) || sendWs.readyState !== 1) return { sent: false, skipped: true };
+            if (signal.aborted || Number(job.contextRevision || 0) !== revision || configRevision !== generationConfigRevision) return { retry: true };
+            if (isQuiet(memory, groupId, replyConfig) || sendWs.readyState !== 1) return { sent: false, skipped: true };
             if (response === "__SKIP__" && config.reply?.allowSkip !== false) return { sent: false, skipped: true };
             if (!response) return { sent: false, skipped: true };
-            const deliveryMode = voiceReplyMode(groupMemory(memory, groupId).settings, config.voice);
+            const deliveryMode = voiceReplyMode(groupSettings(memory, groupId, replyConfig), replyConfig.voice);
             const sendAsVoice = shouldSendVoiceReply({
               mode: deliveryMode, incomingVoice: voiceTranscriptsSeen > 0,
               direct: job.direct || isPrivate, text: response,
-              enabled: config.voice?.enabled === true && config.voice?.tts?.enabled !== false
+              enabled: replyConfig.voice?.enabled === true && replyConfig.voice?.tts?.enabled !== false
             });
             let voiceDelivered = false;
             if (sendAsVoice) {
@@ -12282,25 +13008,25 @@ async function main() {
               fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 });
               const outputPath = path.join(outputDir, `reply-${Date.now()}-${randomBytes(4).toString("hex")}.wav`);
               try {
-                const ttsModel = config.voice.tts?.model || "mimo-v2.5-tts";
-                const selectedPreset = groupMemory(memory, groupId).settings?.voicePreset;
-                const allowed = asArray(config.voice.tts?.allowedVoices);
-                const preset = allowed.includes(selectedPreset) ? selectedPreset : (config.voice.tts?.voice || "mimo_default");
+                const ttsModel = replyConfig.voice.tts?.model || "mimo-v2.5-tts";
+                const selectedPreset = groupSettings(memory, groupId, replyConfig).voicePreset;
+                const allowed = asArray(replyConfig.voice.tts?.allowedVoices);
+                const preset = allowed.includes(selectedPreset) ? selectedPreset : (replyConfig.voice.tts?.voice || "mimo_default");
                 await synthesizeSpeechFile({
                   text: response, outputPath, model: ttsModel, signal,
                   ...(ttsModel === "mimo-v2.5-tts-voicedesign"
-                    ? { voiceDescription: config.voice.tts?.voiceDescription }
+                    ? { voiceDescription: replyConfig.voice.tts?.voiceDescription }
                     : { voice: preset }),
-                  config: { ...voiceConfigForCapability(config, "tts"), timeoutMs: Math.min(25_000, Number(config.voice.timeoutMs || 60_000)), outputDir },
-                  env: voiceApiEnvironment(voiceConfigForCapability(config, "tts"), config.ai)
+                  config: { ...voiceConfigForCapability(replyConfig, "tts"), timeoutMs: Math.min(25_000, Number(replyConfig.voice.timeoutMs || 60_000)), outputDir },
+                  env: voiceApiEnvironment(voiceConfigForCapability(replyConfig, "tts"), replyConfig.ai)
                 });
               } catch (error) {
-                if (signal.aborted || Number(job.contextRevision || 0) !== revision) return { retry: true };
+                if (signal.aborted || Number(job.contextRevision || 0) !== revision || configRevision !== generationConfigRevision) return { retry: true };
                 warn(`automatic voice synthesis failed conversation=${groupId}: ${error.message}`);
               }
               try {
-                if (signal.aborted || Number(job.contextRevision || 0) !== revision) return { retry: true };
-                if (isQuiet(memory, groupId) || sendWs.readyState !== 1) return { sent: false, skipped: true };
+                if (signal.aborted || Number(job.contextRevision || 0) !== revision || configRevision !== generationConfigRevision) return { retry: true };
+                if (!oneBotBindingCurrent(sendWs, inboundBinding) || isQuiet(memory, groupId, replyConfig)) return { sent: false, skipped: true };
                 if (fs.existsSync(outputPath)) {
                   let recordMessage;
                   try { recordMessage = [buildRecordMessage(fs.readFileSync(outputPath))]; }
@@ -12310,7 +13036,7 @@ async function main() {
                       await oneBotRequest(sendWs, isPrivate ? "send_private_msg" : "send_group_msg", {
                         [isPrivate ? "user_id" : "group_id"]: isPrivate ? senderId : groupId,
                         message: recordMessage
-                      }, { timeoutMs: 30_000 });
+                      }, { timeoutMs: 30_000, binding: inboundBinding });
                       voiceDelivered = true;
                     } catch (error) {
                       // A timeout may mean QQ received the record but the acknowledgement was lost.
@@ -12324,8 +13050,9 @@ async function main() {
               }
             }
             if (!voiceDelivered) {
-              if (signal.aborted || Number(job.contextRevision || 0) !== revision) return { retry: true };
-              sendGroupMessage(sendWs, effectiveEvent, response, replyConfig, { reply: job.direct || (job.mode === "implicit" && behaviorConfig.implicitReply?.replyToMessage !== false) });
+              if (signal.aborted || Number(job.contextRevision || 0) !== revision || configRevision !== generationConfigRevision) return { retry: true };
+              const sent = await sendGroupMessage(sendWs, effectiveEvent, response, replyConfig, { reply: job.direct || (job.mode === "implicit" && behaviorConfig.implicitReply?.replyToMessage !== false) });
+              if (!sent) return { sent: false, skipped: true };
             }
             if (learningQuestion) markLearningQuestion(groupId);
             archiveBotReply({ event: effectiveEvent, config: replyConfig, memory, text: response, meta: { source: voiceDelivered ? "voice-reply" : effectiveWebSearch ? "web" : job.mode, user_id: chatAccount.qq || "bot", replyToUserId: senderId, replyToSender: effectiveSenderName, coveredMessageIds: job.messageIds, mentionedUserIds: relatedUserIdsFromText(response, groupMemory(memory, groupId)) } });
@@ -12347,17 +13074,21 @@ async function main() {
             }
             return { sent: true, coveredMessageIds: job.messageIds };
           } catch (err) {
+            if (!oneBotBindingCurrent(sendWs, inboundBinding) || err?.code === "ACCOUNT_SEND_BLOCKED") return { sent: false, skipped: true };
             if (signal.aborted || err?.name === "AbortError") throw err;
             warn(`AI reply failed: ${err.message}`);
             if (isPrivate && isPrivateOwner(senderId, config)) {
               const reason = clampText(redactSensitive(err.message, config), 140);
-              sendGroupMessage(sendWs, effectiveEvent, `收到，但我刚才生成回复失败了：${reason || "未知错误"}\n我这边不会再静默吞消息，你可以直接再发一次，或者去管理页测一下模型接口。`, config, { reply: true });
+              sendGroupMessage(sendWs, effectiveEvent, `收到，但我刚才生成回复失败了：${reason || "未知错误"}\n我这边不会再静默吞消息，你可以直接再发一次，或者去管理页测一下模型接口。`, replyConfig, { reply: true });
               return { sent: true, fallback: true };
             }
             return { sent: false, error: err.message };
           }
         }
       });
+      } catch (err) {
+        if (err.code !== "ACCOUNT_SEND_BLOCKED") warn(`OneBot inbound processing failed account=${ws.__hermesAccountId || "unknown"}: ${redactSensitive(err.message, liveConfig)}`);
+      }
     });
 
     ws.on("close", () => {
@@ -12372,28 +13103,32 @@ async function main() {
       wsAccountIds.delete(ws);
       if (activeOneBotWs === ws) {
         activeOneBotWs = null;
-        const cfg = accountFailoverConfig(config);
-        const standby = cfg.standbys.find((account) => accountConnected(account.id));
-        if (standby && accountId === cfg.primary.id) switchActiveAccount(standby.id, "primary websocket closed");
+        if (accountState?.ws?.readyState === 1) {
+          activeOneBotWs = accountState.ws;
+        } else if (accountTopology(config) === "failover") {
+          const cfg = accountFailoverConfig(config);
+          const standby = cfg.standbys.find((account) => accountConnected(account.id));
+          if (standby && accountId === cfg.primary.id) switchActiveAccount(standby.id, "primary websocket closed");
+        } else {
+          activeOneBotWs = connectedAccountForRole("chat")?.ws || null;
+        }
       }
       runtimeStatus.lastOneBotDisconnectedAt = Date.now();
-      for (const [echo, pending] of pendingOneBotActions) {
-        pendingOneBotActions.delete(echo);
-        pending.reject(new Error("onebot websocket closed"));
-      }
-      for (const [echo, tracker] of oneBotSendTrackers) {
-        oneBotSendTrackers.delete(echo);
-        clearTimeout(tracker.timer);
-      }
+      clearOneBotActionsForSocket(ws, pendingOneBotActions, oneBotSendTrackers);
       log(`OneBot disconnected account=${accountId || "unknown"}`);
       checkAdminStatusNotification({ force: true });
     });
 
-    if (config.proactive?.enabled) {
-      const intervalMs = Number(config.proactive.intervalMs || 900000);
+    {
+      const intervalMs = Number(config.proactive?.intervalMs || 900000);
       const timer = setInterval(async () => {
-        if (!accountCanChat(config, activeAccountId)) return;
-        if (ws.readyState !== 1 || !withinActiveHours(config)) return;
+        const chatAccount = connectedAccountForRole("chat", { preferAccountId: ws.__hermesAccountId, strictPreferred: true });
+        // Independent bots own their timers; a failover group contributes only
+        // its selected member. The shared send queue still prevents bursts.
+        if (!chatAccount || chatAccount.ws !== ws || ws.readyState !== 1) return;
+        const proactiveBinding = oneBotBinding(ws, chatAccount.id);
+        const replyConfig = configForReplyAccount(chatAccount);
+        if (!replyConfig.proactive?.enabled || !withinActiveHours(replyConfig)) return;
         const groupsForProactive = handlesAllGroups(config)
           ? Array.from(lastEventByGroup.keys()).filter((id) => !String(id).startsWith("private:"))
           : targetGroups(config);
@@ -12401,12 +13136,8 @@ async function main() {
           const lastEvent = lastEventByGroup.get(String(groupId));
           const history = historyByGroup.get(String(groupId)) || [];
           if (!lastEvent || history.length === 0) continue;
-          if (isQuiet(memory, groupId)) continue;
-          let behaviorConfig = applyBehaviorMode(config, memory, groupId);
-          const activeAccount = accountById(config, activeAccountId);
-          if (activeAccount?.role === "standby") {
-            behaviorConfig = applyExplicitBehaviorMode(behaviorConfig, activeAccount.behaviorMode || "normal");
-          }
+          if (isQuiet(memory, groupId, configForReplyAccount(chatAccount)) || !accountScopeAllows(chatAccount, "group", groupId)) continue;
+          const behaviorConfig = configForGroupAccount(chatAccount, groupId);
           const nowMs = Date.now();
           const lastHistoryItem = history.at(-1);
           if (behaviorConfig.proactive?.requireHumanAfterBot !== false && lastHistoryItem?.isBot) {
@@ -12427,7 +13158,7 @@ async function main() {
               )
             : Number(behaviorConfig.proactive.probability || 0.35);
           if (nowMs - lastMessageAt > Number(behaviorConfig.proactive.activeWindowMs || 1800000)) continue;
-          if (nowMs - (lastProactiveAt.get(String(groupId)) || 0) < proactiveCooldown) continue;
+          if (nowMs - (lastProactiveAt.get(chatAccount.id + ":" + String(groupId)) || 0) < proactiveCooldown) continue;
           const plannerCfg = socialPlannerConfig(behaviorConfig);
           if ((!plannerCfg.enabled || plannerCfg.shadowMode) && Math.random() >= proactiveProbability) continue;
           const skip = shouldSkipProactiveReply({ history, current, memory, groupId, config: behaviorConfig });
@@ -12440,7 +13171,7 @@ async function main() {
             const socialDecision = await judgeSocialActionWithAI({
               history,
               current,
-              lastBotMessage: lastBotMessageForAccount(lastBotMessageByGroup, groupId, activeAccountId, config),
+              lastBotMessage: lastBotMessageForAccount(lastBotMessageByGroup, groupId, chatAccount.id, config),
               implicitDecision: { matched: false, confidence: 0, reason: "scheduled proactive check" },
               discussionDecision: discussion,
               memory,
@@ -12453,44 +13184,52 @@ async function main() {
             if (!plannerCfg.shadowMode) proactiveCurrent = { ...current, socialDecision: { ...socialDecision, intent: "proactive" } };
           }
           if (discussion.matched) log(`proactive discussion boost group=${groupId} probability=${proactiveProbability.toFixed(2)} reason=${discussion.reason}`);
-          lastProactiveAt.set(String(groupId), nowMs);
+          lastProactiveAt.set(chatAccount.id + ":" + String(groupId), nowMs);
           replyCoordinator.enqueue({
             conversationId: groupId,
             senderId: proactiveCurrent.user_id,
+            accountId: chatAccount.id,
             mode: "proactive",
             direct: false,
             currentMessages: [proactiveCurrent],
             messageIds: proactiveCurrent.messageIds,
             event: lastEvent,
             execute: async ({ job, signal, revision }) => {
+              const currentChatAccount = connectedAccountForRole("chat", { preferAccountId: ws.__hermesAccountId, strictPreferred: true });
+              if (!oneBotBindingCurrent(ws, proactiveBinding) || currentChatAccount?.ws !== ws || currentChatAccount.id !== chatAccount.id) return { sent: false, skipped: true };
+              if (currentChatAccount.features?.proactive !== true) return { sent: false, skipped: true };
+              const generationConfigRevision = configRevision;
+              const generationConfig = configForGroupAccount(currentChatAccount, groupId);
               const latestHistory = historyByGroup.get(String(groupId)) || [];
               const effectiveCurrent = mergeReplyCurrents(job.currentMessages, proactiveCurrent);
               const contextBundle = config.reply?.useContextBundle === false
                 ? null
-                : buildContextBundle({ memory, groupId, history: latestHistory, current: effectiveCurrent, config });
+                : buildContextBundle({ memory, groupId, history: latestHistory, current: effectiveCurrent, config: generationConfig });
               const prompt = buildPrompt({
-                config,
+                config: generationConfig,
                 history: latestHistory,
                 current: effectiveCurrent,
                 mode: "proactive",
-                memoryText: compactMemory(memory, groupId, config),
+                memoryText: compactMemory(memory, groupId, generationConfig),
                 contextBundle
               });
-              const response = trimForGroup(await callHermes(prompt, config, { signal }), config);
-              if (signal.aborted || Number(job.contextRevision || 0) !== revision) return { retry: true };
+              const response = trimForGroup(await callHermes(prompt, generationConfig, { signal }), generationConfig);
+              if (!oneBotBindingCurrent(ws, proactiveBinding)) return { sent: false, skipped: true };
+              if (signal.aborted || Number(job.contextRevision || 0) !== revision || configRevision !== generationConfigRevision) return { retry: true };
               if (response === "__SKIP__" && config.reply?.allowSkip !== false) return { sent: false, skipped: true };
               if (!response) return { sent: false, skipped: true };
-              sendGroupMessage(ws, job.event || lastEvent, response, config, { reply: false });
+              if (connectedAccountForRole("chat", { preferAccountId: ws.__hermesAccountId, strictPreferred: true })?.ws !== ws || isQuiet(memory, groupId, configForReplyAccount(currentChatAccount))) return { sent: false, skipped: true };
+              if (!await sendGroupMessage(ws, job.event || lastEvent, response, generationConfig, { reply: false })) return { sent: false, skipped: true };
               recordBotMessage({
                 historyByGroup,
                 lastBotMessageByGroup,
                 groupId,
                 text: response,
-                config,
+                config: generationConfig,
                 memory,
                 meta: {
                   source: "proactive",
-                  user_id: lastEvent.self_id || "bot",
+                  user_id: chatAccount.qq || chatAccount.id,
                   coveredMessageIds: job.messageIds,
                   mentionedUserIds: relatedUserIdsFromText(response, groupMemory(memory, groupId))
                 }
@@ -12505,7 +13244,14 @@ async function main() {
 
     // Hourly chat — send periodic private messages to bot owner
     const hourlyTimer = setInterval(() => {
-      runHourlyChat({ ws, config });
+      const chatAccount = connectedAccountForRole("chat", { preferAccountId: ws.__hermesAccountId, strictPreferred: true });
+      if (chatAccount?.ws === ws) {
+        const expectedRevision = configRevision;
+        const hourlyBinding = oneBotBinding(ws, chatAccount.id);
+        runHourlyChat({ ws, config: configForReplyAccount(chatAccount),
+          isCurrent: () => configRevision === expectedRevision && oneBotBindingCurrent(ws, hourlyBinding)
+            && connectedAccountForRole("chat", { preferAccountId: chatAccount.id, strictPreferred: true })?.ws === ws });
+      }
     }, Number(config.hourlyChat?.checkIntervalMs || 60_000));
     ws.on("close", () => clearInterval(hourlyTimer));
   }
@@ -12532,6 +13278,7 @@ async function main() {
       "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", outputPath];
     const hostFfmpeg = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"].find((candidate) => fs.existsSync(candidate));
     if (hostFfmpeg) return runAudioTool(hostFfmpeg, ffmpegArgs);
+    if (accountById(config, accountState.id)?.managed === false) throw new Error("外部协议端需要提供已解码音频");
     const container = accountById(config, accountState.id)?.protocolContainer;
     if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/.test(String(container || ""))) throw new Error("audio conversion unavailable");
     const stem = `hermes-asr-${randomBytes(8).toString("hex")}`;
@@ -12573,7 +13320,9 @@ async function main() {
         const { buffer } = await downloadUrlToBuffer(source, { timeoutMs: 15_000, maxBytes, redirects: 0 });
         audioBuffer = buffer;
       } else if (!audioBuffer && /^\/app\/[A-Za-z0-9_./-]+\.(?:mp3|wav|amr|ogg)$/i.test(source) && !source.split("/").includes("..")) {
-        const container = accountById(config, accountState.id)?.protocolContainer;
+        const sourceAccount = accountById(config, accountState.id);
+        if (sourceAccount?.managed === false) throw new Error("外部协议端需要返回音频 URL 或 base64");
+        const container = sourceAccount?.protocolContainer;
         if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/.test(String(container || ""))) throw new Error("invalid protocol container");
         rawPath = path.join(voiceDir, `${stem}${path.extname(source).toLowerCase()}`);
         await runAudioTool("docker", ["cp", `${container}:${source}`, rawPath]);
@@ -12609,7 +13358,9 @@ async function main() {
     }
   }
 
+  const liveRootConfig = config;
   async function transcribeOneBotRecord(ref, ws, accountState) {
+    const config = configForReplyAccount(accountById(liveRootConfig, accountState.id), liveRootConfig);
     if (!ref || config.voice?.enabled !== true || config.voice?.asr?.enabled === false) return "";
     const filePath = await downloadOneBotRecord(ref, ws, accountState);
     try {
@@ -12626,23 +13377,25 @@ async function main() {
 
   async function handleVoiceCommand({ event, text, conversationId, senderId, senderName, quotedAudio = [], voiceRequest = null }) {
     const isPrivate = event.message_type === "private";
-    const addressedAccountId = isPrivate || messageMentionsSelf(event, text)
-      ? asStringId(event.__accountId) : "";
+    const addressedAccountId = asStringId(event.__accountId);
     const chatAccount = connectedAccountForRole("chat", {
       preferAccountId: addressedAccountId,
       strictPreferred: Boolean(addressedAccountId)
     });
     const ws = chatAccount?.ws;
     if (!ws || ws.readyState !== 1) return false;
+    if (event.__oneBotSessionId && event.__oneBotSessionId !== ws.__hermesSessionId) return false;
     const replyConfig = configForReplyAccount(chatAccount);
     const targetId = isPrivate ? asStringId(event.user_id) : asStringId(event.group_id);
-    const voice = config.voice || {};
+    const voice = replyConfig.voice || {};
+    const voiceRevision = configRevision;
+    const voiceBinding = oneBotBinding(ws, chatAccount.id);
     const say = async (message) => {
-      if (ws.readyState !== 1 || (!isPrivate && isQuiet(memory, targetId))) return null;
+      if (voiceRevision !== configRevision || !oneBotBindingCurrent(ws, voiceBinding) || (!isPrivate && isQuiet(memory, targetId, replyConfig))) return null;
       return oneBotRequest(ws, isPrivate ? "send_private_msg" : "send_group_msg", {
         [isPrivate ? "user_id" : "group_id"]: targetId,
-        message
-      }, { timeoutMs: 30_000 });
+        message: botCommandFeedback(message, event)
+      }, { timeoutMs: 30_000, binding: voiceBinding });
     };
     if (voice.enabled !== true || voice.tts?.enabled === false) {
       await say("语音功能还没开启；请在控制台配置 MiMo API 和语音开关。");
@@ -12650,7 +13403,7 @@ async function main() {
     }
     const utterance = voiceRequest?.text || text.replace(/^\/voice\s*/i, "").trim();
     log(`voice request conversation=${conversationId} kind=${voiceRequest?.kind || "command"} account=${chatAccount.id}`);
-    if (voiceReplyMode(groupMemory(memory, conversationId).settings, voice) === "off" && !/^preset(?:\s|$)/i.test(utterance)) {
+    if (voiceReplyMode(groupSettings(memory, conversationId, replyConfig), voice) === "off" && !/^preset(?:\s|$)/i.test(utterance)) {
       await say("这个会话的语音模式已关闭；请让管理员发送 /bot voice mixed 或 /bot voice force。收到的语音仍可按 ASR 设置转写。");
       return false;
     }
@@ -12688,9 +13441,8 @@ async function main() {
       try {
         await synthesizeSpeechFile({ text: design.speech, outputPath,
           model: "mimo-v2.5-tts-voicedesign", voiceDescription: design.voiceDescription,
-          config: { ...voiceConfigForCapability(config, "tts"), outputDir }, env: voiceApiEnvironment(voiceConfigForCapability(config, "tts"), config.ai) });
-        await say([buildRecordMessage(fs.readFileSync(outputPath))]);
-        const replyConfig = configForReplyAccount(chatAccount);
+          config: { ...voiceConfigForCapability(replyConfig, "tts"), outputDir }, env: voiceApiEnvironment(voiceConfigForCapability(replyConfig, "tts"), replyConfig.ai) });
+        if (!await say([buildRecordMessage(fs.readFileSync(outputPath))])) return false;
         recordBotMessage({ historyByGroup, lastBotMessageByGroup, groupId: conversationId, text: design.speech, config: replyConfig, memory,
           meta: { source: "voice-design-one-shot", replyToUserId: senderId, replyToSender: senderName } });
         archiveBotReply({ event, config: replyConfig, memory, text: design.speech,
@@ -12732,11 +13484,10 @@ async function main() {
             model: "mimo-v2.5-tts-voiceclone",
             referenceAudioPath: inputPath,
             consentToVoiceClone: true,
-            config: { ...voiceConfigForCapability(config, "tts"), outputDir },
-            env: voiceApiEnvironment(voiceConfigForCapability(config, "tts"), config.ai)
+            config: { ...voiceConfigForCapability(replyConfig, "tts"), outputDir },
+            env: voiceApiEnvironment(voiceConfigForCapability(replyConfig, "tts"), replyConfig.ai)
           });
-          await say([buildRecordMessage(fs.readFileSync(outputPath))]);
-          const replyConfig = configForReplyAccount(chatAccount);
+          if (!await say([buildRecordMessage(fs.readFileSync(outputPath))])) return false;
           recordBotMessage({ historyByGroup, lastBotMessageByGroup, groupId: conversationId, text: pending.speech, config: replyConfig, memory,
             meta: { source: "voice-clone-one-shot", replyToUserId: senderId, replyToSender: senderName } });
           archiveBotReply({ event, config: replyConfig, memory, text: pending.speech,
@@ -12784,14 +13535,14 @@ async function main() {
         await say("这个音色尚未开放；请从 /bot voice preset list 中选择。");
         return false;
       }
-      const gm = groupMemory(memory, conversationId);
-      const lastChangedAt = Number(gm.settings?.voicePresetUpdatedAt || 0);
+      const settings = groupSettings(memory, conversationId, replyConfig, { write: true, scoped: !isPrivate });
+      const lastChangedAt = Number(settings.voicePresetUpdatedAt || 0);
       if (Date.now() - lastChangedAt < 60_000 && !taskModeConfig(config).ownerUserIds.includes(senderId)) {
         await say("刚换过音色，等一分钟再切，免得大家听晕。");
         return false;
       }
-      gm.settings.voicePreset = requested;
-      gm.settings.voicePresetUpdatedAt = Date.now();
+      settings.voicePreset = requested;
+      settings.voicePresetUpdatedAt = Date.now();
       saveMemory(memory);
       await say(`好，这个会话的语音音色换成「${requested}」了。`);
       return true;
@@ -12829,7 +13580,7 @@ async function main() {
       fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 });
       const outputPath = path.join(outputDir, `speech-${Date.now()}-${randomBytes(4).toString("hex")}.wav`);
       const ttsModel = voice.tts?.model || "mimo-v2.5-tts";
-      const selectedPreset = groupMemory(memory, conversationId).settings?.voicePreset;
+      const selectedPreset = groupSettings(memory, conversationId, replyConfig).voicePreset;
       const effectivePreset = asArray(voice.tts?.allowedVoices).includes(selectedPreset) ? selectedPreset : (voice.tts?.voice || "mimo_default");
       try {
         await synthesizeSpeechFile({
@@ -12838,8 +13589,8 @@ async function main() {
           ...(ttsModel === "mimo-v2.5-tts-voicedesign"
             ? { voiceDescription: voice.tts?.voiceDescription }
             : { voice: effectivePreset }),
-          config: { ...voiceConfigForCapability(config, "tts"), outputDir },
-          env: voiceApiEnvironment(voiceConfigForCapability(config, "tts"), config.ai)
+          config: { ...voiceConfigForCapability(replyConfig, "tts"), outputDir },
+          env: voiceApiEnvironment(voiceConfigForCapability(replyConfig, "tts"), replyConfig.ai)
         });
         const audio = fs.readFileSync(outputPath);
         const sent = await say([buildRecordMessage(audio)]);
@@ -12861,28 +13612,39 @@ async function main() {
   }
 
   async function executeAutomationRule(rule, conversationId, { event = null, senderId = "", senderName = "", source = "schedule" } = {}) {
-    const selectedAccount = rule.accountId
-      ? configuredAccountDefinitions(config).find((item) => item.id === rule.accountId && item.enabled !== false && oneBotAccounts.get(item.id)?.ws?.readyState === 1)
+    const group = rule.groupId ? config.accounts.failoverGroups.find((item) => item.id === rule.groupId) : null;
+    if (rule.groupId && !group) return false;
+    const targetAccountId = group ? (accountTopology(config) === "failover" ? activeAccountId : selectedGroupAccount(group)) : rule.accountId;
+    const selectedAccount = targetAccountId ? accountById(config, targetAccountId)
       : connectedAccountForRole(rule.action.kind === "task" ? "task" : "chat");
     const ws = selectedAccount ? oneBotAccounts.get(selectedAccount.id)?.ws : null;
     if (!ws || ws.readyState !== 1 || config.automation?.enabled !== true) return false;
     const replyConfig = configForReplyAccount(selectedAccount);
+    if (!replyConfig.automation?.enabled || !accountIsSelected(selectedAccount.id)) return false;
+    const automationRevision = configRevision;
+    const automationBinding = oneBotBinding(ws, selectedAccount.id);
     const isPrivate = conversationId.startsWith("private:");
-    const recipientId = conversationId.split(":")[1];
-    if (!recipientId || (!isPrivate && (isQuiet(memory, recipientId) || !shouldHandleGroup(recipientId, config)))) return false;
+    const recipientId = isPrivate ? conversationId.split(":")[1] : conversationId.replace(/^group:/, "");
+    if (!accountScopeAllows(selectedAccount, isPrivate ? "private" : "group", recipientId)) return false;
+    if (!recipientId || (!isPrivate && (isQuiet(memory, recipientId, replyConfig) || !shouldHandleGroup(recipientId, config)))) return false;
     if (rule.action.kind === "task" ? !accountCanOfferTask(config, selectedAccount.id) : !accountCanChat(config, selectedAccount.id)) return false;
     const occurrenceDay = source === "schedule"
       ? JSON.parse(automationOccurrenceKey(rule, conversationId, new Date()))[2] : "";
     if (source === "schedule" && wasDailySent(memory, conversationId, `automation:${rule.id}`, occurrenceDay)) return false;
-    const outboundEvent = event || (isPrivate
+    const logicalGroup = accountGroup(config, selectedAccount.id);
+    const outboundEvent = { ...(event || (isPrivate
       ? { message_type: "private", user_id: recipientId }
-      : { message_type: "group", group_id: recipientId, user_id: "system" });
+      : { message_type: "group", group_id: recipientId, user_id: "system" })),
+      self_id: selectedAccount.qq || ws.__hermesAccountId,
+      __accountId: selectedAccount.id, __independentAccounts: !logicalGroup,
+      __accountGroupId: logicalGroup && !logicalGroup.legacySelfMemory ? logicalGroup.id : "" };
+    const contextId = conversationIdFromEvent(outboundEvent);
     let response = "";
     if (rule.action.kind === "task") {
-      if (taskRuntime.activeForConversation(conversationId)) return false;
+      if (taskRuntime.activeForConversation(contextId)) return false;
       const task = taskRuntime.createOffer({
         accountId: selectedAccount.id,
-        conversationId,
+        conversationId: contextId,
         messageType: isPrivate ? "private" : "group",
         groupId: isPrivate ? "" : recipientId,
         userId: senderId || "automation",
@@ -12897,21 +13659,21 @@ async function main() {
       });
       response = `自动化任务「${rule.id}」已准备好，确认后才执行。\n${taskOfferText(task)}`;
     } else {
-      const history = historyByGroup.get(conversationId) || [];
+      const history = historyByGroup.get(contextId) || [];
       const current = { sender: "自动化", user_id: "system", text: rule.prompt };
       const contextBundle = config.reply?.useContextBundle === false
         ? null
-        : buildContextBundle({ memory, groupId: conversationId, history, current, config: replyConfig });
+        : buildContextBundle({ memory, groupId: contextId, history, current, config: replyConfig });
       const prompt = buildPrompt({
         config: replyConfig, history, current,
         mode: rule.action.kind === "summary" ? "summary" : "automation",
-        memoryText: compactMemory(memory, conversationId, replyConfig),
+        memoryText: compactMemory(memory, contextId, replyConfig),
         contextBundle
       });
       response = trimForGroup(await callHermes(prompt, replyConfig), replyConfig);
     }
-    if (!response || response === "__SKIP__" || ws.readyState !== 1) return false;
-    if (!isPrivate && isQuiet(memory, recipientId)) return false;
+    if (!response || response === "__SKIP__" || !oneBotBindingCurrent(ws, automationBinding) || configRevision !== automationRevision) return false;
+    if (!isPrivate && isQuiet(memory, recipientId, replyConfig)) return false;
     if (source === "schedule") {
       // Claim immediately before the irreversible send. AI generation failures remain retryable.
       markDailySent(memory, conversationId, `automation:${rule.id}`, occurrenceDay, "sending");
@@ -12921,7 +13683,7 @@ async function main() {
       await oneBotRequest(ws, isPrivate ? "send_private_msg" : "send_group_msg", {
         [isPrivate ? "user_id" : "group_id"]: recipientId,
         message: response
-      }, { timeoutMs: 30_000 });
+      }, { timeoutMs: 30_000, binding: automationBinding });
     } catch (error) {
       if (source === "schedule") {
         markDailySent(memory, conversationId, `automation:${rule.id}`, occurrenceDay, "unconfirmed");
@@ -12929,10 +13691,10 @@ async function main() {
       }
       throw error;
     }
-    recordBotMessage({ historyByGroup, lastBotMessageByGroup, groupId: conversationId, text: response, config: replyConfig, memory,
-      meta: { source: `automation:${rule.id}`, replyToUserId: senderId, replyToSender: senderName } });
+    recordBotMessage({ historyByGroup, lastBotMessageByGroup, groupId: contextId, text: response, config: replyConfig, memory,
+      meta: { source: `automation:${rule.id}`, user_id: outboundEvent.self_id, replyToUserId: senderId, replyToSender: senderName } });
     archiveBotReply({ event: outboundEvent, config: replyConfig, memory, text: response,
-      meta: { source: `automation:${rule.id}`, replyToUserId: senderId, replyToSender: senderName } });
+      meta: { source: `automation:${rule.id}`, user_id: outboundEvent.self_id, replyToUserId: senderId, replyToSender: senderName } });
     if (source === "schedule") {
       markDailySent(memory, conversationId, `automation:${rule.id}`, occurrenceDay);
       saveMemory(memory);
@@ -12968,14 +13730,20 @@ async function main() {
   }
 
   async function runScheduledDailyMessages() {
-    if (dailyMessagesRunning || config.dailyMessages?.enabled === false || !accountCanChat(config, activeAccountId)) return;
-    const ws = activeOneBotWs;
+    if (dailyMessagesRunning || config.dailyMessages?.enabled === false) return;
+    const chatAccount = connectedAccountForRole("chat");
+    if (!chatAccount) return;
+    const ws = chatAccount.ws;
     if (!ws || ws.readyState !== 1) return;
+    const replyConfig = configForReplyAccount(chatAccount);
+    if (!replyConfig.automation?.enabled) return;
+    const expectedRevision = configRevision;
     dailyMessagesRunning = true;
     try {
       await runDailyMessages({
-        ws, config, memory, historyByGroup, lastEventByGroup, lastBotMessageByGroup,
-        activeSocket: () => activeOneBotWs,
+        ws, config: replyConfig, memory, historyByGroup, lastEventByGroup, lastBotMessageByGroup,
+        activeSocket: () => connectedAccountForRole("chat")?.ws || null,
+        isCurrent: () => configRevision === expectedRevision,
         sendMessage: (socket, groupId, response) => oneBotRequest(socket, "send_group_msg", {
           group_id: groupId,
           message: response
@@ -13000,7 +13768,7 @@ async function main() {
 
   function snowlumaAccountWsUrl(account) {
     const rawUrl = String(account.onebotWsUrl || "ws://127.0.0.1:6301").trim() || "ws://127.0.0.1:6301";
-    const token = readSnowLumaOneBotAccessToken(account, config);
+    const token = account.managed === false || accountProtocol(account) !== "snowluma" ? "" : readSnowLumaOneBotAccessToken(account, config);
     if (!token) return rawUrl;
     try {
       const parsed = new URL(rawUrl);
@@ -13015,14 +13783,14 @@ async function main() {
   function ensureForwardOneBotConnections() {
     const wanted = new Set();
     for (const account of configuredAccountDefinitions(config)) {
-      if (accountProtocol(account) !== "snowluma") continue;
-      if (account.enabled === false) continue;
+      if (!account.onebotWsUrl || account.protocolEnabled === false) continue;
       wanted.add(account.id);
       const existing = forwardOneBotRuntime.get(account.id) || {};
+      const url = snowlumaAccountWsUrl(account);
+      if (existing.ws && existing.url !== url) { existing.ws.close(); existing.ws = null; existing.lastAttemptAt = 0; }
       if (existing.ws && [WebSocket.CONNECTING, WebSocket.OPEN].includes(existing.ws.readyState)) continue;
       const nowMs = Date.now();
       if (existing.lastAttemptAt && nowMs - existing.lastAttemptAt < 10_000) continue;
-      const url = snowlumaAccountWsUrl(account);
       const safeUrl = sanitizeUrlForLog(url);
       const runtime = {
         ...existing,

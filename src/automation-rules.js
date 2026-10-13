@@ -2,7 +2,7 @@
 // Shape: { id, enabled?, timezone?, scope: { groupIds?, conversationIds? },
 //   trigger: { type: "schedule", time: "HH:mm", daysOfWeek?, windowMinutes? }
 //          | { type: "command", text: "/name" },
-//   action: { kind: "message" | "summary" | "task" }, accountId?, prompt }
+//   action: { kind: "message" | "summary" | "task" }, accountId? | groupId?, prompt }
 
 const MAX_RULES = 100;
 const MAX_SCOPES = 100;
@@ -101,7 +101,7 @@ function validatedDate(now) {
 
 export function normalizeAutomationRule(input) {
   const rule = record(input, "rule");
-  knownKeys(rule, ["id", "enabled", "timezone", "scope", "trigger", "action", "accountId", "prompt"], "rule");
+  knownKeys(rule, ["id", "enabled", "timezone", "scope", "trigger", "action", "accountId", "groupId", "prompt"], "rule");
   if (typeof rule.id !== "string" || !ID_PATTERN.test(rule.id)) fail("id must be 1-64 ASCII letters, digits, _ or -, starting with a letter");
   if (rule.enabled !== undefined && typeof rule.enabled !== "boolean") fail("enabled must be boolean");
 
@@ -146,6 +146,8 @@ export function normalizeAutomationRule(input) {
   knownKeys(action, ["kind"], "action");
   if (!["message", "summary", "task"].includes(action.kind)) fail("action.kind must be message, summary or task");
   if (rule.accountId !== undefined && (typeof rule.accountId !== "string" || !ACCOUNT_PATTERN.test(rule.accountId))) fail("accountId must be a safe 1-64 character identifier");
+  if (rule.groupId !== undefined && (typeof rule.groupId !== "string" || !ID_PATTERN.test(rule.groupId))) fail("groupId must be a safe failover group identifier");
+  if (rule.accountId !== undefined && rule.groupId !== undefined) fail("choose one sender: accountId or groupId");
 
   return {
     id: rule.id,
@@ -155,6 +157,7 @@ export function normalizeAutomationRule(input) {
     trigger: normalizedTrigger,
     action: { kind: action.kind },
     ...(rule.accountId === undefined ? {} : { accountId: rule.accountId }),
+    ...(rule.groupId === undefined ? {} : { groupId: rule.groupId }),
     prompt: requiredText(rule.prompt, "prompt", MAX_PROMPT_LENGTH)
   };
 }

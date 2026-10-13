@@ -144,4 +144,112 @@ const silentFallback = structuredClone(mimoSearch);
 silentFallback.searchProfiles.at(-1).providerOrder.push("google");
 assert.throws(() => validateApiCenter(silentFallback, fixture), /providerOrder/);
 
-console.log("api-center self-test: PASS");
+const accountConfig = structuredClone(fixture);
+accountConfig.apiCenter = structuredClone(mimoValidated);
+const accountCenter = accountConfig.apiCenter;
+const accountRef = "a1111111-1111-4111-8111-111111111111";
+accountCenter.connections.push({ id: "peer-keychain", name: "Peer credential reference", provider: "xiaomi",
+  baseUrl: "https://api.xiaomimimo.com/v1", credentialSource: "keychain", apiKeyEnv: "PEER_MIMO_KEY", credentialRef: accountRef });
+for (const kind of ["chat", "vision", "asr", "tts"]) {
+  const template = accountCenter.profiles.find((item) => item.id === accountCenter.bindings[kind]);
+  accountCenter.profiles.push({ ...structuredClone(template), id: `peer-${kind}`, name: `Peer ${kind}`, connectionId: "peer-keychain" });
+}
+accountConfig.accounts = { version: 2, topology: "failover", items: [
+  { id: "alpha", displayName: "Alpha", features: { chat: true, task: true }, modelBindings: {} },
+  { id: "beta", displayName: "Beta", features: { chat: true, task: true },
+    modelBindings: { chat: "peer-chat", task: "inherit-chat", vision: "peer-vision", asr: "peer-asr", tts: "peer-tts", search: "legacy-search" } }
+], failoverGroups: [] };
+const beforeAccountResolution = structuredClone(accountConfig);
+for (const kind of ["chat", "vision", "asr", "tts"]) {
+  const resolved = resolveApiCapability(accountConfig, kind, "beta");
+  assert.equal(resolved.profile.id, `peer-${kind}`);
+  assert.equal(resolved.connection.credentialSource, "keychain");
+  assert.equal(resolved.connection.credentialRef, accountRef);
+  assert.equal(resolved.connection.apiKeyEnv, "PEER_MIMO_KEY");
+  assert.equal("apiKey" in resolved.connection, false);
+  resolved.connection.credentialSource = "modified-return-value";
+  resolved.profile.model = "modified-return-value";
+}
+assert.equal(resolveApiCapability(accountConfig, "task", "beta").profile.id, "peer-chat");
+assert.equal(resolveApiCapability(accountConfig, "search", "beta").profile.id, "legacy-search");
+assert.equal(resolveApiCapability(accountConfig, "search", "beta").connection, null);
+assert.equal(resolveApiCapability(accountConfig, "search").profile.id, "mimo-official");
+assert.ok(resolveApiCapability(accountConfig, "search").connection);
+assert.equal(resolveApiCapability(accountConfig, "chat", "alpha").profile.id, accountCenter.bindings.chat);
+assert.deepEqual(accountConfig, beforeAccountResolution);
+accountConfig.__activeAccountId = "beta";
+assert.equal(resolveApiCapability(accountConfig, "chat").profile.id, "peer-chat");
+assert.equal(resolveApiCapability(accountConfig, "chat", "").profile.id, accountCenter.bindings.chat);
+assert.equal(resolveApiCapability(accountConfig, "chat", "alpha").profile.id, accountCenter.bindings.chat);
+// Empty task override inherits the global choice; the global inherit-chat sentinel
+// still means the current account's chat, not global chat.
+accountConfig.accounts.items[1].modelBindings.task = "";
+assert.equal(resolveApiCapability(accountConfig, "task").profile.id, "peer-chat");
+accountConfig.apiCenter.bindings.task = "openai-default";
+assert.equal(resolveApiCapability(accountConfig, "task").profile.id, "openai-default");
+accountConfig.accounts.items[1].modelBindings.task = "inherit-chat";
+assert.equal(resolveApiCapability(accountConfig, "task").profile.id, "peer-chat");
+accountConfig.accounts.items[1].modelBindings.task = "openai-default";
+assert.equal(resolveApiCapability(accountConfig, "task").profile.id, "openai-default");
+const perAccountProjected = applyApiCenterBindings(structuredClone(accountConfig));
+assert.equal(perAccountProjected.ai.credentialRef, accountRef);
+assert.equal(perAccountProjected.vision.credentialRef, accountRef);
+assert.equal(perAccountProjected.voice.asrApi.credentialRef, accountRef);
+assert.equal(perAccountProjected.voice.ttsApi.credentialRef, accountRef);
+assert.equal(perAccountProjected.webSearch.provider, center.searchProfiles[0].provider);
+assert.deepEqual(perAccountProjected.apiCenter, accountConfig.apiCenter);
+const globalProjected = applyApiCenterBindings(structuredClone(accountConfig), accountConfig.apiCenter, "");
+assert.equal(globalProjected.aiProfiles.activeId, accountCenter.bindings.chat);
+assert.equal(globalProjected.webSearch.provider, "mimo-web-search");
+for (const kind of ["chat", "task", "vision", "asr", "tts", "search"]) {
+  const invalid = structuredClone(accountConfig);
+  invalid.accounts.items[1].modelBindings[kind] = "missing";
+  assert.throws(() => resolveApiCapability(invalid, kind), new RegExp(`modelBindings.${kind}`));
+  invalid.accounts.items[1].modelBindings[kind] = "inherit-chat";
+  if (kind !== "task") assert.throws(() => resolveApiCapability(invalid, kind), new RegExp(`modelBindings.${kind}`));
+  invalid.accounts.items[1].modelBindings[kind] = 42;
+  assert.throws(() => resolveApiCapability(invalid, kind), new RegExp(`modelBindings.${kind}`));
+}
+for (const kind of ["vision", "asr", "tts", "search"]) {
+  const invalid = structuredClone(accountConfig);
+  invalid.accounts.items[1].modelBindings[kind] = "peer-chat";
+  assert.throws(() => resolveApiCapability(invalid, kind), new RegExp(`modelBindings.${kind}`));
+}
+const cloneBinding = structuredClone(accountConfig);
+cloneBinding.apiCenter.profiles.push({ ...cloneBinding.apiCenter.profiles.find((item) => item.id === "peer-tts"), id: "clone-only", model: "mimo-v2.5-tts-voiceclone" });
+cloneBinding.accounts.items[1].modelBindings.tts = "clone-only";
+assert.throws(() => resolveApiCapability(cloneBinding, "tts"), /modelBindings.tts/);
+assert.throws(() => resolveApiCapability(accountConfig, "chat", "missing"), /account/);
+const archivedAccount = structuredClone(accountConfig);
+archivedAccount.accounts.items[1].archived = true;
+assert.throws(() => resolveApiCapability(archivedAccount, "chat", "beta"), /account/);
+const groupConfig = structuredClone(accountConfig);
+groupConfig.accounts.failoverGroups = [{ id: "shared", name: "Shared", memberIds: ["alpha", "beta"], policyAccountId: "beta",
+  policy: { modelBindings: { chat: "peer-chat", task: "inherit-chat", vision: "peer-vision", asr: "peer-asr", tts: "peer-tts", search: "mimo-official" } } }];
+for (const id of ["alpha", "beta"]) {
+  assert.equal(resolveApiCapability(groupConfig, "chat", id).profile.id, "peer-chat");
+  assert.equal(resolveApiCapability(groupConfig, "task", id).profile.id, "peer-chat");
+  assert.equal(resolveApiCapability(groupConfig, "search", id).profile.id, "mimo-official");
+}
+const envBinding = structuredClone(accountConfig);
+envBinding.apiCenter.connections.find((item) => item.id === "peer-keychain").credentialSource = "existing";
+delete envBinding.apiCenter.connections.find((item) => item.id === "peer-keychain").credentialRef;
+assert.equal(resolveApiCapability(envBinding, "asr").connection.apiKeyEnv, "PEER_MIMO_KEY");
+assert.equal(resolveApiCapability(envBinding, "asr").connection.credentialRef, undefined);
+const rejectedProjection = structuredClone(accountConfig);
+rejectedProjection.accounts.items[1].modelBindings.task = "invalid-test-only-binding";
+const beforeRejected = structuredClone(rejectedProjection);
+assert.throws(() => applyApiCenterBindings(rejectedProjection), (error) => /modelBindings.task/.test(error.message)
+  && !error.message.includes("invalid-test-only-binding"));
+assert.deepEqual(rejectedProjection, beforeRejected);
+// Profile identifiers are not model identifiers. Digits, hyphens and underscores
+// are valid in profile IDs; model names also retain provider dots/slashes.
+const modelNames = structuredClone(accountConfig);
+for (const [id, model] of [["deepseek-v4-flash-01", "deepseek-v4-flash"],
+  ["mimo-v2_5-02", "mimo-v2.5"], ["model-2026-10-09", "Qwen/Qwen3.5-35B-A3B"]]) {
+  modelNames.apiCenter.profiles.push({ ...structuredClone(modelNames.apiCenter.profiles.find((item) => item.kind === "chat")), id, model });
+  assert.equal(validateApiCenter(modelNames.apiCenter, modelNames).profiles.find((item) => item.id === id).model, model);
+  modelNames.accounts.items[1].modelBindings.chat = id;
+  assert.equal(resolveApiCapability(modelNames, "chat", "beta").profile.model, model);
+}
+console.log("api-center self-test: PASS (global compatibility + per-account/group bindings)");

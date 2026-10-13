@@ -8,6 +8,7 @@ import * as tar from "tar";
 import * as defaultVoiceSecretStore from "./voice-secret-store.js";
 import * as defaultApiSecretStore from "./api-secret-store.js";
 import { isValidApiSecretRef } from "./api-secret-store.js";
+import { accountItems, registryConfig } from "./account-registry.js";
 
 export const BACKUP_MAGIC = Buffer.from("HERMESQQBACKUP1\n", "utf8");
 export const BACKUP_FORMAT_VERSION = 1;
@@ -284,8 +285,25 @@ export function sanitizeConfigForBackup(input) {
         && trail[1] === "connections" && /^\d+$/.test(trail[2] || "");
       const isCredentialSource = key === "credentialSource" && ((trail.length === 1 && trail[0] === "voice")
         || (trail.length === 3 && trail[0] === "apiCenter" && trail[1] === "connections" && /^\d+$/.test(trail[2] || "")));
+      const isRegistryIdentity = trail[0] === "accounts" && typeof child === "string"
+        && ((["id", "policyAccountId"].includes(key) && /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(child))
+          || (["protocolContainer", "napcatContainer", "snowlumaContainer"].includes(key) && /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(child))
+          || (trail.includes("snowlumaVolumes") && /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(child)));
+      if (key === "onebotWsUrl" && typeof child === "string" && child) {
+        try {
+          const url = new URL(child);
+          url.username = "";
+          url.password = "";
+          for (const param of [...url.searchParams.keys()])
+            if (/token|secret|key|password|auth|credential/i.test(param)) url.searchParams.delete(param);
+          url.hash = "";
+          output[key] = url.href;
+        } catch { output[key] = ""; }
+        if (output[key] !== child) redactions.push(nextTrail.join("."));
+        continue;
+      }
       const normalizedKey = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2");
-      const safeMetadata = isEnvironmentName || isApiCredentialRef || isCredentialSource;
+      const safeMetadata = isEnvironmentName || isApiCredentialRef || isCredentialSource || isRegistryIdentity;
       const secretKey = SECRET_KEY_RE.test(normalizedKey) && !safeMetadata;
       if (secretKey || (typeof child === "string" && likelySecret(child) && !safeMetadata)) {
         output[key] = "";
@@ -351,11 +369,20 @@ async function dockerInspect(container) {
 }
 
 function accountDefinitions(config = {}) {
-  const primary = { id: "primary", role: "primary", ...(config.accounts?.primary || {}) };
-  const standbys = Array.isArray(config.accounts?.standbys) ? config.accounts.standbys : [];
-  return [primary, ...standbys.map((item, index) => ({ id: item.id || `standby-${index + 1}`, role: "standby", ...item }))]
-    .filter((account) => String(account.protocol || "napcat").toLowerCase() === "snowluma");
+  // Paused and archived accounts still own login data that must be portable.
+  return accountItems(config, { includeArchived: true })
+    .filter((account) => account.managed !== false && account.protocol === "snowluma");
 }
+
+function shouldStartProtocol(account) {
+  return !account.archived && account.protocolEnabled !== false && account.managed !== false;
+}
+
+const SNOWLUMA_VOLUME_PATHS = {
+  snowlumaData: "/app/snowluma-data",
+  appConfig: "/app/.config",
+  localShare: "/app/.local/share"
+};
 
 function protocolContainer(account) {
   return String(account.protocolContainer || account.snowlumaContainer || `snowluma-${safeSegment(account.id || "primary")}`);
@@ -405,7 +432,7 @@ async function exportDockerVolume({ volume, image, output, signal }) {
 
 async function collectDockerState({ config, payloadDir, signal, onProgress }) {
   const accounts = accountDefinitions(config);
-  const containers = accounts.map(protocolContainer);
+  const containers = [...new Set(accounts.map(protocolContainer))];
   const states = [];
   const records = [];
   try {
@@ -414,8 +441,20 @@ async function collectDockerState({ config, payloadDir, signal, onProgress }) {
     const inspections = [];
     for (const account of accounts) {
       checkCancelled(signal);
-      try { inspections.push({ account, inspect: await dockerInspect(protocolContainer(account)) }); }
-      catch (error) { if (account.enabled !== false) throw error; }
+      let inspect;
+      try { inspect = await dockerInspect(protocolContainer(account)); }
+      catch (error) {
+        // An archived/deprovisioned container can be gone while its volumes remain.
+        if (shouldStartProtocol(account) && !Object.values(account.snowlumaVolumes || {}).some(Boolean)) throw error;
+        inspect = { Mounts: [] };
+      }
+      const mounts = [...(inspect.Mounts || [])];
+      for (const [key, destination] of Object.entries(SNOWLUMA_VOLUME_PATHS)) {
+        const name = account.snowlumaVolumes?.[key];
+        if (name && !mounts.some((mount) => mount.Destination === destination))
+          mounts.push({ Type: "volume", Name: name, Destination: destination });
+      }
+      inspections.push({ account, inspect: { ...inspect, Mounts: mounts } });
     }
     const volumeCount = inspections.reduce((count, item) => count + (item.inspect.Mounts || []).filter((mount) => mount.Type === "volume" && ["/app/snowluma-data", "/app/.config", "/app/.local/share"].includes(mount.Destination)).length, 0);
     let completed = 0;
@@ -426,22 +465,17 @@ async function collectDockerState({ config, payloadDir, signal, onProgress }) {
       let exported = 0;
       for (const mount of inspect.Mounts || []) {
         if (mount.Type !== "volume") continue;
-        const keyByDestination = {
-          "/app/snowluma-data": "snowlumaData",
-          "/app/.config": "appConfig",
-          "/app/.local/share": "localShare"
-        };
-        const key = keyByDestination[mount.Destination];
+        const key = Object.keys(SNOWLUMA_VOLUME_PATHS).find((key) => SNOWLUMA_VOLUME_PATHS[key] === mount.Destination);
         if (!key) continue;
         const relative = path.join("docker", safeSegment(account.id), `${key}.tgz`);
         onProgress?.({ stage: "docker", percent: Math.round(12 + 58 * completed / Math.max(volumeCount, 1)), detail: `导出登录状态 ${completed + 1}/${volumeCount}（${account.id}）` });
         await exportDockerVolume({ volume: mount.Name, image, output: path.join(payloadDir, relative), signal });
-        records.push({ accountId: String(account.id), container, destination: mount.Destination, key, image, archive: relative.split(path.sep).join("/") });
+        records.push({ accountId: String(account.id), container, volume: mount.Name, destination: mount.Destination, key, image, archive: relative.split(path.sep).join("/") });
         exported += 1;
         completed += 1;
         onProgress?.({ stage: "docker", percent: Math.round(12 + 58 * completed / Math.max(volumeCount, 1)), detail: `已导出登录状态 ${completed}/${volumeCount}` });
       }
-      if (account.enabled !== false && !exported) throw new Error(`SnowLuma account has no portable Docker volume: ${account.id}`);
+      if (shouldStartProtocol(account) && !exported) throw new Error(`SnowLuma account has no portable Docker volume: ${account.id}`);
     }
   } finally {
     await restartPreviouslyRunning(states);
@@ -467,7 +501,7 @@ function copyHermesProfile(sourceRoot, destinationRoot) {
 
 async function copyBackupPayload({ stateRoot, hermesHome, logRoot, includeLogs, payloadDir, type, signal, voiceSecretStore, apiSecretStore }) {
   const configPath = path.join(stateRoot, "config.json");
-  const rawConfig = readJson(configPath, {});
+  const rawConfig = registryConfig(readJson(configPath, {}));
   const apiRefs = apiKeychainRefs(rawConfig);
   const sensitive = type === "full";
   const sanitized = sensitive ? { config: rawConfig, redactions: [] } : sanitizeConfigForBackup(rawConfig);
@@ -587,13 +621,22 @@ async function buildPayload({ stateRoot, hermesHome, logRoot, includeLogs, type,
       ...(includeLogs && fs.existsSync(path.join(payloadDir, "diagnostic-logs")) ? ["diagnostic-logs"] : [])
     ],
     redactedConfigFields: redactions,
-    accounts: accountDefinitions(rawConfig).map((account) => ({
+    accounts: accountItems(rawConfig, { includeArchived: true }).map((account) => ({
       id: String(account.id),
       role: account.role,
-      protocol: "snowluma",
+      protocol: account.protocol,
+      enabled: account.enabled,
+      protocolEnabled: account.protocolEnabled,
+      managed: account.managed,
+      archived: account.archived,
       container: protocolContainer(account),
-      image: String(account.snowlumaImage || "motricseven7/snowluma:latest")
+      ...(account.protocol === "snowluma" ? { image: String(account.snowlumaImage || "motricseven7/snowluma:latest") } : {})
     })),
+    accountRegistry: {
+      version: 2,
+      itemIds: rawConfig.accounts.items.map((account) => account.id),
+      failoverGroups: rawConfig.accounts.failoverGroups.map(({ id, memberIds, policyAccountId }) => ({ id, memberIds, policyAccountId }))
+    },
     dockerVolumes: docker.records,
     files,
     totalBytes: files.reduce((sum, item) => sum + item.size, 0)
@@ -731,6 +774,22 @@ async function extractContainer({ file, password = "" }) {
       throw new Error("备份 API Keychain 组件清单无效");
     }
     if (!Array.isArray(manifest.dockerVolumes) || manifest.dockerVolumes.some((item) => !validPayloadPath(item.archive) || !manifest.files.some((file) => file.path === item.archive))) throw new Error("Docker 卷清单无效");
+    const registry = registryConfig(backupConfig).accounts;
+    if (manifest.accountRegistry) {
+      const membership = { version: 2, itemIds: registry.items.map((account) => account.id),
+        failoverGroups: registry.failoverGroups.map(({ id, memberIds, policyAccountId }) => ({ id, memberIds, policyAccountId })) };
+      if (JSON.stringify(manifest.accountRegistry) !== JSON.stringify(membership)) throw new Error("备份账号注册表清单无效");
+    }
+    const volumeKeys = new Set();
+    for (const record of manifest.dockerVolumes) {
+      const account = registry.items.find((account) => account.id === record.accountId);
+      const key = `${record.accountId}:${record.key}`;
+      if (!account || account.managed === false || account.protocol !== "snowluma"
+        || !Object.hasOwn(SNOWLUMA_VOLUME_PATHS, record.key) || volumeKeys.has(key)
+        || record.archive !== `docker/${safeSegment(record.accountId)}/${record.key}.tgz`
+        || record.destination !== SNOWLUMA_VOLUME_PATHS[record.key]) throw new Error("Docker 卷账号清单无效");
+      volumeKeys.add(key);
+    }
     const expectedPaths = new Set(manifest.files.map((item) => item.path));
     if (expectedPaths.size !== manifest.files.length || actual.length !== manifest.files.length + 1 || actual.some((item) => item.path !== "manifest.json" && !expectedPaths.has(item.path))) throw new Error("备份文件清单不一致");
     for (const expected of manifest.files) {
@@ -818,14 +877,18 @@ export async function inspectBackup(options = {}) {
 }
 
 async function restoreDockerVolumes({ payloadDir, manifest, config }) {
+  const accounts = new Map(config.accounts.items.map((account) => [account.id, account]));
   const byAccount = new Map();
   const createdVolumes = [];
   const restoreId = crypto.randomBytes(5).toString("hex");
   try {
   for (const record of manifest.dockerVolumes || []) {
-    const accountId = safeSegment(record.accountId, "primary");
+    const accountId = String(record.accountId || "primary");
+    const account = accounts.get(accountId);
+    if (!account || account.managed === false || account.protocol !== "snowluma") throw new Error("Docker 卷不属于受管 SnowLuma 账号");
     if (!new Set(["snowlumaData", "appConfig", "localShare"]).has(record.key)) throw new Error("备份包含未知 Docker 卷类型");
-    const volumeName = `hermes-qq-bot-${accountId}-${safeSegment(record.key)}-${restoreId}`;
+    if (byAccount.get(accountId)?.[record.key]) throw new Error("Docker 卷账号或类型重复");
+    const volumeName = `hermes-qq-bot-${safeSegment(accountId)}-${safeSegment(record.key)}-${restoreId}`;
     const create = await run("docker", ["volume", "create", volumeName], { timeoutMs: 30_000 });
     if (!create.ok) throw new Error(`无法创建 Docker 卷 ${volumeName}: ${create.stderr.trim()}`);
     createdVolumes.push(volumeName);
@@ -838,10 +901,8 @@ async function restoreDockerVolumes({ payloadDir, manifest, config }) {
     volumes[record.key] = volumeName;
     byAccount.set(accountId, volumes);
   }
-  const all = [config.accounts?.primary, ...(config.accounts?.standbys || [])].filter(Boolean);
-  for (const account of all) {
-    const id = safeSegment(account.id || (account === config.accounts?.primary ? "primary" : "standby"));
-    if (byAccount.has(id)) account.snowlumaVolumes = byAccount.get(id);
+  for (const account of accounts.values()) {
+    if (byAccount.has(account.id)) account.snowlumaVolumes = { ...(account.snowlumaVolumes || {}), ...byAccount.get(account.id) };
   }
   return { byAccount, createdVolumes };
   } catch (error) {
@@ -968,7 +1029,7 @@ export async function restoreBackup(options = {}) {
     const available = Number(disk.bavail) * Number(disk.bsize);
     if (available < Number(extracted.manifest.totalBytes || 0) * 2) throw new Error("目标磁盘剩余空间不足以安全恢复并保留回滚数据");
     const stagedConfigPath = path.join(extracted.payloadDir, "state", "config.json");
-    const config = localConfig(readJson(stagedConfigPath, {}), stateRoot, options.hermesHome ? path.resolve(options.hermesHome) : "");
+    const config = registryConfig(localConfig(readJson(stagedConfigPath, {}), stateRoot, options.hermesHome ? path.resolve(options.hermesHome) : ""));
     let voiceCredentialRequired = extracted.manifest.voiceCredentialRequired === true;
     let apiCredentialReconfigurationRequired = extracted.manifest.apiCredentialReconfigurationRequired === true;
     // Older ordinary backups may still say "keychain" despite not carrying its
@@ -988,7 +1049,7 @@ export async function restoreBackup(options = {}) {
       restoredVolumes = restored.createdVolumes;
       parked = await parkContainers(config);
     }
-    writeJson(stagedConfigPath, config);
+    writeJson(stagedConfigPath, registryConfig(config));
     const pendingSecrets = [];
     if (extracted.manifest.files.some((item) => item.path === VOICE_SECRET_PATH)) {
       const secret = fs.readFileSync(path.join(extracted.payloadDir, VOICE_SECRET_PATH), "utf8");
@@ -1076,8 +1137,9 @@ export async function migrateLegacyProject({ projectRoot, stateRoot, legacyHerme
   let restoredVolumes = [];
   let replaced = null;
   let hermesProfileMigrated = false;
-  const config = readJson(legacy.configPath);
-  if (!config) throw new Error("旧项目配置无法解析");
+  const sourceConfig = readJson(legacy.configPath);
+  if (!sourceConfig) throw new Error("旧项目配置无法解析");
+  const config = registryConfig(sourceConfig);
   const rewrite = (value) => typeof value === "string"
     ? (value === "hermesqq2" ? "hermes" : value.split(legacy.root).join(target))
     : value;
@@ -1104,9 +1166,9 @@ export async function migrateLegacyProject({ projectRoot, stateRoot, legacyHerme
       restoredVolumes = restored.createdVolumes;
       parked = await parkContainers(config);
     }
-    writeJson(path.join(payloadDir, "state", "config.json"), visit(config));
+    writeJson(path.join(payloadDir, "state", "config.json"), visit(registryConfig(config)));
     replaced = replaceFromStage({ stateRoot: target, payloadDir, full: true, hermesHome });
-    return { ok: true, legacy, rollbackDir: replaced.rollbackDir, installedTargets: replaced.installedTargets, parkedContainers: parked, restoredVolumes, migratedDockerVolumes: dockerVolumes.length, hermesProfileMigrated, accounts: accounts.filter((account) => account.enabled !== false).map((account) => ({ id: account.id, container: protocolContainer(account), expectedQq: String(account.qq || "") })) };
+    return { ok: true, legacy, rollbackDir: replaced.rollbackDir, installedTargets: replaced.installedTargets, parkedContainers: parked, restoredVolumes, migratedDockerVolumes: dockerVolumes.length, hermesProfileMigrated, accounts: accounts.filter(shouldStartProtocol).map((account) => ({ id: account.id, container: protocolContainer(account), expectedQq: String(account.qq || "") })) };
   } catch (error) {
     if (replaced) await rollbackRestore({ stateRoot: target, rollbackDir: replaced.rollbackDir, installedTargets: replaced.installedTargets, parkedContainers: parked, restoredVolumes });
     else {

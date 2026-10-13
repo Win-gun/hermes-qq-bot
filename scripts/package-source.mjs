@@ -5,9 +5,15 @@ import { root, releaseFiles, checkFiles, checkArchive, report } from "./release-
 
 const sourceFiles = Object.freeze([...new Set([
   ...releaseFiles,
-  ".gitignore", ".github/workflows/ci.yml", "AGENTS.md", "MEMORY.md", "PRD.md", "Tech-Spec.md", "forge.config.cjs",
+  ".gitignore", ".gitleaks.toml", ".github/workflows/ci.yml", "AGENTS.md", "MEMORY.md", "PRD.md", "Tech-Spec.md", "forge.config.cjs",
   "desktop/main.cjs", "desktop/preload.cjs", "desktop/setup.html",
   "scripts/agent-feature-self-test.js", "scripts/backup-service-self-test.js",
+  "scripts/account-registry-self-test.js", "scripts/account-management-integration-self-test.js", "scripts/config-revision-self-test.js",
+  "scripts/account-isolation-self-test.js",
+  "scripts/bot-command-routing-self-test.js", "scripts/bot-command-routing-integration-self-test.js",
+  "scripts/console-assets-self-test.js", "scripts/console-ui-self-test.js", "scripts/console-preview-server.js",
+  "scripts/console-contrast-self-test.js",
+  "scripts/desktop-theme-self-test.js", "scripts/console-desktop-preview.js",
   "scripts/desktop-smoke-test.js", "scripts/docker-migration-self-test.js",
   "scripts/make-dmg.sh", "scripts/package-source.mjs", "scripts/package-web.mjs",
   "scripts/release-safety-check.mjs", "scripts/reply-coordinator-self-test.js",

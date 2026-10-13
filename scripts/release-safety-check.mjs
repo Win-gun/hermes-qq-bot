@@ -12,17 +12,24 @@ export const releaseFiles = Object.freeze([
   "docs/DESKTOP-DISTRIBUTION.md",
   "docs/EDITION-PARITY.md",
   "docs/OPEN-SOURCE-CHECKLIST.md",
+  "docs/MULTI-ACCOUNT.md",
+  "docs/CONSOLE-DESIGN.md",
   "package.json",
   "package-lock.json",
   "public/admin.html",
+  "public/console.css",
+  "public/console-theme.js",
   "scripts/memory-rebuild.js",
   "scripts/recreate-napcat-stable.sh",
   "scripts/start-web.command",
   "src/api-center.js",
+  "src/account-registry.js",
+  "src/account-delivery.js",
   "src/api-secret-store.js",
   "src/automation-rules.js",
   "src/backup-service.js",
   "src/bot-capabilities.js",
+  "src/bot-command-routing.js",
   "src/bridge.js",
   "src/memory-integrity.js",
   "src/mimo-web-search.js",
@@ -72,7 +79,7 @@ function scanText(name, contents, issues) {
   if (name === "config.example.json") {
     try {
       const config = JSON.parse(contents);
-      const ids = [config.accounts?.primary?.qq, ...(config.accounts?.standbys || []).map((account) => account.qq), ...(config.targetGroups || []), ...(config.privateChats?.targetUsers || [])];
+      const ids = [config.accounts?.primary?.qq, ...(config.accounts?.standbys || []).map((account) => account.qq), ...(config.accounts?.items || []).map((account) => account.qq), ...(config.targetGroups || []), ...(config.privateChats?.targetUsers || [])];
       if (ids.some((id) => /^(?!0+$)\d{5,}$/.test(String(id)))) issue(issues, name, "ACCOUNT_ID");
     } catch { issue(issues, name, "INVALID_EXAMPLE_JSON"); }
   }

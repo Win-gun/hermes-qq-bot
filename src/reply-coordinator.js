@@ -7,6 +7,14 @@ function unique(values) {
   return [...new Set(asArray(values).map(String).filter(Boolean))];
 }
 
+function sameAccount(left, right) {
+  return !left?.accountId || !right?.accountId || String(left.accountId) === String(right.accountId);
+}
+
+function coveredKey(accountId, messageId) {
+  return `${String(accountId || "")}\u0000${String(messageId)}`;
+}
+
 function modePriority(mode, direct = false) {
   if (direct || ["private", "at", "command"].includes(mode)) return 100;
   if (["web", "keyword"].includes(mode)) return 80;
@@ -107,23 +115,23 @@ export class ReplyCoordinator {
     for (const [id, expiresAt] of this.covered.entries()) if (expiresAt <= now) this.covered.delete(id);
   }
 
-  isCovered(messageIds) {
+  isCovered(messageIds, accountId = "") {
     this.pruneCovered();
-    return unique(messageIds).some((id) => this.covered.has(id));
+    return unique(messageIds).some((id) => this.covered.has(coveredKey(accountId, id)));
   }
 
-  observeMessage({ conversationId, senderId, current, event, messageIds = [], direct = false } = {}) {
+  observeMessage({ conversationId, senderId, accountId = "", current, event, messageIds = [], direct = false } = {}) {
     const cfg = this.config();
     if (!cfg.enabled || !cfg.liveEnabled) return { absorbed: false, contextUpdated: false };
     const state = this.states.get(String(conversationId || "unknown"));
     if (!state) return { absorbed: false, contextUpdated: false };
     const incoming = {
-      senderId: String(senderId || ""), current, currentMessages: [current], event,
+      senderId: String(senderId || ""), accountId: String(accountId || ""), current, currentMessages: [current], event,
       messageIds: unique(messageIds), direct, maxMergedMessages: cfg.maxMergedMessages, settleMs: cfg.settleMs
     };
     const now = Date.now();
     const mergeTarget = [state.active, ...state.pending].find((job) => (
-      job && !job.dropped && String(job.senderId) === incoming.senderId && now - Number(job.updatedAt || job.createdAt || 0) <= cfg.windowMs
+      job && !job.dropped && sameAccount(job, incoming) && String(job.senderId) === incoming.senderId && now - Number(job.updatedAt || job.createdAt || 0) <= cfg.windowMs
     ));
     if (mergeTarget) {
       if (direct && cfg.cancelProactiveOnDirect && ["active", "proactive", "delayed"].includes(mergeTarget.mode)) {
@@ -147,7 +155,7 @@ export class ReplyCoordinator {
       this.log(`reply coordinator merged conversation=${state.conversationId} sender=${incoming.senderId} messages=${mergeTarget.messageIds.length}`);
       return { absorbed: true, contextUpdated: true, jobId: mergeTarget.id };
     }
-    if (state.active && !state.active.dropped) {
+    if (state.active && !state.active.dropped && sameAccount(state.active, incoming)) {
       if (direct && cfg.cancelProactiveOnDirect && ["active", "proactive", "delayed"].includes(state.active.mode)) {
         this.cancelActive(state.active, "direct-message-preempted-proactive", { drop: true });
       } else if (messagesRelated(state.active, incoming)) {
@@ -174,17 +182,17 @@ export class ReplyCoordinator {
     job.controller?.abort(reason);
   }
 
-  dropSenderJobs(conversationId, senderId, reason = "direct-media-request") {
+  dropSenderJobs(conversationId, senderId, reason = "direct-media-request", accountId = "") {
     const state = this.states.get(String(conversationId || "unknown"));
     if (!state) return 0;
     const sender = String(senderId || "");
     let dropped = 0;
-    if (state.active && !state.active.dropped && state.active.senderId === sender) {
+    if (state.active && !state.active.dropped && state.active.senderId === sender && sameAccount(state.active, { accountId })) {
       this.cancelActive(state.active, reason, { drop: true });
       dropped += 1;
     }
     state.pending = state.pending.filter((job) => {
-      if (job.senderId !== sender || job.dropped) return true;
+      if (job.senderId !== sender || job.dropped || !sameAccount(job, { accountId })) return true;
       job.dropped = true;
       job.resolve?.({ ok: true, skipped: true, reason });
       this.metrics.dropped += 1;
@@ -201,6 +209,7 @@ export class ReplyCoordinator {
       id: String(input.id || `reply_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`),
       conversationId: String(input.conversationId || "unknown"),
       senderId: String(input.senderId || ""),
+      accountId: String(input.accountId || ""),
       mode: String(input.mode || "reply"),
       direct: input.direct === true,
       currentMessages: asArray(input.currentMessages || input.current),
@@ -213,10 +222,10 @@ export class ReplyCoordinator {
       dropped: false,
       preReplySent: false
     };
-    if (this.isCovered(job.messageIds)) return Promise.resolve({ ok: true, skipped: true, reason: "covered" });
+    if (this.isCovered(job.messageIds, job.accountId)) return Promise.resolve({ ok: true, skipped: true, reason: "covered" });
     const state = this.state(job.conversationId);
     const existing = [state.active, ...state.pending].find((item) => (
-      item && !item.dropped && item.senderId === job.senderId && Date.now() - Number(item.updatedAt || item.createdAt) <= cfg.windowMs
+      item && !item.dropped && sameAccount(item, job) && item.senderId === job.senderId && Date.now() - Number(item.updatedAt || item.createdAt) <= cfg.windowMs
     ));
     if (existing && cfg.liveEnabled) {
       if (job.direct && cfg.cancelProactiveOnDirect && ["active", "proactive", "delayed"].includes(existing.mode)) {
@@ -240,7 +249,7 @@ export class ReplyCoordinator {
     }
     if (job.direct && cfg.cancelProactiveOnDirect) {
       state.pending = state.pending.filter((item) => {
-        const drop = ["active", "proactive", "delayed"].includes(item.mode);
+        const drop = sameAccount(item, job) && ["active", "proactive", "delayed"].includes(item.mode);
         if (drop) {
           this.metrics.dropped += 1;
           item.dropped = true;
@@ -248,7 +257,7 @@ export class ReplyCoordinator {
         }
         return !drop;
       });
-      if (state.active && !state.active.dropped && ["active", "proactive", "delayed"].includes(state.active.mode)) {
+      if (state.active && !state.active.dropped && sameAccount(state.active, job) && ["active", "proactive", "delayed"].includes(state.active.mode)) {
         this.cancelActive(state.active, "direct-job-preempted-proactive", { drop: true });
       }
     }
@@ -298,7 +307,7 @@ export class ReplyCoordinator {
         }
         if (result?.sent) {
           this.metrics.sent += 1;
-          for (const id of unique(job.messageIds)) this.covered.set(id, Date.now() + Math.max(cfg.windowMs * 3, 60_000));
+          for (const id of unique(job.messageIds)) this.covered.set(coveredKey(job.accountId, id), Date.now() + Math.max(cfg.windowMs * 3, 60_000));
           if (cfg.minDelayMs) await new Promise((resolve) => setTimeout(resolve, cfg.minDelayMs));
         }
         return { ok: true, ...result, regenerationCount: job.regenerationCount };
@@ -330,6 +339,7 @@ export class ReplyCoordinator {
         jobId: state.active.id,
         mode: state.active.mode,
         senderId: state.active.senderId,
+        accountId: state.active.accountId,
         regenerationCount: state.active.regenerationCount,
         mergedMessages: state.active.messageIds.length,
         startedAt: state.active.startedAt || 0

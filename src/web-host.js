@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as backup from "./backup-service.js";
+import { accountItems, registryConfig } from "./account-registry.js";
 
 const resourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const stateRoot = path.resolve(process.env.HERMES_QQ_HOME || path.join(os.homedir(), "Library", "Application Support", "Hermes QQ Bot"));
@@ -263,7 +264,8 @@ async function restoreBridge(wasRunning) {
 }
 
 async function resetRestoredAccounts(manifest) {
-  for (const account of manifest.accounts || []) {
+  for (const account of accountItems(registryConfig(readConfig() || {}))) {
+    if (account.managed === false || account.protocolEnabled === false) continue;
     if (!(manifest.dockerVolumes || []).some((volume) => volume.accountId === account.id)) continue;
     const response = await fetch(`http://127.0.0.1:${childPort}/api/accounts/${encodeURIComponent(account.id)}/login/reset`, { method: "POST", signal: AbortSignal.timeout(120000) });
     const result = await response.json();
@@ -501,6 +503,19 @@ async function route(req, res) {
     const file = path.join(resourceRoot, "public", "admin.html");
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
     return fs.createReadStream(file).pipe(res);
+  }
+  // Match the raw path: URL.pathname would normalize traversal segments.
+  const consoleAsset = new Map([
+    ["/console.css", ["console.css", "text/css; charset=utf-8"]],
+    ["/console-theme.js", ["console-theme.js", "text/javascript; charset=utf-8"]]
+  ]).get((req.url || "").split("?")[0]);
+  if ((req.method === "GET" || req.method === "HEAD") && consoleAsset) {
+    const [name, contentType] = consoleAsset;
+    const file = path.join(resourceRoot, "public", name);
+    if (!fs.existsSync(file)) return reply(res, 404, { ok: false, error: "file not found" });
+    const body = fs.readFileSync(file);
+    res.writeHead(200, { "content-type": contentType, "content-length": body.length, "cache-control": "no-store", "x-content-type-options": "nosniff" });
+    return res.end(req.method === "HEAD" ? undefined : body);
   }
   if (req.method === "GET" && pathname === "/health" && !child) return reply(res, 503, { ok: false, running: false, bridgeStopped: true });
   if (!new Set(["GET", "HEAD"]).has(req.method) && !validOrigin(req)) return reply(res, 403, { ok: false, error: "invalid_origin" });

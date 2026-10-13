@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, ipcMain, dialog, shell, utilityProcess, nativeImage } = require("electron");
+const { app, BrowserWindow, Tray, Menu, ipcMain, dialog, shell, utilityProcess, nativeImage, nativeTheme } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
@@ -7,7 +7,7 @@ const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 
 const APP_NAME = "Hermes QQ Bot";
-const APP_VERSION = "1.0.0-beta.4";
+const APP_VERSION = require("../package.json").version;
 const CONTROL_PORT = Number(process.env.HERMES_QQ_CONTROL_PORT || 6200);
 const CONTROL_URL = `http://127.0.0.1:${CONTROL_PORT}`;
 const CONTROL_HEALTH = `${CONTROL_URL}/health`;
@@ -28,6 +28,51 @@ let externalHostRunning = false;
 let setupBridgeAllowed = false;
 let activeBackup = null;
 let lastBackupProgress = null;
+const DESKTOP_THEMES = new Set(["dark", "light", "system"]);
+let desktopTheme = "dark";
+
+function desktopThemeState() {
+  return { ok: true, theme: desktopTheme, resolvedTheme: nativeTheme.shouldUseDarkColors ? "dark" : "light" };
+}
+
+function desktopBackgroundColor() {
+  return nativeTheme.shouldUseDarkColors ? "#111214" : "#f6f7f9";
+}
+
+function syncDesktopTheme() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.setBackgroundColor(desktopBackgroundColor());
+  mainWindow.webContents.send("app:theme-changed", desktopThemeState());
+}
+
+function initializeDesktopTheme() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(path.join(stateRoot(), "desktop-theme.json"), "utf8"));
+    if (DESKTOP_THEMES.has(saved?.theme)) desktopTheme = saved.theme;
+  } catch { /* Missing or invalid preferences start dark; never read bot config. */ }
+  nativeTheme.themeSource = desktopTheme;
+  nativeTheme.on("updated", syncDesktopTheme);
+}
+
+function setDesktopTheme(theme) {
+  if (typeof theme !== "string" || !DESKTOP_THEMES.has(theme)) throw new Error("invalid desktop theme");
+  if (theme !== desktopTheme) {
+    const file = path.join(stateRoot(), "desktop-theme.json");
+    const temporary = `${file}.tmp`;
+    try {
+      fs.writeFileSync(temporary, `${JSON.stringify({ theme })}\n`, { mode: 0o600 });
+      fs.renameSync(temporary, file);
+    } catch {
+      try { fs.rmSync(temporary, { force: true }); } catch { /* best effort */ }
+      throw new Error("无法保存桌面主题偏好");
+    }
+  }
+  desktopTheme = theme;
+  // Chromium and native window chrome only; this never changes macOS appearance.
+  nativeTheme.themeSource = theme;
+  syncDesktopTheme();
+  return desktopThemeState();
+}
 
 function publishBackupProgress(progress) {
   const next = { ...progress, updatedAt: new Date().toISOString() };
@@ -381,10 +426,10 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1460,
     height: 940,
-    minWidth: 1050,
-    minHeight: 700,
+    minWidth: 768,
+    minHeight: 600,
     title: APP_NAME,
-    backgroundColor: "#0b0f17",
+    backgroundColor: desktopBackgroundColor(),
     show: !process.argv.includes("--background"),
     webPreferences: {
       preload: path.join(resourceRoot(), "desktop", "preload.cjs"),
@@ -472,11 +517,18 @@ async function backupModule() {
 }
 
 function registerIpc() {
+  handle("app:set-theme", setDesktopTheme);
+  // A tiny synchronous snapshot lets the sandboxed preload paint the saved theme
+  // before either file:// setup or the HTTP console begins rendering.
+  ipcMain.on("app:get-theme", (event) => {
+    event.returnValue = validSender(event) ? desktopThemeState() : null;
+  });
   handle("app:get-status", () => dependencyStatus());
   handle("setup:prepare-snowluma", async () => {
-    const config = JSON.parse(fs.readFileSync(path.join(stateRoot(), "config.json"), "utf8"));
-    const accounts = [config.accounts?.primary, ...(config.accounts?.standbys || [])]
-      .filter((account) => account && account.protocol === "snowluma" && account.enabled !== false);
+    const { accountItems, registryConfig } = await import(path.join(resourceRoot(), "src", "account-registry.js"));
+    const config = registryConfig(JSON.parse(fs.readFileSync(path.join(stateRoot(), "config.json"), "utf8")));
+    const accounts = accountItems(config)
+      .filter((account) => account.managed !== false && account.protocolEnabled !== false);
     if (!setupBridgeAllowed && !setupComplete()) {
       for (const account of accounts) {
         const container = String(account.protocolContainer || account.napcatContainer || "");
@@ -494,16 +546,30 @@ function registerIpc() {
       try { await waitForBridge(); }
       catch (error) { setupBridgeAllowed = false; await stopBridge(); throw error; }
     }
-    const images = [...new Set(accounts.map((account) => account.snowlumaImage || "motricseven7/snowluma:latest"))];
+    const images = [...new Set(accounts.filter((account) => account.protocol === "snowluma")
+      .map((account) => account.snowlumaImage || "motricseven7/snowluma:latest"))];
     for (const image of images) {
       const pulled = await execCapture(resolveExecutable("docker"), ["pull", image], 10 * 60_000);
       if (!pulled.ok) throw new Error(`无法拉取 SnowLuma 镜像：${pulled.stderr || pulled.error || image}`);
     }
     const results = [];
     for (const account of accounts) {
-      const result = await fetchJson(`${CONTROL_URL}/api/accounts/${encodeURIComponent(account.id)}/login/reset`, 120_000, "POST");
-      if (!result.ok) throw new Error(`无法启动 ${account.id}：${result.error || result.message || "未知错误"}`);
-      results.push({ id: account.id, webuiUrl: `http://127.0.0.1:${account.webuiPort}`, noVncUrl: `http://127.0.0.1:${account.noVncPort}` });
+      // Provisioning is separate from bot participation and must not reset login data.
+      const result = await fetchJson(`${CONTROL_URL}/api/accounts/${encodeURIComponent(account.id)}/provision`, 120_000, "POST");
+      if (!result.ok || !result.operationId) throw new Error(`无法准备 ${account.id}：${result.error || "未返回部署操作"}`);
+      const deadline = Date.now() + 120_000;
+      while (true) {
+        const status = await fetchJson(`${CONTROL_URL}/api/accounts/operations/${encodeURIComponent(result.operationId)}`, 10_000);
+        const operation = status.operation;
+        if (!status.ok || !operation || operation.accountId !== account.id) throw new Error(`无法查询 ${account.id} 的部署状态`);
+        if (["failed", "error", "cancelled", "interrupted"].includes(operation.status)) throw new Error(`无法准备 ${account.id}：部署失败`);
+        if (["completed", "complete", "succeeded", "success", "done"].includes(operation.status)) break;
+        if (Date.now() >= deadline) throw new Error(`${account.id} 仍在部署；请在账号页面查询进度，不要重复部署。`);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      results.push({ id: account.id,
+        webuiUrl: account.webuiPort ? `http://127.0.0.1:${account.webuiPort}` : "",
+        noVncUrl: account.noVncPort ? `http://127.0.0.1:${account.noVncPort}` : "" });
     }
     return { ok: true, accounts: results };
   });
@@ -613,7 +679,10 @@ function registerIpc() {
       startBridge();
       const health = await waitForBridge(30_000);
       if (!health?.generatedAt) throw new Error("恢复后桥接健康检查失败");
-      for (const account of restored.manifest.accounts || []) {
+      const { accountItems, registryConfig } = await import(path.join(resourceRoot(), "src", "account-registry.js"));
+      const restoredConfig = registryConfig(JSON.parse(fs.readFileSync(path.join(stateRoot(), "config.json"), "utf8")));
+      for (const account of accountItems(restoredConfig)) {
+        if (account.managed === false || account.protocolEnabled === false) continue;
         if (!(restored.manifest.dockerVolumes || []).some((volume) => volume.accountId === account.id)) continue;
         const result = await fetchJson(`${CONTROL_URL}/api/accounts/${encodeURIComponent(account.id)}/login/reset`, 120_000, "POST");
         if (!result.ok) throw new Error(`无法启动恢复的协议端：${account.id}`);
@@ -751,6 +820,7 @@ else {
   app.on("second-instance", showWindow);
   app.whenReady().then(async () => {
     app.setName(APP_NAME);
+    initializeDesktopTheme();
     app.setAppLogsPath(path.resolve(process.env.HERMES_QQ_LOG_DIR || path.join(os.homedir(), "Library", "Logs", APP_NAME)));
     ensureRuntimeDirectories();
     registerIpc();

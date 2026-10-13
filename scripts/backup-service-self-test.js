@@ -3,6 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
+import vm from "node:vm";
+import { fileURLToPath } from "node:url";
+import { accountItems, registryConfig } from "../src/account-registry.js";
 import {
   BACKUP_MAGIC,
   createBackup,
@@ -46,7 +49,7 @@ function tamperFullManifest(source, password, mutate, name) {
   execFileSync("/usr/bin/tar", ["-xzf", archiveFile, "-C", payloadDir], { stdio: "ignore" });
   const manifestFile = path.join(payloadDir, "manifest.json");
   const manifest = JSON.parse(fs.readFileSync(manifestFile, "utf8"));
-  mutate(manifest);
+  mutate(manifest, payloadDir);
   fs.writeFileSync(manifestFile, JSON.stringify(manifest), { mode: 0o600 });
   execFileSync("/usr/bin/tar", ["-czf", archiveFile, "-C", payloadDir, "."], { stdio: "ignore" });
   const salt = crypto.randomBytes(16);
@@ -90,6 +93,13 @@ try {
   check(sanitized.config.ai.apiKeyEnv === "DEEPSEEK_API_KEY", "environment variable name must be retained");
   check(sanitized.config.ai.directApiKey === "", "direct API key must be redacted");
   check(sanitized.config.accounts.primary.token === "", "account token must be redacted");
+  const longId = `a${"b".repeat(63)}`;
+  const identityConfig = sanitizeConfigForBackup({ accounts: { version: 2, items: [{ id: longId,
+    protocolContainer: longId, snowlumaVolumes: { snowlumaData: longId },
+    onebotWsUrl: "wss://fixture-user:fixture-password@example.invalid/onebot?access_token=fixture-secret&keep=1" }] } });
+  check(identityConfig.config.accounts.items[0].id === longId && identityConfig.config.accounts.items[0].protocolContainer === longId
+    && identityConfig.config.accounts.items[0].snowlumaVolumes.snowlumaData === longId, "safe backups must preserve long stable registry and transport IDs");
+  check(identityConfig.config.accounts.items[0].onebotWsUrl === "wss://example.invalid/onebot?keep=1", "safe backups must strip credentials embedded in OneBot URLs");
 
   const safe = await createBackup({ type: "safe", stateRoot: state, hermesHome, destinationDir: backups, appVersion: "test" });
   check(fs.existsSync(safe.path), "safe backup must exist");
@@ -351,6 +361,113 @@ try {
   check(migratedConfig.ai.command === "hermes" && migratedConfig.ai.args[0] === "-p" && migratedConfig.ai.args[1] === "hermesqq2", "migration must preserve the legacy Hermes profile");
   check(fs.existsSync(path.join(legacyTarget, "data", "chat-archive", "groups", "123", "messages.jsonl")), "migration must preserve chat archive");
   check(migrated.hermesProfileMigrated && fs.existsSync(path.join(legacyTarget, "hermes", ".env")), "migration must copy Hermes profile into app state");
+
+  // Dynamic account fixture: v2 wins over stale projections, without a count cap.
+  const dynamicState = path.join(root, "dynamic-state");
+  fs.mkdirSync(path.join(dynamicState, "data"), { recursive: true });
+  const dynamicConfig = { bot: { enabled: false }, accounts: { version: 2,
+    primary: { id: "stale", protocol: "snowluma", token: "stale-secret" },
+    items: Array.from({ length: 12 }, (_, index) => ({ id: `account-${index}`, protocol: index === 2 ? "napcat" : "snowluma",
+      protocolContainer: `untouched-container-${index}`, webuiPort: 7100 + index,
+      enabled: index !== 1, protocolEnabled: index !== 3, managed: index !== 4, archived: index === 5,
+      token: `fixture-secret-${index}`, onebotPath: `/account-${index}` })),
+    failoverGroups: [{ id: "fixture-pair", name: "test", memberIds: ["account-0", "account-1"], policyAccountId: "account-0", policy: {}, settings: {} }] } };
+  fs.writeFileSync(path.join(dynamicState, "config.json"), JSON.stringify(dynamicConfig));
+  const dynamic = await createBackup({ type: "safe", stateRoot: dynamicState, destinationDir: backups });
+  check(dynamic.manifest.accounts.length === 12, "safe manifest must include all protocols and archived accounts");
+  check(dynamic.manifest.accountRegistry.itemIds.length === 12, "manifest must record all registry IDs");
+  check(!JSON.stringify(dynamic.manifest).includes("fixture-secret"), "manifest must not include account credentials");
+  const dynamicRestore = path.join(root, "dynamic-restore");
+  await restoreBackup({ path: dynamic.path, stateRoot: dynamicRestore });
+  const restoredDynamic = JSON.parse(fs.readFileSync(path.join(dynamicRestore, "config.json"), "utf8"));
+  check(restoredDynamic.accounts.items.length === 12 && restoredDynamic.accounts.items[5].archived, "safe restore must retain archived registry items");
+  check(restoredDynamic.accounts.items.every((item) => item.token === ""), "safe restore must redact credentials from every item");
+  check(restoredDynamic.accounts.primary.id === "account-0" && restoredDynamic.accounts.primary.token === "", "legacy projection must be rebuilt from sanitized v2 items");
+  check(restoredDynamic.accounts.items.every((item, index) => item.protocolContainer === `untouched-container-${index}`), "safe restore must not rename transport containers");
+  check(JSON.stringify(restoredDynamic.accounts.failoverGroups) === JSON.stringify(registryConfig(dynamicConfig).accounts.failoverGroups), "safe restore must preserve effective failover group policies");
+
+  // Execute the embedded enumeration code, never the LaunchAgent shell actions.
+  const projectRoot = fileURLToPath(new URL("..", import.meta.url));
+  const bootstrap = fs.readFileSync(path.join(projectRoot, "scripts", "start-qq-bot-stack.sh"), "utf8");
+  const bootstrapCode = bootstrap.match(/node --input-type=module -e '([\s\S]*?)'\s+"\$project_dir\/config.json"/)?.[1];
+  check(Boolean(bootstrapCode), "bootstrap must expose its registry-based enumeration");
+  const containers = execFileSync(process.execPath, ["--input-type=module", "-e", bootstrapCode,
+    path.join(dynamicState, "config.json"), path.join(projectRoot, "src", "account-registry.js")], { encoding: "utf8" }).split("\n");
+  const expected = dynamicConfig.accounts.items.filter((item) => !item.archived && item.managed !== false && item.protocolEnabled !== false);
+  check(containers.join() === expected.map((item) => item.protocolContainer).join(), "bootstrap must enumerate all managed protocol-enabled accounts, ignoring bot.enabled and account.enabled");
+  const legacyContainers = execFileSync(process.execPath, ["--input-type=module", "-e", bootstrapCode,
+    path.join(state, "config.json"), path.join(projectRoot, "src", "account-registry.js")], { encoding: "utf8" }).trim();
+  check(legacyContainers === accountItems(config)[0].protocolContainer, "bootstrap must accept legacy account configs");
+
+  // Isolate the real desktop setup handler with fake IPC, Docker and HTTP only.
+  const desktop = fs.readFileSync(path.join(projectRoot, "desktop", "main.cjs"), "utf8");
+  const setupHandler = desktop.slice(desktop.indexOf('  handle("setup:prepare-snowluma"'), desktop.indexOf('  handle("bot:start"'))
+    .replace(/await import\(path\.join\(resourceRoot\(\), "src", "account-registry\.js"\)\)/g, "registry");
+  let prepare;
+  const desktopCalls = [];
+  let deploymentFailed = false;
+  vm.runInNewContext(setupHandler, {
+    handle: (_name, handler) => { prepare = handler; }, registry: { accountItems, registryConfig }, fs, path,
+    stateRoot: () => dynamicState, setupBridgeAllowed: true, setupComplete: () => true,
+    resolveExecutable: (name) => name, CONTROL_URL: "http://fixture.invalid",
+    execCapture: async (command, args) => { desktopCalls.push({ command, args }); return { ok: true }; },
+    fetchJson: async (url) => {
+      desktopCalls.push({ url });
+      const id = url.match(/\/accounts\/(account-\d+)\/provision$/)?.[1];
+      return id ? { ok: true, operationId: id } : { ok: true, operation: { accountId: url.split("/").at(-1), status: deploymentFailed ? "failed" : "completed" } };
+    }
+  });
+  const prepared = await prepare();
+  check(prepared.accounts.map((item) => item.id).join() === expected.map((item) => item.id).join(), "desktop setup must prepare every eligible account, including paused bots and NapCat");
+  check(desktopCalls.filter((call) => call.url?.endsWith("/provision")).length === expected.length, "desktop setup must issue exactly one provision per eligible account");
+  check(!desktopCalls.some((call) => call.url?.endsWith("/login/reset")), "desktop provisioning must never reset login state");
+  check(!JSON.stringify(desktopCalls).includes("account-4") && !JSON.stringify(desktopCalls).includes("account-5"), "desktop setup must not operate external or archived accounts");
+  deploymentFailed = true;
+  let failedDeploymentRejected = false;
+  try { await prepare(); } catch { failedDeploymentRejected = true; }
+  check(failedDeploymentRejected, "desktop setup must not report success before a deployment operation succeeds");
+
+  // Isolate the actual web restore handler, with no listening server or process.
+  const web = fs.readFileSync(path.join(projectRoot, "src", "web-host.js"), "utf8");
+  const resetStart = web.indexOf("async function resetRestoredAccounts(");
+  const resetHandler = web.slice(resetStart, web.indexOf("\n}\n", resetStart) + 2);
+  const webCalls = [];
+  const reset = vm.runInNewContext(`${resetHandler}\nresetRestoredAccounts;`, {
+    accountItems, registryConfig, readConfig: () => dynamicConfig, childPort: 1234, AbortSignal,
+    fetch: async (url) => { webCalls.push(url); return { ok: true, json: async () => ({ ok: true }) }; }
+  });
+  await reset({ accounts: [{ id: "stale" }], dockerVolumes: dynamicConfig.accounts.items.map((item) => ({ accountId: item.id })) });
+  check(webCalls.length === expected.length && expected.every((item) => webCalls.some((url) => url.includes(`/accounts/${item.id}/`))), "web restore must start only eligible restored registry members, not manifest projections");
+
+  fs.writeFileSync(path.join(dynamicState, "config.json"), JSON.stringify({ accounts: { version: 2, items: [], failoverGroups: [], primary: { id: "ghost" } } }));
+  const emptyContainers = execFileSync(process.execPath, ["--input-type=module", "-e", bootstrapCode,
+    path.join(dynamicState, "config.json"), path.join(projectRoot, "src", "account-registry.js")], { encoding: "utf8" });
+  check(emptyContainers === "", "empty registries must not bootstrap a ghost legacy account");
+  check((await prepare()).accounts.length === 0, "empty registries must not provision legacy projections");
+
+  if (process.platform === "darwin" && process.arch === "arm64") {
+    const badMembership = tamperFullManifest(full.path, "correct horse battery staple", (manifest) => {
+      manifest.accountRegistry.itemIds.push("not-in-config");
+    }, "wrong-registry-membership");
+    let badMembershipRejected = false;
+    try { await inspectBackup({ path: badMembership, password: "correct horse battery staple" }); } catch { badMembershipRejected = true; }
+    check(badMembershipRejected, "manifest registry membership must match its checksummed config");
+    const oldBackup = tamperFullManifest(full.path, "correct horse battery staple", (manifest, payload) => {
+      delete manifest.accountRegistry;
+      const file = path.join(payload, "state", "config.json");
+      const oldConfig = JSON.parse(fs.readFileSync(file, "utf8"));
+      oldConfig.accounts = { primary: { id: "legacy-main", protocol: "napcat", protocolContainer: "legacy-existing" }, standbys: [{ id: "legacy-extra", protocol: "napcat" }] };
+      fs.writeFileSync(file, JSON.stringify(oldConfig));
+      const inventory = manifest.files.find((item) => item.path === "state/config.json");
+      inventory.size = fs.statSync(file).size;
+      inventory.sha256 = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+    }, "pre-registry-backup");
+    const oldTarget = path.join(root, "old-backup-restore");
+    await restoreBackup({ path: oldBackup, password: "correct horse battery staple", stateRoot: oldTarget });
+    const oldConfig = JSON.parse(fs.readFileSync(path.join(oldTarget, "config.json"), "utf8"));
+    check(oldConfig.accounts.items.map((item) => item.id).join() === "legacy-main,legacy-extra", "pre-v2 backups must restore to dynamic items without changing IDs");
+    check(oldConfig.accounts.items[0].protocolContainer === "legacy-existing", "pre-v2 backup transport names must remain unchanged");
+  }
 
   console.log(JSON.stringify({ ok: true, tests, safe: path.basename(safe.path), full: path.basename(full.path) }, null, 2));
 } finally {

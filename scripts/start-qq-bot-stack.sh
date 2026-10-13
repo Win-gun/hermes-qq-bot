@@ -1,6 +1,6 @@
 #!/bin/zsh
 # Runs from a per-user LaunchAgent after macOS login. The bridge itself has its
-# own KeepAlive agent; this helper only makes Docker/SnowLuma available first.
+# own KeepAlive agent; this helper makes managed protocol containers available.
 
 set -u
 
@@ -16,6 +16,33 @@ mkdir -p "$log_dir"
 log() {
   print -r -- "[$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$log_file"
 }
+
+resource_dir="${HERMES_QQ_RESOURCE_ROOT:-${0:A:h:h}}"
+if ! container_list=$(node --input-type=module -e '
+import fs from "node:fs";
+import { pathToFileURL } from "node:url";
+const { accountItems, registryConfig } = await import(pathToFileURL(process.argv[2]).href);
+try {
+  const config = registryConfig(JSON.parse(fs.readFileSync(process.argv[1], "utf8")));
+  const containers = accountItems(config)
+    .filter((account) => account.managed !== false && account.protocolEnabled !== false)
+    .map((account) => String(account.protocolContainer || account.snowlumaContainer || account.napcatContainer || "").trim())
+    .filter(Boolean);
+  process.stdout.write([...new Set(containers)].join("\n"));
+} catch {
+  process.stderr.write("account registry read failed\n");
+  process.exit(1);
+}
+' "$project_dir/config.json" "$resource_dir/src/account-registry.js" 2>>"$log_file"); then
+  log "could not read account registry; no containers were changed"
+  exit 1
+fi
+protocol_containers=("${(@f)container_list}")
+if [[ -z "$container_list" ]]; then
+  log "no nonarchived managed protocol-enabled account is configured"
+  /bin/launchctl kickstart "gui/$UID/$bridge_label" >/dev/null 2>&1 || log "could not ensure $bridge_label is running"
+  exit 0
+fi
 
 if ! command -v docker >/dev/null 2>&1; then
   log "docker command is unavailable; will retry on the next scheduled run"
@@ -41,36 +68,15 @@ if ! docker info >/dev/null 2>&1; then
   fi
 fi
 
-snowluma_containers=("${(@f)$(node -e '
-const fs = require("fs");
-const configPath = process.argv[1];
-try {
-  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-  const accounts = [config.accounts?.primary, ...(config.accounts?.standbys || [])]
-    .filter((account) => account && account.enabled !== false)
-    .filter((account) => String(account.protocol || "napcat").toLowerCase() === "snowluma")
-    .map((account, index) => String(account.protocolContainer || account.snowlumaContainer || (index === 0 ? "snowluma-primary" : `snowluma-standby-${index}`)).trim())
-    .filter(Boolean);
-  process.stdout.write([...new Set(accounts)].join("\n"));
-} catch (error) {
-  process.stderr.write(`config read failed: ${error.message}\\n`);
-  process.exit(1);
-}
-' "$project_dir/config.json" 2>>"$log_file")}")
-
-if (( ${#snowluma_containers[@]} == 0 )); then
-  log "no enabled SnowLuma container is configured"
-else
-  for container in "${snowluma_containers[@]}"; do
-    if ! docker inspect "$container" >/dev/null 2>&1; then
-      log "SnowLuma container is missing: $container"
-      continue
-    fi
-    docker update --restart unless-stopped "$container" >/dev/null 2>&1 || log "could not set restart policy for $container"
-    docker start "$container" >/dev/null 2>&1 || log "could not start $container (it may already be running)"
-    log "SnowLuma container available: $container"
-  done
-fi
+for container in "${protocol_containers[@]}"; do
+  if ! docker inspect "$container" >/dev/null 2>&1; then
+    log "protocol container is missing: $container"
+    continue
+  fi
+  docker update --restart unless-stopped "$container" >/dev/null 2>&1 || log "could not set restart policy for $container"
+  docker start "$container" >/dev/null 2>&1 || log "could not start $container (it may already be running)"
+  log "protocol container available: $container"
+done
 
 /bin/launchctl kickstart "gui/$UID/$bridge_label" >/dev/null 2>&1 || log "could not ensure $bridge_label is running"
 log "bootstrap completed"

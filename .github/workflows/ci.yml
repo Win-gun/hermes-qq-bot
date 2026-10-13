@@ -23,6 +23,11 @@ jobs:
       - run: npm run check
       - run: npm run test:social
       - run: npm run test:reply
+      - run: npm run test:accounts
+      - run: npm run test:account-isolation
+      - run: npm run test:bot-commands
+      - run: npm run test:config-revision
+      - run: npm run test:console
       - run: npm run test:agent
       - run: npm run test:backup
       - run: npm run test:web-host

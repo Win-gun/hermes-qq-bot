@@ -24,6 +24,9 @@ const command = {
 };
 
 const normalized = normalizeAutomationRule(schedule);
+assert.equal(normalizeAutomationRule({ ...schedule, groupId: "team_a" }).groupId, "team_a");
+assert.throws(() => normalizeAutomationRule({ ...schedule, accountId: "bot1", groupId: "team_a" }), /one sender/);
+assert.throws(() => normalizeAutomationRule({ ...schedule, groupId: "../invalid" }), /groupId/);
 assert.equal(normalized.enabled, true);
 assert.equal(normalized.timezone, "Asia/Shanghai");
 assert.deepEqual(normalized.scope.conversationIds, ["group:123"]);

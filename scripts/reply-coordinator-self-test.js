@@ -110,4 +110,33 @@ await Promise.all([proactive, direct]);
 assert.equal(proactiveSent, false, "直接问题应取消尚未发送的主动插话");
 assert.ok(coordinator.snapshot().dropped >= 1);
 
-console.log(JSON.stringify({ ok: true, runs, sent, order, metrics: coordinator.snapshot() }));
+const peerCoordinator = new ReplyCoordinator({ config: () => config });
+const peerSent = [];
+const toPrimary = peerCoordinator.enqueue({
+  conversationId: "group:peer", senderId: "u1", accountId: "primary", mode: "at", direct: true,
+  messageIds: ["same-qq-message"], current: { user_id: "u1", text: "@甲 你好" },
+  execute: async () => { peerSent.push("primary"); return { sent: true }; }
+});
+await toPrimary;
+const toSecondary = peerCoordinator.enqueue({
+  conversationId: "group:peer", senderId: "u1", accountId: "standby-a", mode: "at", direct: true,
+  messageIds: ["same-qq-message"], current: { user_id: "u1", text: "@甲 @乙 你好" },
+  execute: async () => { peerSent.push("standby-a"); return { sent: true }; }
+});
+await toSecondary;
+assert.deepEqual(peerSent, ["primary", "standby-a"], "同一条 QQ 消息明确点名两个独立 bot 时，不应跨账号去重");
+const firstPeer = peerCoordinator.enqueue({
+  conversationId: "group:peer-2", senderId: "u1", accountId: "primary", mode: "at", direct: true,
+  messageIds: ["peer-a"], current: { user_id: "u1", text: "@甲 问题一" },
+  execute: async () => { await delay(15); peerSent.push("primary-2"); return { sent: true }; }
+});
+await delay(2);
+const secondPeer = peerCoordinator.enqueue({
+  conversationId: "group:peer-2", senderId: "u1", accountId: "standby-a", mode: "at", direct: true,
+  messageIds: ["peer-b"], current: { user_id: "u1", text: "@乙 问题二" },
+  execute: async () => { peerSent.push("standby-2"); return { sent: true }; }
+});
+await Promise.all([firstPeer, secondPeer]);
+assert.deepEqual(peerSent.slice(-2), ["primary-2", "standby-2"], "同一人问两个独立 bot 的问题不能被合并");
+
+console.log(JSON.stringify({ ok: true, runs, sent, order, peerSent, metrics: coordinator.snapshot() }));

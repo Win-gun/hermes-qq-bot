@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isValidApiSecretRef } from "./api-secret-store.js";
 import { isSupportedMimoSearchModel, officialMimoSearchEndpoint } from "./mimo-web-search.js";
+import { effectiveAccount } from "./account-registry.js";
 
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -269,14 +270,35 @@ export function normalizeApiCenter(config = {}) {
   return validateApiCenter(merged, config);
 }
 
-/** Resolve one role; task inherits chat unless explicitly bound. */
-export function resolveApiCapability(config, capability) {
-  if (!KINDS.has(capability) && capability !== "task") return null;
-  const center = normalizeApiCenter(config);
-  const id = capability === "task" && center.bindings.task === "inherit-chat" ? center.bindings.chat : center.bindings[capability];
-  const profile = center.profiles.find((item) => item.id === id);
-  const connection = center.connections.find((item) => item.id === profile?.connectionId);
-  return profile && connection ? { profile: copy(profile), connection: copy(connection) } : null;
+function resolveFromCenter(config, center, capability, accountId) {
+  const account = accountId ? effectiveAccount(config, accountId) : null;
+  if (accountId && !account) fail("account");
+  const binding = (kind) => {
+    const override = account?.modelBindings?.[kind];
+    if (override !== undefined && typeof override !== "string") fail(`account modelBindings.${kind}`);
+    return override || (kind === "search" ? center.searchBinding : center.bindings[kind]);
+  };
+  let id = binding(capability);
+  if (capability === "task" && id === "inherit-chat") id = binding("chat");
+  if (id === "inherit-chat") fail(`account modelBindings.${capability}`);
+  const expectedKind = capability === "task" ? "chat" : capability;
+  const profile = (capability === "search" ? center.searchProfiles : center.profiles).find((item) => item.id === id);
+  if (!profile || (capability !== "search" && profile.kind !== expectedKind)
+    || (capability === "tts" && profile.model === "mimo-v2.5-tts-voiceclone")) fail(`account modelBindings.${capability}`);
+  const connection = center.connections.find((item) => item.id === profile.connectionId);
+  if (profile.connectionId && !connection) fail(`account modelBindings.${capability}.connectionId`);
+  // Scraping search profiles intentionally have no credential-bearing connection.
+  if (capability !== "search" && !connection) fail(`account modelBindings.${capability}.connectionId`);
+  return { profile: copy(profile), connection: connection ? copy(connection) : null };
+}
+
+/** Resolve metadata only; never read environment values or Keychain secrets.
+ * Omitted accountId uses __activeAccountId when present, otherwise global defaults.
+ * An explicit empty accountId resolves global defaults even on an account clone.
+ */
+export function resolveApiCapability(config = {}, capability, accountId = config.__activeAccountId) {
+  if (!KINDS.has(capability) && capability !== "task" && capability !== "search") return null;
+  return resolveFromCenter(config, normalizeApiCenter(config), capability, accountId);
 }
 
 function setArg(args, flags, preferred, value) {
@@ -294,19 +316,22 @@ function credentialProjection(connection) {
 }
 
 /** Mutate only center-owned legacy fields; keep feature flags and other user settings. */
-export function applyApiCenterBindings(config, center = normalizeApiCenter(config)) {
+export function applyApiCenterBindings(config, center = normalizeApiCenter(config), accountId = config.__activeAccountId) {
   if (!object(config)) fail("config");
   const safe = validateApiCenter(center, config);
-  const byProfile = new Map(safe.profiles.map((item) => [item.id, item]));
   const byConnection = new Map(safe.connections.map((item) => [item.id, item]));
   const selected = (kind) => {
-    const profile = byProfile.get(safe.bindings[kind]);
-    return [profile, byConnection.get(profile.connectionId)];
+    const { profile, connection } = resolveFromCenter(config, safe, kind, accountId);
+    return [profile, connection];
   };
   const [chat, chatConnection] = selected("chat");
   const [vision, visionConnection] = selected("vision");
   const [asr, asrConnection] = selected("asr");
   const [tts, ttsConnection] = selected("tts");
+  // Resolve every binding before changing even a caller-owned scratch config.
+  // Task's runtime projection remains the task runner's responsibility.
+  resolveFromCenter(config, safe, "task", accountId);
+  const search = resolveFromCenter(config, safe, "search", accountId).profile;
   const projectAi = (profile, connection, prior = {}) => {
     const args = profile.args ? [...profile.args] : aiArgs(prior);
     return { ...prior, command: profile.command || prior.command || "hermes", args: setArg(setArg(args, ["--provider"], "--provider", connection.provider), ["-m", "--model"], "-m", profile.model),
@@ -325,7 +350,6 @@ export function applyApiCenterBindings(config, center = normalizeApiCenter(confi
   config.voice = { ...voice, asrApi: { ...(voice.asrApi || {}), ...credentialProjection(asrConnection), provider: asrConnection.provider, model: asr.model },
     ttsApi: { ...(voice.ttsApi || {}), ...credentialProjection(ttsConnection), provider: ttsConnection.provider, model: tts.model },
     tts: { ...(voice.tts || {}), model: tts.model } };
-  const search = safe.searchProfiles.find((item) => item.id === safe.searchBinding);
   config.webSearch = { ...(config.webSearch || {}), provider: search.provider, providerOrder: [...search.providerOrder],
     proxy: { ...(config.webSearch?.proxy || {}), ...copy(search.proxy) }, maxResults: search.maxResults, timeoutMs: search.timeoutMs };
   if (search.provider === "mimo-web-search") config.webSearch.mimo = {

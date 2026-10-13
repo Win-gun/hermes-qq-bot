@@ -4,28 +4,35 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Hermes QQ Bot 初始设置</title>
+  <link rel="stylesheet" href="../public/console.css" />
+  <script src="../public/console-theme.js"></script>
   <style>
-    :root { color-scheme: dark; --bg:#0b0f17; --panel:#151c2b; --line:#293247; --text:#eef4ff; --muted:#93a4bd; --accent:#6c82ff; --good:#5ee08c; --bad:#ff6b81; }
     * { box-sizing:border-box; }
-    body { margin:0; min-height:100vh; font:15px -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif; color:var(--text); background:radial-gradient(circle at 20% 0,rgba(108,130,255,.25),transparent 42rem),var(--bg); }
-    main { width:min(980px,calc(100% - 48px)); margin:48px auto; }
-    .hero { display:flex; align-items:center; gap:18px; margin-bottom:28px; }
-    .logo { width:68px; height:68px; border-radius:22px; display:grid; place-items:center; font-size:34px; background:linear-gradient(135deg,#6c82ff,#6ee7ff); box-shadow:0 20px 60px rgba(80,110,255,.35); }
-    h1 { margin:0 0 7px; font-size:32px; } p { color:var(--muted); line-height:1.6; }
-    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
-    .card { background:rgba(21,28,43,.92); border:1px solid var(--line); border-radius:20px; padding:20px; box-shadow:0 18px 45px rgba(0,0,0,.2); }
-    .card h2 { margin:0 0 8px; font-size:18px; }
-    .status { display:inline-flex; gap:7px; align-items:center; padding:7px 10px; border-radius:999px; background:#222d44; }
-    .status.good { color:var(--good); } .status.bad { color:var(--bad); }
-    button { border:0; border-radius:12px; padding:11px 15px; color:white; background:linear-gradient(135deg,#3f63ff,#6c82ff); cursor:pointer; font:inherit; }
-    button.secondary { background:#273149; } button:disabled { opacity:.45; cursor:not-allowed; }
-    .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
-    .wide { grid-column:1/-1; }
-    pre { white-space:pre-wrap; color:#c9d7ef; background:#0d1320; border:1px solid var(--line); border-radius:14px; padding:14px; max-height:220px; overflow:auto; }
-    @media(max-width:760px){.grid{grid-template-columns:1fr}.wide{grid-column:auto}}
+    body.setup-page { margin:0; min-height:100vh; font:14px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif; color:var(--text); background:var(--bg); }
+    .setup-page main { width:min(980px,calc(100% - 48px)); margin:32px auto; }
+    .setup-page .hero { display:flex; align-items:center; gap:16px; margin-bottom:24px; }
+    .setup-page .logo { flex-shrink:0; width:48px; height:48px; border-radius:12px; display:grid; place-items:center; font-size:26px; background:var(--panel-2); border:1px solid var(--line); }
+    .setup-page h1 { margin:0 0 6px; font-size:24px; font-weight:650; line-height:1.3; }
+    .setup-page p { color:var(--muted); line-height:1.6; margin:8px 0 16px; }
+    .setup-page .hero p { margin:0; }
+    .setup-page .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+    .setup-page .card { min-width:0; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:20px; box-shadow:none; }
+    .setup-page .card h2 { margin:0 0 12px; font-size:16px; font-weight:600; }
+    .setup-page .status { display:inline-flex; max-width:100%; overflow-wrap:anywhere; gap:6px; align-items:center; padding:4px 8px; border-radius:6px; background:var(--panel-2); }
+    .setup-page .status.good { color:var(--good); } .setup-page .status.bad { color:var(--bad); }
+    .setup-page button { min-height:36px; border:1px solid transparent; border-radius:8px; padding:6px 12px; color:var(--accent-contrast,#fff); background:var(--accent-solid,#5b5ce2); cursor:pointer; font:inherit; box-shadow:none; }
+    .setup-page button.secondary { color:var(--text); background:var(--panel-2); border-color:var(--line); }
+    .setup-page button:hover { filter:none; transform:none; border-color:var(--accent); }
+    .setup-page button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+    .setup-page button:disabled { opacity:.45; cursor:not-allowed; }
+    .setup-page .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+    .setup-page .row span { min-width:0; overflow-wrap:anywhere; }
+    .setup-page .wide { grid-column:1/-1; }
+    .setup-page pre { white-space:pre-wrap; overflow-wrap:anywhere; color:var(--muted); background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:12px; max-height:220px; overflow:auto; font-size:12px; }
+    @media(max-width:800px){.setup-page main{width:calc(100% - 32px);margin:24px auto}.setup-page .grid{grid-template-columns:1fr}.setup-page .wide{grid-column:auto}.setup-page .hero{align-items:flex-start}}
   </style>
 </head>
-<body>
+<body class="setup-page">
   <main>
     <div class="hero"><div class="logo">🤖</div><div><h1>设置 Hermes QQ Bot</h1><p>应用会把配置和聊天数据保存在你的用户目录，更新 App 时不会覆盖。</p></div></div>
     <div class="grid">
@@ -34,7 +41,7 @@
       <section class="card"><h2>3. Hermes</h2><div id="hermes" class="status">检测中</div><p>Hermes CLI 负责模型调用与 Agent 任务。</p><button id="hermesHelp" class="secondary">打开 Hermes 安装说明</button></section>
       <section class="card"><h2>4. 本机桥接</h2><div id="bridge" class="status">检测中</div><p>控制台只监听 127.0.0.1，不开放到局域网或公网。</p><button id="restart" class="secondary">重启桥接</button></section>
       <section class="card wide"><h2>已有旧项目数据？先迁移</h2><p>App 与新 WebUI 共用用户数据目录，但不会自动读取旧项目文件夹。选择原项目后，迁移配置、记忆、聊天存档和 SnowLuma 登录状态；旧项目与回滚数据会保留。迁移会短暂停止旧桥接和协议端。</p><div class="row"><button id="selectLegacy" class="secondary">选择旧项目</button><button id="migrateLegacy" disabled>验证并迁移</button><span id="legacyInfo"></span></div></section>
-      <section class="card wide"><h2>5. 新安装：准备 QQ 协议端</h2><p>没有旧项目时才使用此入口。准备 SnowLuma 镜像和主备账号容器，然后在各自的 WebUI 或桌面中扫码登录。</p><div class="row"><button id="prepareAccounts">准备主备账号</button><span id="accountStatus"></span></div><div id="accountLinks" class="row" style="margin-top:12px"></div></section>
+      <section class="card wide"><h2>5. 新安装：准备 QQ 协议端</h2><p>没有旧项目时才使用此入口。准备所有未归档且已启用协议的本机受管账号，然后在各自的 WebUI 或桌面中扫码登录；暂停机器人发言不影响协议准备。</p><div class="row"><button id="prepareAccounts">准备账号协议端</button><span id="accountStatus"></span></div><div id="accountLinks" class="row" style="margin-top:12px"></div></section>
       <section class="card wide"><h2>准备完成</h2><p>进入控制台后，可在“备份与迁移”中创建普通数据包或带密码的完整迁移包。</p><div class="row"><button id="refresh" class="secondary">重新检测</button><button id="continue" disabled>进入控制台</button></div><pre id="detail">正在检查依赖……</pre></section>
     </div>
   </main>
@@ -64,10 +71,11 @@
       $("accountStatus").textContent = "正在准备镜像和容器……";
       try {
         const result = await window.hermesQQ.prepareSnowLuma();
-        $("accountStatus").textContent = result.accounts.length ? "协议端已准备好，请分别完成 QQ 登录。" : "没有启用的 SnowLuma 账号。";
+        $("accountStatus").textContent = result.accounts.length ? "协议端已准备好，请分别完成 QQ 登录。" : "没有需要启动的本机受管账号。";
         $("accountLinks").replaceChildren();
         for (const account of result.accounts) {
           for (const [label, url] of [[`${account.id} WebUI`, account.webuiUrl], [`${account.id} 桌面`, account.noVncUrl]]) {
+            if (!url) continue;
             const button = document.createElement("button");
             button.className = "secondary";
             button.textContent = label;

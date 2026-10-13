@@ -2,7 +2,32 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 const invoke = (channel, payload) => ipcRenderer.invoke(channel, payload);
 
+let themeState = ipcRenderer.sendSync("app:get-theme");
+function applyTheme(state) {
+  if (!state || !["dark", "light", "system"].includes(state.theme) || !["dark", "light"].includes(state.resolvedTheme)) return;
+  themeState = state;
+  const root = document.documentElement;
+  if (!root) return;
+  root.dataset.theme = state.resolvedTheme;
+  root.dataset.themePreference = state.theme;
+  root.style.colorScheme = state.resolvedTheme;
+  root.style.backgroundColor = state.resolvedTheme === "dark" ? "#111214" : "#f6f7f9";
+}
+
+ipcRenderer.on("app:theme-changed", (_event, state) => applyTheme(state));
+if (document.documentElement) applyTheme(themeState);
+else {
+  const observer = new MutationObserver(() => {
+    if (!document.documentElement) return;
+    applyTheme(themeState);
+    observer.disconnect();
+  });
+  observer.observe(document, { childList: true });
+}
+
 contextBridge.exposeInMainWorld("hermesQQ", Object.freeze({
+  getTheme: () => ipcRenderer.sendSync("app:get-theme"),
+  setTheme: (theme) => invoke("app:set-theme", theme).then((state) => { applyTheme(state); return state; }),
   getAppStatus: () => invoke("app:get-status"),
   prepareSnowLuma: () => invoke("setup:prepare-snowluma"),
   startBot: () => invoke("bot:start"),

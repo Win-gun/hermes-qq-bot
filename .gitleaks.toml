@@ -1,0 +1,16 @@
+title = "Hermes QQ Bot secret scanning"
+
+[extend]
+useDefault = true
+
+# These exact UUIDs are mock Keychain reference IDs, never credentials. Keep
+# scanning the rest of this test file and all other files/history normally.
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Two fixed mock Keychain reference IDs in backup tests"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''(^|/)scripts/backup-service-self-test\.js$''']
+regexes = ['''^(ec021717-671a-4c86-9ca0-c44265deee81|91b65f87-976e-4e74-9d8b-8fae04fe992c)$''']
