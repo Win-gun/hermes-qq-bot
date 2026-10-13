@@ -171,6 +171,11 @@ process.stdout.write("fixture text reply "+Date.now()+"\\n");
   for (const key of ["webSearch", "vision", "taskMode", "proactive", "socialPlanner", "discussionParticipation", "implicitReply", "learningMode", "messageDebounce", "loginRecovery", "adminNotifications", "dailyMessages", "automation", "voice"])
     config[key] = { ...config[key], enabled: false };
   config.memory.aiExtraction.enabled = false;
+  config.dailyMessages = { enabled: false, schedules: [] };
+  delete config.hourlyChat;
+  // This fixture explicitly tests migration from the pre-ownership format.
+  delete config.automation.ownershipVersion;
+  delete config.automation.routines;
   config.botFeatures = { defaultMode: "chat", accountModes: {}, interBot: { enabled: false } };
   config.botNames = ["fixture-trigger"];
   config.trigger = { ...config.trigger, replyToAt: true, replyToKeywords: true, keywordCooldownMs: 1, activeReply: false };
@@ -252,11 +257,65 @@ process.stdout.write("fixture text reply "+Date.now()+"\\n");
     assert.deepEqual(stored().accounts.items.filter((item) => item.id !== ids[2]), before);
     assert.equal(stored().accounts.items[2].protocolContainer, "fixture-container-2");
   });
+  await test("style is an independent snapshot, including an intentionally empty prompt", async () => {
+    const before = stored().accounts.items.filter((item) => item.id !== createdId);
+    assert.deepEqual(stored().accounts.items.find((item) => item.id === createdId).style, { systemPrompt: "" });
+    await mutate(`/api/accounts/${createdId}`, "PATCH", { patch: { style: { systemPrompt: "fixture independent persona" } } });
+    assert.deepEqual(stored().accounts.items.filter((item) => item.id !== createdId), before);
+    await mutate(`/api/accounts/${createdId}`, "PATCH", { patch: { style: { systemPrompt: "" } } });
+    assert.equal(stored().accounts.items.find((item) => item.id === createdId).style.systemPrompt, "");
+  });
+  await test("new account can copy style once without copying permissions or automation", async () => {
+    const original = stored().accounts.items[0];
+    const result = await mutate("/api/accounts", "POST", { account: { id: "fixture-style-copy", displayName: "style copy", protocol: "napcat", copyStyleFromAccountId: original.id } }, 201);
+    assert.deepEqual(result.account.style, original.style);
+    assert.equal(result.account.enabled, false);
+    assert.equal(result.account.features.automation, false);
+    assert.equal(result.account.sendTypes.record, false);
+    await mutate(`/api/accounts/${original.id}`, "PATCH", { patch: { style: { systemPrompt: "fixture changed source" } } });
+    assert.deepEqual(stored().accounts.items.find((item) => item.id === "fixture-style-copy").style, original.style);
+    await mutate("/api/accounts/fixture-style-copy", "DELETE");
+  });
+  await test("legacy routines are visible, revision guarded and preserve legacy schedules", async () => {
+    const route = `/api/automation/accounts/${ids[0]}`;
+    const read = await request(route);
+    assert.equal(read.status, 200);
+    assert.equal(read.data.routines.daily.enabled, false);
+    assert.ok(Array.isArray(read.data.catalog));
+    assert.equal((await request(route, "GET", undefined, { "x-hermes-qq-admin": "" })).status, 403);
+    const snapshot = stored();
+    await rejected(route, "PATCH", { expectedRevision: "stale", routines: { daily: { enabled: true } } }, 409);
+    await mutate(route, "PATCH", { routines: { daily: { enabled: false, windowMinutes: 4 } } });
+    assert.equal(stored().automation.accounts[ids[0]].routines.daily.windowMinutes, 4);
+    assert.deepEqual(stored().dailyMessages.schedules, snapshot.dailyMessages.schedules);
+    assert.deepEqual(stored().automation.rules, snapshot.automation.rules);
+    await rejected("/api/automation/routines", "PATCH", { routines: { daily: { accountId: "missing-account" } } });
+  });
   await test("missing and stale revisions reject without mutation", async () => {
     const stale = (await current()).revision;
     await mutate(`/api/accounts/${ids[2]}`, "PATCH", { patch: { displayName: "fresh third fixture" } });
     await rejected(`/api/accounts/${ids[2]}`, "PATCH", { expectedRevision: stale, patch: { displayName: "stale" } }, 409);
     await rejected(`/api/accounts/${ids[2]}`, "PATCH", { expectedRevision: undefined, patch: { displayName: "missing-revision" } }, 409);
+  });
+  await test("automation namespaces isolate rules, switches, revisions and target writes", async () => {
+    const routes = ids.slice(0, 2).map(id => `/api/automation/accounts/${id}`);
+    const rule = { id: "same_name", enabled: false, timezone: "Asia/Shanghai", scope: { conversationIds: [`group:${GROUP}`] },
+      trigger: { type: "schedule", time: "08:30", daysOfWeek: [1], windowMinutes: 3 }, action: { kind: "message" }, prompt: "isolated fixture" };
+    await mutate(routes[0], "PATCH", { rules: [rule] });
+    await mutate(routes[1], "PATCH", { rules: [{ ...rule, prompt: "independent B" }], enabled: true });
+    const b = (await request(routes[1])).data;
+    await mutate(routes[0], "PATCH", { rules: [{ ...rule, prompt: "edited A" }], enabled: false });
+    const after = (await request(routes[1])).data;
+    assert.deepEqual(after.rules, b.rules);
+    assert.equal(after.enabled, true);
+    assert.equal((await request(routes[0])).data.enabled, false);
+    assert.equal(stored().accounts.items.find(item => item.id === ids[1]).features.automation, true);
+    assert.equal((await request(routes[0])).data.rules[0].accountId, ids[0]);
+    await rejected(routes[0], "PATCH", { rules: [{ ...rule, accountId: ids[1] }] });
+    await rejected("/api/config", "PATCH", { automation: { enabled: true, rules: [] } });
+    assert.deepEqual((await request(routes[1])).data.rules, b.rules);
+    await mutate(routes[0], "PATCH", { rules: [] });
+    await mutate(routes[1], "PATCH", { rules: [], enabled: false });
   });
   await test("every registry mutation route requires revision", async () => {
     for (const [route, method] of [["/api/accounts", "POST"], [`/api/accounts/${ids[0]}`, "DELETE"],

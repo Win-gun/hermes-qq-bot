@@ -21,8 +21,8 @@ assert.deepEqual(parse("发一条语音，讲个笑话"), { kind: "joke", text: 
 assert.deepEqual(parse("用语音给我讲个笑话"), { kind: "joke", text: "我本来想讲个冷笑话，结果空调说：这活儿它熟。" });
 assert.deepEqual(parse("@Eraser的小跟班 用语音给我讲个笑话"), { kind: "joke", text: "我本来想讲个冷笑话，结果空调说：这活儿它熟。" });
 assert.deepEqual(parse("[引用消息]@Eraser的小跟班 用语音给我讲个笑话"), { kind: "joke", text: "我本来想讲个冷笑话，结果空调说：这活儿它熟。" });
-assert.deepEqual(parse("用语音给我打个招呼"), { kind: "greeting", text: "嗨，我是小跟班！今天过得怎么样？" });
-assert.deepEqual(parse("@Eraser的小跟班2 用语音跟我问个好"), { kind: "greeting", text: "嗨，我是小跟班！今天过得怎么样？" });
+assert.deepEqual(parse("用语音给我打个招呼"), { kind: "greeting", text: "嗨，今天过得怎么样？" });
+assert.deepEqual(parse("@Eraser的小跟班2 用语音跟我问个好"), { kind: "greeting", text: "嗨，今天过得怎么样？" });
 assert.deepEqual(parse("[引用消息]用语音给我讲个笑话"), { kind: "joke", text: "我本来想讲个冷笑话，结果空调说：这活儿它熟。" });
 assert.equal(parse("[引用消息]用语音给我讲个笑话", false), null);
 assert.deepEqual(parse("请用语音念：今天要早点睡"), { kind: "speak", text: "今天要早点睡" });

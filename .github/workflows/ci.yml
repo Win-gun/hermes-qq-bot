@@ -25,6 +25,8 @@ jobs:
       - run: npm run test:reply
       - run: npm run test:accounts
       - run: npm run test:account-isolation
+      - run: npm run test:features
+      - run: npm run test:api-center
       - run: npm run test:bot-commands
       - run: npm run test:config-revision
       - run: npm run test:console

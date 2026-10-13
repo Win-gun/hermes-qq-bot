@@ -510,8 +510,9 @@ function adminFunction(name) {
   const start = new RegExp(`^    (?:async )?function ${name}\\(`, "m").exec(businessScript);
   assert.ok(start, `missing admin function ${name}`);
   const rest = businessScript.slice(start.index + start[0].length);
-  const next = /^    (?:async )?function \w+\(/m.exec(rest);
-  const end = next ? start.index + start[0].length + next.index : businessScript.length;
+  const next = /^    }\s*$/m.exec(rest);
+  assert.ok(next, `missing function closing brace ${name}`);
+  const end = start.index + start[0].length + next.index + next[0].trimEnd().length;
   return businessScript.slice(start.index, end);
 }
 const plain = (value) => JSON.parse(JSON.stringify(value));
@@ -668,6 +669,7 @@ await group("registry-focused-controls", () => {
       let replacements = 0, synced = 0;
       const stop = new Error("Rebuild reached");
       const host = {
+        dataset: { accountId: "a1" },
         contains: (node) => node?.owner === host,
         querySelector: () => ({ value: "a1" }),
         replaceChildren() { replacements += 1; throw stop; }
@@ -675,7 +677,7 @@ await group("registry-focused-controls", () => {
       const focused = { owner: host, tagName, matches: () => ["INPUT", "TEXTAREA", "SELECT"].includes(tagName) };
       const document = { activeElement: focused, querySelector: (query) => query.includes('="qa"') ? host : null };
       const state = {
-        document, $: () => host, registryState: { selected: "a1", contexts: { qa: "a1" } },
+        document, $: () => host, activeTabs: { qa: "persona" }, registryState: { selected: "a1", contexts: { qa: "a1" } },
         registryItem: () => ({ id: "a1" }), registryDraft: () => ({ value: {} }), registryGroup: () => null,
         syncRegistryDraftControls: () => { synced += 1; }
       };
@@ -694,6 +696,300 @@ await group("registry-focused-controls", () => {
       });
     }
   }
+});
+
+function scopedUiRuntime() {
+  const nodes = new Map(), fields = [], requests = [];
+  const node = () => ({ children: [], dataset: {}, className: "", textContent: "", disabled: false,
+    append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; },
+    contains: () => false, querySelector: () => null,
+    querySelectorAll(selector) { return selector === "details[open]" ? this.children.filter((child) => child.open && child.dataset?.routineEntry) : []; },
+    setAttribute() {}, classList: { toggle() {}, add() {} } });
+  const state = {
+    structuredClone, Date, cfg: { revision: "r1", prompt: { system: "original template" }, styleProfiles: { activeId: "legacy", profiles: [{ id: "legacy", systemPrompt: "" }] } },
+    registryState: { loaded: true, revision: "r1", selected: "a", tab: "style", items: [
+      { id: "a", displayName: "甲", style: { systemPrompt: "saved A" }, features: { chat: true } },
+      { id: "b", displayName: "乙", style: { systemPrompt: "" }, promptOverride: "must not inherit" }
+    ], groups: [], drafts: new Map(), contexts: { qa: "a" }, error: "" },
+    registryIdentityKeys: ["displayName", "selfName", "qq", "behaviorMode"], registryPolicyKeys: ["displayName", "selfName", "style", "features"],
+    registryTabs: { identity: "基本", style: "风格", features: "功能", connection: "连接高级" },
+    registryFeatures: { chat: "聊天" }, VOICE_PRESET_IDS: [],
+    routineState: { revision: "r1", value: null, dirty: false, dirtyPaths: new Set(), catalog: [], busy: false, loadedAt: 0 },
+    automationAccounts: { selected: "a", drafts: new Map() },
+    dirtyScopes: new Set(["automation"]), automationRulesDraft: [{ id: "unsaved-rule", prompt: "unrelated draft" }],
+    document: { activeElement: null, createElement: node },
+    $: (id) => { if (!nodes.has(id)) nodes.set(id, node()); return nodes.get(id); },
+    registryField: (host, label, path, value, change, options = {}) => { const control = node(); fields.push({ label, path, value, change, options, control }); host.append(control); return control; },
+    renderAutomationTargetPicker() {}, showAutomationDraft() {}, renderAutomationAccountState() {}, renderSaveState() {}, renderRegistrySaveState() {}, renderRegistryLists() {}, renderRegistryEditor() {}, registryFeedback() {},
+    confirm: () => true, toast() {},
+    refreshAccountRegistry: async () => {},
+    registryRequest: async (url, method, body) => { requests.push({ url, method, body: structuredClone(body) }); return { revision: "r2" }; },
+    sensitiveApi: async () => { throw new Error("No fixture response"); }
+  };
+  state.automationAccounts.drafts.set("a", { routine: state.routineState, dirty: true, rules: state.automationRulesDraft });
+  const context = vm.createContext(state);
+  state.automationBaseline = result => JSON.stringify({ owner: result.owner, enabled: result.enabled, rules: result.rules, routines: result.routines });
+  const names = ["registryStyle", "registryEditable", "registryDraft", "registryItem", "registryGroup", "registryGet", "registrySet", "registrySelect", "rebaseRegistryDraft", "registryTabKeys", "registryValidate", "registryPatch", "saveRegistryPatch", "registryDraftStatus", "saveRegistryContext", "routineTarget", "routinePatch", "renderRoutineState", "renderRoutines", "refreshRoutines", "saveRoutines"];
+  new vm.Script(names.map(adminFunction).join("\n")).runInContext(context);
+  return { state, nodes, fields, requests, context };
+}
+
+await group("independent-style-and-account-drafts", async () => {
+  const { state: s, requests } = scopedUiRuntime();
+  check("explicit blank and empty style never fall back", () => {
+    assert.equal(s.registryStyle(s.registryItem("b")).systemPrompt, "");
+    assert.equal(s.registryStyle({ style: {}, promptOverride: "old" }).systemPrompt, "");
+    assert.equal(s.registryStyle({ promptOverride: "legacy override" }).systemPrompt, "legacy override");
+    assert.equal(s.registryStyle({}).systemPrompt, "original template");
+  });
+  const draft = s.registryDraft("a"); draft.value.style.systemPrompt = "local style"; draft.dirty.add("style.systemPrompt");
+  draft.value.features.chat = false; draft.dirty.add("features.chat");
+  s.registrySelect("b", "features"); s.registryDraft("b").value.displayName = "乙草稿"; s.registryDraft("b").dirty.add("displayName");
+  s.registrySelect("a", "style");
+  check("switching account and tab preserves both account drafts", () => {
+    assert.equal(s.registryDraft(), draft); assert.equal(draft.value.style.systemPrompt, "local style");
+    assert.equal(draft.value.features.chat, false); assert.equal(s.registryDraft("b").value.displayName, "乙草稿");
+    assert.deepEqual([...draft.dirty], ["style.systemPrompt", "features.chat"]);
+  });
+  await s.saveRegistryPatch("a", s.registryTabKeys("style"), "风格");
+  check("style save submits only canonical snapshot and retains other tab/account drafts", () => {
+    assert.deepEqual(plain(requests[0].body), { expectedRevision: "r1", patch: { style: { systemPrompt: "local style" } } });
+    assert.deepEqual([...draft.dirty], ["features.chat"]); assert(s.registryDraft("b").dirty.has("displayName"));
+  });
+  draft.value.style.systemPrompt = ""; draft.dirty.add("style.systemPrompt"); await s.saveRegistryContext("qa");
+  check("QA saves blank canonical style without name, features, legacy profile or override", () => assert.deepEqual(plain(requests[1].body.patch), { style: { systemPrompt: "" } }));
+  const remote = { ...s.registryItem("a"), style: { systemPrompt: "remote" } };
+  draft.value.style.systemPrompt = "unsaved conflict"; draft.dirty.add("style.systemPrompt");
+  s.rebaseRegistryDraft("a", draft, remote, "r9");
+  check("revision conflict preserves local multi-tab drafts", () => {
+    assert.equal(draft.conflict, true); assert.equal(draft.value.style.systemPrompt, "unsaved conflict"); assert.equal(draft.value.features.chat, false);
+  });
+});
+
+await group("legacy-routines-sparse-defaults", async () => {
+  const { state: s, fields, nodes } = scopedUiRuntime();
+  const value = { version: 1, daily: { schedules: [{ name: "morning", mode: "old", time: "8:30" }, { time: "23:00", enabled: false }] }, hourly: {} };
+  s.routineState.value = structuredClone(value);
+  s.routineState.catalog = [{ id: "daily-0", kind: "daily", windowMinutes: 3, prompt: "effective legacy instruction", scopeStrategy: "old scope", targetLabel: "原路由", senderStrategy: "old router" }, { id: "hourly", kind: "hourly", prompt: "effective hourly default" }];
+  s.renderRoutines();
+  check("routine editors are collapsed by default and preserve explicitly opened entries", () => {
+    const host = nodes.get("routineEditor");
+    const entry = host.children.find((item) => item.dataset?.routineEntry === "daily-0");
+    assert.equal(entry.open, false); entry.open = true; fields.length = 0;
+    s.renderRoutines();
+    assert.equal(host.children.find((item) => item.dataset?.routineEntry === "daily-0").open, true);
+  });
+  check("defaults render without materializing config fields", () => {
+    assert.equal(fields.find((field) => field.path === "windowMinutes").value, 3);
+    assert.equal(fields.find((field) => field.label.startsWith("此时")).value, "effective legacy instruction");
+    assert.equal(fields.find((field) => field.label === "启用定期主人私聊").value, true);
+    assert.deepEqual(plain(s.routineState.value), value); assert.equal(nodes.get("saveRoutinesBtn").disabled, true);
+  });
+  fields.find((field) => field.label.startsWith("此时")).change("prompt", "edited morning");
+  check("editing one prompt submits only that schedule leaf; malformed old time and missing defaults remain untouched", () => {
+    assert.deepEqual(plain(s.routinePatch(s.routineState.value)), { daily: { schedules: [{ id: "daily-0", prompt: "edited morning" }] } });
+    assert.equal(s.routineState.value.daily.schedules[0].time, "8:30"); assert.equal(nodes.get("saveRoutinesBtn").disabled, false);
+  });
+  check("sender reset uses null and cannot co-select account/group", () => {
+    assert.deepEqual(plain(s.routinePatch({ version: 1, hourly: { accountId: null, groupId: null } }, new Set(["hourly.accountId", "hourly.groupId"]))), { hourly: { accountId: null, groupId: null } });
+    assert.throws(() => s.routinePatch({ hourly: { accountId: "a", groupId: "g" } }, new Set(["hourly.accountId"])), /互斥/);
+  });
+  for (const partial of [{ version: 1 }, { version: 1, daily: { schedules: [] } }, { version: 1, hourly: {} }]) {
+    s.routineState.value = partial; s.routineState.dirty = false; s.routineState.dirtyPaths.clear();
+    fields.length = 0; s.renderRoutines();
+    check(`missing routine sources are not created: ${Object.keys(partial).join()}`, () => {
+      assert.deepEqual(plain(s.routinePatch(partial)), {}); assert.equal(fields.some((field) => field.label === "启用每日例行规则"), Boolean(partial.daily));
+      assert.equal(fields.some((field) => field.label === "启用定期主人私聊"), Boolean(partial.hourly));
+    });
+  }
+  check("patch refuses creation or unsupported schedule metadata", () => {
+    assert.throws(() => s.routinePatch({ version: 1 }, new Set(["daily.enabled"])), /缺失/);
+    assert.throws(() => s.routinePatch(value, new Set(["daily.schedules.0.mode"])), /字段/);
+  });
+  s.routineState.dirty = false;
+  s.sensitiveApi = async () => ({ ok: true, revision: "r2", routines: { version: 1 }, catalog: [] });
+  await s.refreshRoutines({ force: true });
+  check("GET version-only routines is a valid empty state", () => { assert.equal(s.routineState.error, ""); assert.deepEqual(plain(s.routineState.value), { version: 1 }); });
+});
+
+await group("legacy-routines-conflict-and-isolated-save", async () => {
+  const { state: s, requests } = scopedUiRuntime();
+  const remote = { version: 1, daily: { schedules: [{ time: "08:30", prompt: "remote" }] }, hourly: { enabled: false } };
+  const draft = structuredClone(remote); draft.daily.schedules[0].prompt = "local";
+  Object.assign(s.routineState, { value: draft, dirty: true, revision: "r1", dirtyPaths: new Set(["daily.schedules.0.prompt"]) });
+  const rules = s.automationRulesDraft;
+  s.sensitiveApi = async (url, method, body) => {
+    requests.push({ url, method, body: structuredClone(body) });
+    if (method === "PATCH") throw Object.assign(new Error("conflict"), { status: 409 });
+    return { ok: true, revision: "r2", routines: remote, catalog: [] };
+  };
+  await s.saveRoutines();
+  check("409 refresh retains local draft and does not replay mutation", () => {
+    assert.equal(s.routineState.value, draft); assert.equal(draft.daily.schedules[0].prompt, "local");
+    assert.equal(s.routineState.conflict, true); assert.equal(s.routineState.revision, "r2"); assert.equal(s.routineState.dirty, true);
+    assert.equal(requests.filter((item) => item.method === "PATCH").length, 1); assert.equal(s.automationRulesDraft, rules);
+  });
+  s.sensitiveApi = async (url, method, body) => {
+    requests.push({ url, method, body: structuredClone(body) });
+    return { ok: true, revision: "r3", routines: { ...remote, daily: { schedules: [{ time: "08:30", prompt: "local" }] } }, catalog: [] };
+  };
+  await s.saveRoutines();
+  check("retry uses refreshed revision and only sparse leaves, preserving rules draft", () => {
+    const saved = requests.filter((item) => item.method === "PATCH").at(-1);
+    assert.deepEqual(plain(saved.body), { expectedRevision: "r2", routines: { daily: { schedules: [{ id: "daily-0", prompt: "local" }] } } });
+    assert.equal(s.routineState.dirty, false); assert.equal(s.routineState.dirtyPaths.size, 0); assert.equal(s.automationRulesDraft, rules); assert(s.dirtyScopes.has("automation"));
+  });
+});
+
+await group("routine-navigation-draft-marker", () => {
+  const { state: s, context, nodes } = scopedUiRuntime();
+  let marked = false;
+  const nav = { dataset: { page: "automation" }, classList: { toggle(_class, value) { marked = value; } } };
+  Object.assign(s, { dirtyScopes: new Set(), currentScope: () => "overview", scopeNames: {}, scopeFeedback: new Map(), conflictedScopes: new Set(), apiCenterConflicted: false });
+  s.document.querySelectorAll = () => [nav];
+  new vm.Script(adminFunction("renderSaveState")).runInContext(context);
+  s.routineState.dirty = true; s.renderSaveState();
+  check("routine-only draft remains visible when leaving automation and rerendering save state", () => {
+    assert.equal(marked, true); assert.match(nodes.get("saveState").textContent, /原有例行规则/);
+    s.renderSaveState(); assert.equal(marked, true);
+  });
+  s.routineState.dirty = false; s.dirtyScopes.add("automation"); s.renderSaveState();
+  check("clearing routine draft does not clear an independent rules draft marker", () => assert.equal(marked, true));
+});
+
+await group("account-save-state-and-self-name", async () => {
+  const { state: s, requests } = scopedUiRuntime();
+  const draft = s.registryDraft("a");
+  check("legacy self-name initially preserves existing account name", () => assert.equal(draft.value.selfName, "甲"));
+  draft.value.displayName = "管理名称"; draft.value.selfName = "我";
+  draft.dirty.add("displayName"); draft.dirty.add("selfName"); draft.dirty.add("style.systemPrompt");
+  check("identity marks only real unsaved edits, not account selection", () => {
+    assert.equal(s.registryDraftStatus("a", "identity").kind, "dirty");
+    assert.equal(s.registryDraftStatus("b", "identity").kind, "saved");
+  });
+  let release;
+  s.registryRequest = async (url, method, body) => { requests.push({ url, method, body: structuredClone(body) }); await new Promise(resolve => { release = resolve; }); return { revision: "r2" }; };
+  const saving = s.saveRegistryPatch("a", s.registryTabKeys("identity"), "基本");
+  check("pending request reports saving without clearing drafts", () => {
+    assert.equal(s.registryDraftStatus("a", "identity").kind, "saving"); assert(draft.dirty.has("selfName"));
+  });
+  release(); await saving;
+  check("successful save separates name/self-name and clears only saved tab", () => {
+    assert.equal(requests[0].body.patch.displayName, "管理名称"); assert.equal(requests[0].body.patch.selfName, "我");
+    assert.equal(s.registryItem("a").displayName, "管理名称"); assert.equal(s.registryItem("a").selfName, "我");
+    assert.equal(s.registryDraftStatus("a", "identity").text, "基本已保存");
+    assert.equal(s.registryDraftStatus("a").kind, "dirty"); assert(draft.dirty.has("style.systemPrompt"));
+    assert(!draft.dirty.has("displayName") && !draft.dirty.has("selfName"));
+  });
+  draft.value.selfName = "另一自称"; draft.dirty.add("selfName");
+  s.registryRequest = async () => { throw new Error("fixture error"); };
+  await assert.rejects(s.saveRegistryPatch("a", s.registryTabKeys("identity"), "基本"), /fixture error/);
+  check("failed saves retain independent self-name draft and show failure", () => {
+    assert.equal(s.registryDraftStatus("a", "identity").kind, "failed"); assert(draft.dirty.has("selfName"));
+    assert.equal(s.registryItem("a").selfName, "我"); assert.equal(draft.value.selfName, "另一自称");
+  });
+  s.registryRequest = async () => { const error = new Error("conflicting revision"); error.status = 409; throw error; };
+  await assert.rejects(s.saveRegistryPatch("a", s.registryTabKeys("identity"), "基本"), /conflicting revision/);
+  check("real HTTP 409 reports conflict instead of generic failure", () => assert.equal(s.registryDraftStatus("a", "identity").kind, "conflict"));
+  draft.conflict = false; draft.saveState = null; draft.value.selfName = "提交的自称";
+  s.registryRequest = async () => { await new Promise(resolve => { release = resolve; }); return { revision: "r3" }; };
+  s.refreshAccountRegistry = async () => s.rebaseRegistryDraft("a", draft, s.registryItem("a"), "r3");
+  const delayed = s.saveRegistryPatch("a", s.registryTabKeys("identity"), "基本");
+  draft.value.selfName = "请求期间继续编辑"; draft.dirty.add("selfName");
+  release(); await delayed;
+  check("edits during a successful save remain drafts without false conflicts", () => {
+    assert.equal(draft.value.selfName, "请求期间继续编辑"); assert.equal(draft.base.selfName, "提交的自称");
+    assert.equal(s.registryItem("a").selfName, "提交的自称"); assert(draft.dirty.has("selfName"));
+    assert.equal(draft.conflict, false); assert.equal(s.registryDraftStatus("a", "identity").kind, "dirty");
+  });
+  check("self-name validation is independent and does not leak into connection saves", () => {
+    s.registryValidate({ displayName: "管理名称", selfName: "" }, ["displayName", "selfName"]);
+    assert.throws(() => s.registryValidate({ selfName: 1 }, ["selfName"]));
+    assert.throws(() => s.registryValidate({ selfName: "字".repeat(101) }, ["selfName"]));
+    assert(!s.registryTabKeys("connection").includes("selfName"));
+    assert(!/\? "正在编辑" : "编辑账号"/.test(businessScript));
+  });
+});
+
+await group("activity-preset-selected-state", () => {
+  const nodes = new Map();
+  const state = { dirtyScopes: new Set(), preservingDirtyFields: false,
+    $: id => {
+      if (!nodes.has(id)) {
+        const classes = new Set(["secondary"]);
+        nodes.set(id, { value: "", checked: false, type: id === "proactive.enabled" ? "checkbox" : id === "behaviorModes.default" || id.startsWith("preset") ? "text" : "number", attributes: {},
+          setAttribute(key, value) { this.attributes[key] = value; }, classList: { toggle(key, value) { value ? classes.add(key) : classes.delete(key); }, contains: key => classes.has(key) } });
+      }
+      return nodes.get(id);
+    }, scopeForElement: () => "qa:behavior", markDirty: scope => state.dirtyScopes.add(scope), toast() {}
+  };
+  const context = vm.createContext(state);
+  new vm.Script(["setVal", "getVal", "activityPresetValues", "renderActivityPresetState", "applyPreset"].map(adminFunction).join("\n")).runInContext(context);
+  for (const [kind, button] of [["normal", "presetNormal"], ["restrained", "presetRestrained"], ["lively", "presetLively"], ["normal", "presetNormal"]]) {
+    state.applyPreset(kind);
+    check(`${kind} button, mode, values, sliders and dirty scope agree`, () => {
+      assert.equal(state.getVal("behaviorModes.default"), kind);
+      for (const [id, value] of Object.entries(state.activityPresetValues(kind))) assert.equal(state.getVal(id), value);
+      assert.equal(state.getVal("trigger.activeProbability.slider"), state.getVal("trigger.activeProbability"));
+      assert.equal(state.getVal("proactive.probability.slider"), state.getVal("proactive.probability"));
+      for (const id of ["presetNormal", "presetRestrained", "presetLively"]) {
+        assert.equal(state.$(id).attributes["aria-pressed"], String(id === button));
+        assert.equal(state.$(id).classList.contains("secondary"), id !== button);
+      }
+      assert.match(state.$("activityPresetState").textContent, /未保存/);
+    });
+  }
+  state.preservingDirtyFields = true;
+  for (const [id, value] of Object.entries(state.activityPresetValues("lively"))) state.setVal(id, value);
+  state.renderActivityPresetState();
+  check("automatic refresh retains pending preset and matching highlight", () => {
+    assert.equal(state.getVal("behaviorModes.default"), "normal"); assert.equal(state.$("presetNormal").attributes["aria-pressed"], "true");
+  });
+  state.preservingDirtyFields = false; state.$("trigger.activeCooldownMs").value = 123456; state.renderActivityPresetState();
+  check("custom parameters are labeled without silently resetting the mode", () => {
+    assert.match(state.$("activityPresetState").textContent, /参数已自定义/); assert.equal(state.getVal("behaviorModes.default"), "normal");
+  });
+  state.dirtyScopes.clear(); state.renderActivityPresetState();
+  check("saved state is distinct from pending draft", () => assert.match(state.$("activityPresetState").textContent, /已同步/));
+});
+
+await group("api-account-summary-refresh", async () => {
+  const center = sampleCenter(); center.profiles[0].model = "mimo-live";
+  center.profiles.push({ ...center.profiles[0], id: "p2", model: "deepseek-live" });
+  const host = { children: [], textContent: "", replaceChildren() { this.children = []; this.textContent = ""; }, appendChild(node) { this.children.push(node); } };
+  let revision = "r1", override = "p1", failed = false, groupPolicy = false;
+  const state = {
+    structuredClone, apiCenterSaved: center, cfg: { revision }, dirtyScopes: new Set(), conflictedScopes: new Set(),
+    registryState: { items: [], groups: [], operations: new Map(), drafts: new Map(), contexts: {}, epoch: 0, modelLoadedAt: 0 },
+    $: () => host, document: { createElement: () => ({ children: [], appendChild(node) { this.children.push(node); } }) },
+    api: async (url) => {
+      if (failed) throw new Error("offline");
+      if (url.startsWith("/api/accounts")) return { revision, items: [{ id: "a", displayName: "A", modelBindings: { chat: override } }], failoverGroups: groupPolicy ? [{ id: "g", name: "共享策略", memberIds: ["a"], policy: { modelBindings: { chat: "p1" } } }] : [] };
+      return { revision };
+    },
+    sensitiveApi: async () => ({ center }),
+    registryItem(id) { return state.registryState.items.find((item) => item.id === (id || state.registryState.selected)); },
+    registryGroup(id) { return state.registryState.groups.find((item) => item.memberIds.includes(id)); },
+    registryEffective(item) { return { ...item, ...state.registryGroup(item.id)?.policy }; },
+    fillConfig: () => {}, renderAutomationTargetPicker: () => {}, renderRegistryLists: () => {},
+    renderRegistryEditor: () => {}, renderRegistryContexts: () => {}, renderRegistrySaveState: () => {}
+  };
+  const context = vm.createContext(state);
+  new vm.Script(["apiBoundPlan", "renderApiAccountModels", "refreshAccountRegistry"].map(adminFunction).join("\n")).runInContext(context);
+  const text = (node) => [node.textContent || "", ...(node.children || []).map(text)].join(" ");
+  await state.refreshAccountRegistry();
+  check("saved account summary follows first registry load", () => assert.match(text(host), /mimo-live/));
+  revision = "r2"; override = "p2"; await state.refreshAccountRegistry();
+  check("account refresh updates saved summary without opening API editor", () => assert.match(text(host), /问答：Plan · deepseek-live/));
+  revision = "r3"; groupPolicy = true; await state.refreshAccountRegistry();
+  check("group policy is labeled shared, not independent account override", () => {
+    assert.match(text(host), /接管组「共享策略」共享/); assert.doesNotMatch(text(host), /账号单独指定/);
+    assert.match(text(host), /问答：Plan · mimo-live/);
+  });
+  failed = true; await state.refreshAccountRegistry();
+  check("failed account refresh removes stale model claims", () => {
+    assert.match(text(host), /刷新失败/); assert.doesNotMatch(text(host), /mimo-live|deepseek-live/);
+  });
 });
 
 console.log(JSON.stringify({ ok: true, assertions, groups, baselineIds: legacyBusinessIds.length,

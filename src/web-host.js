@@ -485,7 +485,9 @@ function proxy(req, res) {
   // The public host validates the browser Origin before proxying. The bridge
   // independently checks its own loopback origin for credential mutations.
   if (req.headers.origin && (/^\/api\/voice\/(?:credential|test)(?:\?|$)/.test(req.url || "")
-    || /^\/api\/api-center(?:\/|\?|$)/.test(req.url || ""))) {
+    || /^\/api\/api-center(?:\/|\?|$)/.test(req.url || "")
+    || /^\/api\/(?:accounts|account-groups|tasks)(?:\/|\?|$)/.test(req.url || "")
+    || /^\/api\/automation\/(?:routines|accounts(?:\/[^/?]+)?)(?:\?|$)/.test(req.url || ""))) {
     headers.origin = `http://127.0.0.1:${childPort}`;
   }
   const upstream = http.request({ hostname: "127.0.0.1", port: childPort, method: req.method, path: req.url, headers }, (response) => {

@@ -1,14 +1,14 @@
 // Only route explicit speech requests. Discussion of the voice feature stays in chat.
 const TEST_SPEECH = "语音测试成功，我可以给你发语音条了。";
 const JOKE_SPEECH = "我本来想讲个冷笑话，结果空调说：这活儿它熟。";
-const GREETING_SPEECH = "嗨，我是小跟班！今天过得怎么样？";
+const GREETING_SPEECH = "嗨，今天过得怎么样？";
 
 function stripLeadingBotAddress(text, addressNames) {
   let input = text.trim().replace(/^(?:\[引用消息\]\s*)+/u, "").trim();
   const names = [...new Set(addressNames.map((name) => String(name || "").trim()).filter(Boolean))]
     .sort((a, b) => b.length - a.length);
   for (const name of names) {
-    const prefix = `@${name}`;
+    const prefix = input.startsWith(`@${name}`) ? `@${name}` : name;
     if (input.startsWith(prefix) && (!input[prefix.length] || /[\s,，:：]/u.test(input[prefix.length]))) {
       input = input.slice(prefix.length).replace(/^[\s,，:：]+/u, "").trim();
       break;
@@ -24,7 +24,7 @@ export function detectVoiceReplyIntent(text, { addressed = false, addressNames =
   if (/(?:怎么|如何|为什么|能不能|可不可以|是否|支持|失败|不能|无法|问题|配置|设置).{0,12}(?:发|发送|回复|生成)?语音/.test(input)
     || /(?:语音识别|语音转写|语音功能|语音配置|语音消息.{0,6}怎么)/.test(input)) return null;
 
-  const request = input.replace(/^(?:(?:请|麻烦|帮我|给我|你|小跟班)[，,\s]*)/u, "");
+  const request = input.replace(/^(?:(?:请|麻烦|帮我|给我|你)[，,\s]*)/u, "");
   if (/^(?:用语音|发语音|语音回复)(?:吧|呀|啊|呗)?[。！!\s]*$/u.test(request)) {
     return { kind: "followup", text: "" };
   }

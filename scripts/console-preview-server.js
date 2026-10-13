@@ -1,5 +1,5 @@
 // Isolated beta.6 console fixture. Only config.example.json and the three fixed
-// public assets are read. No application imports, state IO, subprocesses, outbound
+// public assets are read. Only pure automation helpers are imported; no state IO, subprocesses, outbound
 // services, credentials, model calls or QQ sends. Every change dies on exit.
 // Start: node scripts/console-preview-server.js (default loopback port 6328).
 // App attachment: give BOTH processes the same disposable HERMES_QQ_HOME;
@@ -12,6 +12,7 @@ import path from "node:path";
 import vm from "node:vm";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { normalizeAccountAutomation, automationForAccount, patchAccountAutomation } from "../src/account-automation.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const fixtureVersion = "api-shape-v2";
@@ -101,20 +102,26 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
     sendTypes: { text: true, image: true, record: true, video: false, file: true },
     scope: { groups: true, private: true, groupMode: "allowlist", groupIds: ["20001", "20002"] },
     modelBindings: { chat: "", task: "", vision: "", asr: "", tts: "", search: "" },
-    voice: { mode: "inherit", preset: "mimo_default" }, styleProfileId: "legacy", promptOverride: "", behaviorMode: "balanced"
+    voice: { mode: "inherit", preset: "mimo_default" }, style: { systemPrompt: "" }, styleProfileId: "legacy", promptOverride: "", behaviorMode: "normal"
   });
   config.accounts = { version: 2, topology: "collaboration", items: [
-    account("primary", "10001", "预览 · 小跟班"), account("standby-a", "10002", "预览 · 小跟班 2")
+    account("primary", "10001", "演示助手 A"), account("standby-a", "10002", "演示助手 B")
   ], failoverGroups: [], failover: { enabled: false }, diagnostics: { enabled: false } };
   config.privateChats = { enabled: true, targetUsers: ["10001", "10002"], ownerUserIds: ["10001"], ownerSystem: "虚构 QA 主人，无真实权限。" };
   config.targetGroups = ["20001", "20002"];
+  config.accounts.items[0].style = { systemPrompt: "虚构小跟班：自然简短，不编造能力。定时任务单独配置。" };
   config.commands = { enabled: true, adminUserIds: ["10001"] };
   config.taskMode = { ...config.taskMode, enabled: true, shadowMode: true, ownerUserIds: ["10001"], workspaceBaseDir: "/preview/tasks" };
   config.chatArchive = { ...config.chatArchive, enabled: true, baseDir: "/preview/chat-archive" };
   config.adminNotifications = { ...config.adminNotifications, enabled: false, recipients: ["10001"] };
   config.loginRecovery = { enabled: false };
-  config.hourlyChat = { enabled: false, ownerUserIds: ["10001"] };
-  config.ai = { ...config.ai, command: "preview-disabled", args: [], provider: "deepseek", model: "deepseek-v4-flash", baseUrl: "", apiKeyEnv: "PREVIEW_NOT_CONFIGURED" };
+  config.dailyMessages = { enabled: true, windowMinutes: 5, checkIntervalMs: 60000, requireKnownGroup: true, schedules: [
+    { name: "morning", mode: "morning", enabled: true, time: "08:30", prompt: "虚构早间问候，不实际发送。", fixturePreserved: "morning-metadata" },
+    { name: "evening", mode: "evening", enabled: true, time: "23:00", prompt: "虚构晚间问候，不实际发送。" },
+    { name: "summary", mode: "summary", enabled: true, time: "23:30", requireHistory: true, prompt: "虚构每日讨论总结，不实际发送。" }
+  ] };
+  config.hourlyChat = { enabled: false, ownerUserIds: ["10001"], checkIntervalMs: 60000, prompt: "虚构整点私聊，保持关闭。" };
+  config.ai = { ...config.ai, command: "preview-disabled", args: [], provider: "xiaomi", model: "mimo-v2.6-flash", baseUrl: "", apiKeyEnv: "PREVIEW_NOT_CONFIGURED" };
   config.vision = { ...config.vision, provider: "xiaomi", model: "mimo-v2.5" };
   config.voice = { ...config.voice, enabled: true, credentialSource: "existing", apiKeyEnv: "PREVIEW_NOT_CONFIGURED", apiKeyEnvPresent: false, keychainStored: false };
   config.automation = { enabled: true, rules: [
@@ -132,10 +139,11 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
     { id: "preview-mimo", name: "MiMo · 演示连接", provider: "xiaomi", baseUrl: "", credentialSource: "existing", apiKeyEnv: "PREVIEW_NOT_CONFIGURED" }
   ], profiles: [
     { id: "preview-chat", name: "日常问答", kind: "chat", connectionId: "preview-chat", model: "deepseek-v4-flash", command: "preview-disabled", args: [], reasoningEffort: "medium", timeoutMs: 60000 },
+    { id: "preview-mimo-chat", name: "MiMo 问答", kind: "chat", connectionId: "preview-mimo", model: "mimo-v2.6-flash", command: "preview-disabled", args: [], reasoningEffort: "none", timeoutMs: 60000 },
     { id: "preview-vision", name: "图像理解", kind: "vision", connectionId: "preview-mimo", model: "mimo-v2.5", toolsets: "vision" },
     { id: "preview-asr", name: "语音识别", kind: "asr", connectionId: "preview-mimo", model: "mimo-v2.5-asr" },
     { id: "preview-tts", name: "自然语音", kind: "tts", connectionId: "preview-mimo", model: "mimo-v2.5-tts" }
-  ], bindings: { chat: "preview-chat", task: "preview-chat", vision: "preview-vision", asr: "preview-asr", tts: "preview-tts" },
+  ], bindings: { chat: "preview-mimo-chat", task: "inherit-chat", vision: "preview-vision", asr: "preview-asr", tts: "preview-tts" },
   searchProfiles: [
     { id: "preview-search", name: "MiMo · 演示联网检索", provider: "mimo-web-search", providerOrder: ["mimo-web-search"], connectionId: "preview-mimo", model: "mimo-v2.5", timeoutMs: 30000, maxResults: 4, maxKeyword: 2, forceSearch: true },
     { id: "preview-google", name: "Google · 演示来源", provider: "google", providerOrder: ["google", "baidu"] },
@@ -160,6 +168,24 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
     capabilities: Object.fromEntries(["identity", "onebot", "api", "groupSend", "groupReceive", "privateSend", "privateReceive"].map((key) => [key, { status: "ok", reason: "虚构 QA 证据", simulated: true }]))
   }));
   const registry = () => ({ ok: true, preview: true, revision: revision(), items: copy(config.accounts.items), failoverGroups: copy(config.accounts.failoverGroups), statuses: statuses() });
+  const effectiveStyle = (item) => {
+    const policy = config.accounts.failoverGroups.find((group) => group.memberIds.includes(item.id))?.policy;
+    const source = { ...item, ...policy };
+    if (Object.hasOwn(source, "style")) return copy(source.style);
+    const profiles = config.styleProfiles?.profiles || [];
+    const profile = profiles.find((entry) => entry.id === (source.styleProfileId || config.styleProfiles?.activeId || "legacy")) || profiles.find((entry) => entry.id === "legacy");
+    return { systemPrompt: source.promptOverride?.trim() ? source.promptOverride : profile?.systemPrompt || config.prompt?.system || "" };
+  };
+  const routineFields = (value, keys) => Object.fromEntries(keys.filter((key) => Object.hasOwn(value, key)).map((key) => [key, copy(value[key])]));
+  const routinesView = () => ({ ok: true, preview: true, revision: revision(), routines: { version: 1,
+    daily: { ...routineFields(config.dailyMessages, ["enabled", "windowMinutes", "requireKnownGroup", "checkIntervalMs", "accountId", "groupId"]), schedules: config.dailyMessages.schedules.map((item) => routineFields(item, ["name", "mode", "time", "prompt", "enabled", "requireHistory"])) },
+    hourly: routineFields(config.hourlyChat, ["enabled", "prompt", "ownerUserIds", "checkIntervalMs", "accountId", "groupId"]) }, catalog: [
+    ...config.dailyMessages.schedules.map((item, index) => ({ ...copy(item), id: `daily-${index}`, index, kind: "daily", title: ["早间问候", "晚间问候", "每日总结"][index], scopeStrategy: "原目标群 20001、20002；保留 quiet 检查", targetLabel: config.dailyMessages.groupId || config.dailyMessages.accountId || "原路由", senderStrategy: "发送者仍由原执行器解析；不改变群范围" })),
+    { id: "hourly", kind: "hourly", enabled: config.hourlyChat.enabled, prompt: config.hourlyChat.prompt, scopeStrategy: "原私聊对象 10001", targetLabel: config.hourlyChat.groupId || config.hourlyChat.accountId || "原路由", senderStrategy: "保留原私聊路由，不新增接收人" }
+  ] });
+  let scopedAutomation = null;
+  const scopedConfig = () => scopedAutomation = normalizeAccountAutomation(scopedAutomation ? { ...config, automation: scopedAutomation.automation } : config);
+  const scopedView = id => ({ ok: true, preview: true, revision: revision(), accountId: id, ...automationForAccount(scopedConfig(), id) });
   const configView = () => ({ ...copy(config), preview: true, revision: revision(), readonly: { listen: { host: "127.0.0.1", port: 0, path: "/preview-no-onebot" }, control: { host: "127.0.0.1", port: server.address()?.port }, configPath: "/preview/config.json" } });
   const centerView = () => ({ ok: true, preview: true, center: copy(center), revision: centerRevision(), credentialStatus: Object.fromEntries(center.connections.map((item) => [item.id, "missing"])) });
   const health = () => ({
@@ -212,6 +238,13 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
     if (get && rawPath === "/api/admin/session") return reply({ ok: true, token: "preview-session-not-a-credential", preview: true });
     if (get && rawPath === "/api/config") return reply(configView());
     if (get && rawPath === "/api/accounts") return reply(registry());
+    const scopedAutomationMatch = rawPath.match(/^\/api\/automation\/accounts\/([A-Za-z0-9_-]+)$/);
+    if (get && scopedAutomationMatch) {
+      if (req.headers["x-hermes-qq-admin"] !== "preview-session-not-a-credential") return reply({ ok: false, error: "admin_session_required" }, 403);
+      if (!config.accounts.items.some(item => item.id === scopedAutomationMatch[1] && !item.archived)) return reply({ ok: false, error: "account_not_found" }, 404);
+      return reply(scopedView(scopedAutomationMatch[1]));
+    }
+    if (get && rawPath === "/api/automation/routines") return req.headers["x-hermes-qq-admin"] === "preview-session-not-a-credential" ? reply(routinesView()) : reply({ ok: false, error: "admin_session_required" }, 403);
     if (get && rawPath === "/api/api-center") return reply(centerView());
     if (get && rawPath === "/api/status") return reply({ ok: true, preview: true, serverTime: Date.now(), health: health(), config: configView(), showQrcode: false, qrcodeExists: false, qrcode: { exists: false }, primaryProtocol: "snowluma", logs: { tail: "[PREVIEW] 两个虚构账号 · 内存草稿 · 不执行模型或 QQ 操作\n[PREVIEW] 控制台 UI QA 就绪", errorTail: "" } });
     if (get && rawPath === "/api/tasks") return reply({ ok: true, tasks, running: 0, queued: 0 });
@@ -237,7 +270,7 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
     if (!get && /\/(?:credential|credentials)(?:\/|$)/.test(rawPath)) { req.resume(); return reply({ ok: false, preview: true, error: "预览不接收真实凭据，请使用虚构数据" }, 403); }
     if (get && rawPath.startsWith("/api/")) return reply({ ok: true, preview: true, empty: true, unsupported: true, items: [], tasks: [], conversations: [], artifacts: [], data: {} });
     if (get) return reply({ ok: false, preview: true, error: "not_found" }, 404);
-    const knownMutation = ["/api/preview/conflict", "/api/config", "/api/api-center", "/api/archive/clear", "/api/memory/integrity/rebuild", "/api/host/autostart", "/api/host/backup", "/api/host/backup/cancel", "/send"].includes(rawPath)
+    const knownMutation = Boolean(scopedAutomationMatch) || ["/api/preview/conflict", "/api/config", "/api/api-center", "/api/automation/routines", "/api/archive/clear", "/api/memory/integrity/rebuild", "/api/host/autostart", "/api/host/backup", "/api/host/backup/cancel", "/send"].includes(rawPath)
       || /^\/api\/(?:accounts|account-groups)(?:\/|$)/.test(rawPath)
       || /^\/api\/tasks\/[^/]+\/(?:cancel|resume|supplement|grant)$/.test(rawPath)
       || /^\/api\/host\/(?:bridge\/(?:start|stop|restart)|backups\/[^/]+)$/.test(rawPath)
@@ -247,7 +280,37 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
     if (!/^application\/json(?:\s*;|$)/i.test(req.headers["content-type"] || "")) { req.resume(); return reply({ ok: false, preview: true, empty: true, error: "preview_json_only" }, 415); }
     const body = await jsonBody(req);
     const simulated = { ok: true, preview: true, simulated: true, sentToQq: false, message: "仅内存模拟，未调用真实服务" };
+    if (scopedAutomationMatch && req.method === "PATCH") {
+      if (req.headers["x-hermes-qq-admin"] !== "preview-session-not-a-credential") return reply({ ok: false, error: "admin_session_required" }, 403);
+      if (body.expectedRevision !== revision()) return reply({ ok: false, error: "账号自动化配置已更新", revision: revision() }, 409);
+      try {
+        const { expectedRevision, ...patch } = body;
+        scopedAutomation = patchAccountAutomation(scopedConfig(), scopedAutomationMatch[1], patch);
+        config.accounts = copy(scopedAutomation.accounts); version++;
+        return reply({ ...simulated, ...scopedView(scopedAutomationMatch[1]) });
+      } catch (error) { return reply({ ok: false, error: error.message }, 400); }
+    }
     if (rawPath === "/api/preview/conflict" && req.method === "POST") { version += 1; return reply({ ...simulated, revision: revision() }); }
+    if (rawPath === "/api/automation/routines" && req.method === "PATCH") {
+      if (req.headers["x-hermes-qq-admin"] !== "preview-session-not-a-credential") return reply({ ok: false, error: "admin_session_required" }, 403);
+      if (body.expectedRevision !== revision()) return reply({ ok: false, revision: revision(), error: "例行规则修订已变化" }, 409);
+      const routines = body.routines;
+      if (!object(routines) || Object.keys(routines).some((key) => !["daily", "hourly"].includes(key))) return reply({ ok: false, error: "invalid_routines" }, 400);
+      const nextDaily = copy(config.dailyMessages), nextHourly = copy(config.hourlyChat);
+      for (const [kind, next, keys] of [["daily", nextDaily, ["enabled", "windowMinutes", "schedules", "accountId", "groupId"]], ["hourly", nextHourly, ["enabled", "prompt", "accountId", "groupId"]]]) {
+        const patch = routines[kind]; if (!patch) continue;
+        if (!object(patch) || Object.keys(patch).some((key) => !keys.includes(key))) return reply({ ok: false, error: "invalid_routine_fields" }, 400);
+        if (patch.accountId && patch.groupId || patch.accountId && !config.accounts.items.some((item) => item.id === patch.accountId && !item.archived) || patch.groupId && !config.accounts.failoverGroups.some((group) => group.id === patch.groupId)) return reply({ ok: false, error: "invalid_routine_target" }, 400);
+        if (patch.schedules) {
+          if (!Array.isArray(patch.schedules) || patch.schedules.length > next.schedules.length || new Set(patch.schedules.map((item) => item?.id)).size !== patch.schedules.length || patch.schedules.some((item) => !object(item) || Object.keys(item).some((key) => !["id", "enabled", "time", "prompt", "requireHistory"].includes(key)) || !/^daily-(0|[1-9][0-9]*)$/.test(item.id) || !next.schedules[Number(item.id.slice(6))] || item.time !== undefined && !/^([01]\d|2[0-3]):[0-5]\d$/.test(item.time))) return reply({ ok: false, error: "invalid_routine_schedules" }, 400);
+          for (const { id, ...edit } of patch.schedules) Object.assign(next.schedules[Number(id.slice(6))], copy(edit));
+        }
+        Object.assign(next, copy(Object.fromEntries(Object.entries(patch).filter(([key]) => key !== "schedules"))));
+        for (const key of ["accountId", "groupId"]) if (next[key] === null) delete next[key];
+      }
+      config.dailyMessages = nextDaily; config.hourlyChat = nextHourly; version += 1;
+      return reply({ ...simulated, ...routinesView() });
+    }
     if (rawPath === "/api/config" && req.method === "PATCH") {
       if (body.expectedRevision !== revision()) return reply({ ok: false, preview: true, revision: revision(), error: "配置已在别处更新，请保留草稿并刷新后重试" }, 409);
       const next = merge(config, body);
@@ -280,7 +343,16 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
         if (!id && req.method === "POST" && object(body.account)) {
           const nextId = body.account.id || `preview-account-${config.accounts.items.length + 1}`;
           if (config.accounts.items.some((entry) => entry.id === nextId)) return reply({ ok: false, error: "duplicate_account" }, 409);
-          config.accounts.items.push(merge(account(nextId, "10002", "预览 · 新账号"), body.account));
+          const { copyStyleFromAccountId, ...input } = body.account;
+          const source = config.accounts.items.find((entry) => entry.id === copyStyleFromAccountId && !entry.archived);
+          if (copyStyleFromAccountId !== undefined && !source) return reply({ ok: false, error: "unknown_style_source" }, 400);
+          const base = account(nextId, "", "预览 · 新账号");
+          base.enabled = false; base.features = { chat: true, task: false, proactive: false, automation: false, webSearch: true, vision: true, asr: false, learning: false };
+          base.sendTypes = { text: true, image: false, record: false, video: false, file: false }; base.scope = { groups: true, private: true, groupMode: "all", groupIds: [] };
+          base.style = source ? effectiveStyle(source) : { systemPrompt: "" };
+          const created = merge(base, input);
+          config.accounts.items.push(created); version += 1; syncLegacy();
+          return reply({ ...simulated, ...registry(), account: copy(created) });
         } else if (!item) return reply({ ok: false, error: "unknown_preview_account" }, 404);
         else if (req.method === "PATCH" && object(body.patch)) Object.assign(item, merge(item, body.patch));
         else if (req.method === "DELETE") item.archived = true;
@@ -294,7 +366,8 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
           return reply({ ...simulated, ...registry(), operationId: operation.id, operation });
         }
       }
-      version += 1; syncLegacy(); return reply({ ...simulated, ...registry(), probe: { loginInfo: { user_id: "10001", nickname: "虚构 QA 身份" } } });
+      const probedId = accountRoute?.[1]; const probed = config.accounts.items.find((entry) => entry.id === probedId);
+      version += 1; syncLegacy(); return reply({ ...simulated, ...registry(), account: probed ? statuses().find((entry) => entry.id === probedId) : undefined, probe: { loginInfo: { user_id: probed?.qq || "10002", nickname: "虚构 QA 身份" } } });
     }
     const taskAction = rawPath.match(/^\/api\/tasks\/([^/]+)\/(cancel|resume|supplement|grant)$/);
     if (taskAction) {
@@ -356,7 +429,8 @@ function verifyRenderShapes(source, fixtures, check) {
   };
   const context = vm.createContext({
     structuredClone, $: element, document: { createElement: (tag) => new Element(tag) },
-    cfg: fixtures.config, apiCenterDraft: copy(fixtures.center.center), apiCredentialStatus: fixtures.center.credentialStatus,
+    cfg: fixtures.config, apiCenterDraft: copy(fixtures.center.center), apiCenterSaved: copy(fixtures.center.center), apiCredentialStatus: fixtures.center.credentialStatus,
+    registryState: { loaded: true, items: copy(fixtures.config.accounts.items), groups: [], error: "" },
     selectedApiConnection: "", selectedApiProfile: "", selectedApiSearch: "", apiTests: {},
     taskData: fixtures.tasks, reviewerData: fixtures.reviewer, memoryIntegrityData: fixtures.integrity,
     memoryData: fixtures.memory, selectedGroupId: "20001", selectedGroupMemory: fixtures.group,
@@ -365,7 +439,7 @@ function verifyRenderShapes(source, fixtures, check) {
     desktopStatusData: fixtures.host, localBackups: fixtures.backups, backupProgress: null, legacyProjectPath: "",
     fmtAgo: () => "预览时间", formatBytes: (value) => `${value} B`, esc: (value) => String(value ?? "")
   });
-  const names = ["apiSelectOptions", "apiCurrentConnection", "apiCurrentProfile", "apiCurrentSearch", "renderApiConnection", "renderApiProfile", "renderApiSearch", "renderApiCapabilityCards", "renderTasks", "renderReviewerAndIntegrity", "renderGroups", "renderMemoryDetail", "renderArchive", "renderBackupProgress", "renderDesktopBackup", "renderLogs", "renderSocialPlanner"];
+  const names = ["apiSelectOptions", "apiCurrentConnection", "apiCurrentProfile", "apiCurrentSearch", "apiBoundPlan", "apiDefaultEditorProfile", "registryGroup", "registryEffective", "renderApiConnection", "renderApiProfile", "renderApiSearch", "renderApiCapabilityCards", "renderApiAccountModels", "renderTasks", "renderReviewerAndIntegrity", "renderGroups", "renderMemoryDetail", "renderArchive", "renderBackupProgress", "renderDesktopBackup", "renderLogs", "renderSocialPlanner"];
   for (const name of names) {
     const start = source.indexOf(`    function ${name}(`);
     assert.ok(start >= 0, `actual admin renderer exists: ${name}`);
@@ -375,6 +449,16 @@ function verifyRenderShapes(source, fixtures, check) {
     vm.runInContext(source.slice(start, start + 1 + next.index), context);
   }
   context.renderApiConnection();
+  context.renderApiProfile();
+  check(context.selectedApiConnection === "preview-mimo");
+  check(context.selectedApiProfile === "preview-mimo-chat");
+  // Manual selection is an editor choice, never a live binding change.
+  context.selectedApiConnection = "preview-chat"; context.selectedApiProfile = "preview-chat";
+  context.renderApiConnection(); context.renderApiProfile();
+  check(context.selectedApiConnection === "preview-chat" && context.selectedApiProfile === "preview-chat");
+  check(context.apiCenterSaved.bindings.chat === "preview-mimo-chat");
+  context.apiCenterDraft.profiles[0].name = "保留未保存的草稿";
+  context.renderApiProfile(); check(element("apiProfileName").value === "保留未保存的草稿");
   for (const profile of context.apiCenterDraft.profiles) { context.selectedApiProfile = profile.id; context.renderApiProfile(); check(element("apiProfileModel").value === profile.model); }
   for (const search of context.apiCenterDraft.searchProfiles) {
     context.selectedApiSearch = search.id; context.renderApiSearch();
@@ -384,6 +468,34 @@ function verifyRenderShapes(source, fixtures, check) {
   context.renderApiCapabilityCards();
   check(element("apiCapabilityCards").children.length === 6);
   check(element("apiBindingRows").children.length === 6);
+  const cardText = (node) => [node.textContent, ...node.children.map(cardText)].join(" ");
+  const chatCard = () => element("apiCapabilityCards").children[0];
+  check(chatCard().children[1].textContent === "MiMo 问答 · mimo-v2.6-flash");
+  check(element("apiCapabilityCards").children[1].children[1].textContent.includes("mimo-v2.6-flash"));
+  context.apiCenterDraft.bindings.chat = "preview-chat";
+  context.renderApiCapabilityCards();
+  check(chatCard().children[1].textContent.includes("mimo-v2.6-flash"));
+  check(cardText(chatCard()).includes("未保存草稿：保留未保存的草稿 · deepseek-v4-flash"));
+  context.apiCenterDraft.bindings.chat = "preview-mimo-chat";
+  const mimo = context.apiCenterDraft.profiles.find((item) => item.id === "preview-mimo-chat");
+  mimo.model = "unsaved-model"; context.renderApiCapabilityCards();
+  check(chatCard().children[1].textContent.includes("mimo-v2.6-flash"));
+  check(cardText(chatCard()).includes("未保存草稿：MiMo 问答 · unsaved-model"));
+  mimo.model = "mimo-v2.6-flash";
+  const first = context.registryState.items[0]; first.modelBindings = { chat: "preview-chat" };
+  context.renderApiAccountModels();
+  check(cardText(element("apiAccountModels").children[0]).includes("deepseek-v4-flash"));
+  check(context.apiBoundPlan(context.apiCenterSaved, "task", first.modelBindings).profile.id === "preview-chat");
+  context.apiCenterSaved.bindings.task = "preview-mimo-chat";
+  check(context.apiBoundPlan(context.apiCenterSaved, "task", first.modelBindings).profile.id === "preview-mimo-chat");
+  context.apiCenterSaved.bindings.task = "inherit-chat";
+  context.registryState.groups = [{ memberIds: [first.id], policy: { modelBindings: { chat: "preview-mimo-chat" } } }];
+  context.renderApiAccountModels();
+  check(!cardText(element("apiAccountModels").children[0]).includes("deepseek-v4-flash"));
+  context.registryState.error = "offline"; context.renderApiAccountModels();
+  check(element("apiAccountModels").textContent.includes("刷新失败"));
+  context.registryState.error = ""; context.registryState.groups = [];
+  context.apiCenterDraft = copy(context.apiCenterSaved); context.renderApiCapabilityCards();
   for (const capability of ["chat", "task", "vision", "asr", "tts", "search"]) {
     const binding = elements.get(`apiBinding-${capability}`);
     check(binding.selectedOptions.length === 1);
@@ -467,6 +579,42 @@ async function selfTest() {
     check((await request("/health")).data.instanceId.startsWith("console-preview-"));
     check((await request("/health")).data.fixtureVersion === fixtureVersion);
     check((await request("/api/host/backup", "POST", { type: "safe" })).data.simulated);
+    const beforeCreate = await load("/api/accounts");
+    const blank = await request("/api/accounts", "POST", { expectedRevision: beforeCreate.revision, account: { displayName: "从零账号", enabled: false, style: { systemPrompt: "" } } });
+    check(blank.status === 200 && blank.data.account.id && blank.data.account.style.systemPrompt === "" && blank.data.account.enabled === false);
+    const copied = await request("/api/accounts", "POST", { expectedRevision: blank.data.revision, account: { displayName: "复制风格账号", copyStyleFromAccountId: "primary" } });
+    check(copied.status === 200 && copied.data.account.style.systemPrompt === beforeCreate.items[0].style.systemPrompt);
+    check(copied.data.account.displayName === "复制风格账号" && copied.data.account.features.automation === false && copied.data.account.sendTypes.record === false && copied.data.account.scope.groupMode === "all");
+    const changedStyle = await request("/api/accounts/primary", "PATCH", { expectedRevision: copied.data.revision, patch: { style: { systemPrompt: "source changed later" } } });
+    check(changedStyle.status === 200 && changedStyle.data.items.find((item) => item.id === copied.data.account.id).style.systemPrompt === copied.data.account.style.systemPrompt);
+    const blankAgain = await request(`/api/accounts/${copied.data.account.id}`, "PATCH", { expectedRevision: changedStyle.data.revision, patch: { style: { systemPrompt: "" } } });
+    check(blankAgain.status === 200 && blankAgain.data.items.find((item) => item.id === copied.data.account.id).style.systemPrompt === "");
+    const admin = { "x-hermes-qq-admin": "preview-session-not-a-credential" };
+    check((await request("/api/automation/routines")).status === 403);
+    const routines = (await request("/api/automation/routines", "GET", undefined, admin)).data;
+    check(routines.ok && routines.routines.daily.schedules.length === 3 && routines.routines.hourly.enabled === false && routines.catalog.length === 4);
+    check(!Object.hasOwn(routines.routines.daily.schedules[0], "fixturePreserved"));
+    const rulesBefore = (await load("/api/config")).automation.rules;
+    const routineEdit = { daily: { schedules: [{ id: "daily-0", prompt: "updated virtual morning" }], accountId: "primary", groupId: null } };
+    check((await request("/api/automation/routines", "PATCH", { expectedRevision: routines.revision, routines: routineEdit })).status === 403);
+    const updated = await request("/api/automation/routines", "PATCH", { expectedRevision: routines.revision, routines: routineEdit }, admin);
+    check(updated.status === 200 && updated.data.routines.daily.schedules[0].prompt === "updated virtual morning" && updated.data.routines.daily.schedules[0].time === "08:30");
+    check(updated.data.routines.hourly.enabled === false && updated.data.routines.daily.accountId === "primary" && !Object.hasOwn(updated.data.routines.daily, "groupId"));
+    const rawConfig = await load("/api/config");
+    check(rawConfig.dailyMessages.schedules[0].fixturePreserved === "morning-metadata" && JSON.stringify(rawConfig.automation.rules) === JSON.stringify(rulesBefore));
+    check((await request("/api/automation/routines", "PATCH", { expectedRevision: routines.revision, routines: routineEdit }, admin)).status === 409);
+    check((await request("/api/automation/routines", "PATCH", { expectedRevision: updated.data.revision, routines: { daily: { schedules: [{ id: "daily-0", mode: "overwrite" }] } } }, admin)).status === 400);
+    const ownedA = (await request("/api/automation/accounts/primary", "GET", undefined, admin)).data;
+    const ownedB = (await request("/api/automation/accounts/standby-a", "GET", undefined, admin)).data;
+    check(ownedA.owner.key === "account:primary" && ownedA.routines.daily.schedules.length === 3);
+    check(ownedB.owner.key === "account:standby-a" && !ownedB.routines.daily && !ownedB.routines.hourly);
+    check((await request("/api/automation/accounts/primary")).status === 403);
+    const ownedSave = await request("/api/automation/accounts/primary", "PATCH", { expectedRevision: ownedA.revision, enabled: false }, admin);
+    check(ownedSave.status === 200 && ownedSave.data.enabled === false);
+    const unchangedB = (await request("/api/automation/accounts/standby-a", "GET", undefined, admin)).data;
+    check(unchangedB.enabled === ownedB.enabled && JSON.stringify(unchangedB.rules) === JSON.stringify(ownedB.rules));
+    check((await request("/api/automation/accounts/primary", "PATCH", { expectedRevision: ownedSave.data.revision, routines: { daily: { accountId: "standby-a" } } }, admin)).status === 400);
+    check((await request("/api/automation/accounts/primary", "PATCH", { expectedRevision: ownedA.revision, rules: [] }, admin)).status === 409);
     const current = (await request("/api/config")).data;
     check((await request("/api/config", "PATCH", { expectedRevision: current.revision, accounts: { items: null } })).status === 400);
     check((await request("/api/config")).data.revision === current.revision);

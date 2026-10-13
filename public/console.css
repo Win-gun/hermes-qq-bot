@@ -222,6 +222,8 @@ details > .card { border: 0; padding: 0; background: transparent; }
 .api-capability .pill { margin: 8px 4px 0 0; }
 .api-binding-row { display: grid; grid-template-columns: minmax(100px, 144px) minmax(0, 1fr); gap: 16px; align-items: center; margin-top: 16px; }
 .api-binding-row label { margin: 0; }
+#apiAccountModels .list-item { cursor: default; }
+#apiAccountModels .list-item:hover { border-color: var(--line); background: var(--bg); }
 .panel-step { display: inline-grid; place-items: center; width: 24px; height: 24px; margin-right: 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--accent); background: var(--accent-subtle); font-size: 12px; }
 .api-editor .row { margin-top: 16px; }
 
@@ -246,6 +248,21 @@ details > .card { border: 0; padding: 0; background: transparent; }
 .qr { width: 210px; height: 210px; flex-shrink: 0; padding: 8px; border-radius: 8px; background: var(--media-bg); }
 #registryLegacy { display: none !important; }
 .registry-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 16px; }
+.registry-workspace { display: grid; grid-template-columns: minmax(190px, 260px) minmax(0, 1fr); gap: 24px; align-items: start; }
+.registry-account-list { display: grid; gap: 8px; min-width: 0; }
+.registry-account-option { width: 100%; min-height: 76px; padding: 16px; text-align: left; white-space: normal; overflow-wrap: anywhere; color: var(--text); background: var(--panel); border-color: var(--line); }
+.registry-account-option strong, .registry-account-option span { display: block; }
+.registry-account-option span { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.registry-account-option[aria-checked="true"] { border-color: var(--accent); background: var(--accent-subtle); }
+.registry-style-copy { grid-column: 1 / -1; display: flex; align-items: end; gap: 12px; flex-wrap: wrap; }
+.registry-style-copy .field { flex: 1 1 240px; min-width: 0; }
+.registry-style-copy button { flex: 0 1 auto; }
+.field:has([data-registry-field="style.systemPrompt"]) { grid-column: 1 / -1; }
+[data-registry-field="style.systemPrompt"] { min-height: 320px; }
+.routine-entry { padding-top: 16px; margin-top: 16px; border-top: 1px solid var(--line); min-width: 0; overflow-wrap: anywhere; }
+.routine-entry .field:has(textarea) { grid-column: 1 / -1; }
+#page-automation > .card:first-child { margin-top: 0; }
+#routinePanel { margin-top: 24px; margin-bottom: 24px; }
 #dynamicAccountEditor { min-width: 0; }
 #dynamicAccountEditor > .subnav { margin-top: 24px; }
 #dynamicAccountEditor > .row { padding-top: 16px; border-top: 1px solid var(--line); }
@@ -314,6 +331,8 @@ details > .card { border: 0; padding: 0; background: transparent; }
 .prompt-editor { min-height: 420px; }
 
 @media (min-width: 768px) and (max-width: 1099px) {
+  .registry-workspace { grid-template-columns: minmax(160px, 200px) minmax(0, 1fr); gap: 16px; }
+  #dynamicAccountEditor .form-grid { grid-template-columns: 1fr; }
   :root { --sidebar-width: 176px; }
   .sidebar { padding: 20px 12px 12px; }
   .brand { gap: 8px; }
@@ -329,6 +348,11 @@ details > .card { border: 0; padding: 0; background: transparent; }
   .grid.two > .card .form-grid, .account-health { grid-template-columns: 1fr; }
 }
 @media (max-width: 767px) {
+  .registry-workspace { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .registry-account-option { min-height: 64px; }
+  .registry-style-copy { align-items: stretch; }
+  .registry-style-copy button { width: 100%; }
+  #dynamicAccountEditor .subnav { gap: 8px; }
   html { scroll-padding-top: 80px; }
   .shell { display: block; min-height: calc(100dvh - 56px); }
   .mobile-header { position: sticky; top: 0; z-index: 30; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 56px; padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }

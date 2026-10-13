@@ -114,6 +114,17 @@ try {
   check(deniedCenter.status === 403, "cross-origin API center update is blocked");
   const staleCenter = await request(port, "/api/api-center", "PATCH", { revision: "stale", center: center.data.center }, voiceHeaders);
   check(staleCenter.status === 409, "same-origin API center update reaches revision guard");
+  for (const route of ["/api/accounts/primary", "/api/account-groups/fixture-missing", "/api/automation/accounts/primary"]) {
+    const body = { expectedRevision: "fixture-stale", patch: {}, group: {}, routines: {} };
+    const allowed = await request(port, route, "PATCH", body, voiceHeaders);
+    check(allowed.status === 409, `same-origin ${route} reaches revision guard through host`);
+    const denied = await request(port, route, "PATCH", body, { ...voiceHeaders, Origin: "http://example.com" });
+    check(denied.status === 403, `cross-origin ${route} is still denied`);
+    const noSession = await request(port, route, "PATCH", body, { Origin: voiceHeaders.Origin });
+    check(noSession.status === 403, `session required for ${route} through host`);
+  }
+  const missingTask = await request(port, "/api/tasks/fixture-missing/cancel", "POST", {}, voiceHeaders);
+  check(missingTask.status === 400 && missingTask.data.reason === "任务不存在。", "same-origin task control reaches task lookup through host");
   check((await requestWithHost(port, "example.com")) === 403, "non-loopback Host is rejected");
   const badOrigin = await request(port, "/api/host/bridge/stop", "POST", {}, { Origin: "http://example.com" });
   check(badOrigin.status === 403, "cross-origin host mutation is rejected");

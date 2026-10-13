@@ -71,6 +71,8 @@ printf '隔离测试回复\\n'
   config.loginRecovery.enabled = false;
   config.adminNotifications.enabled = false;
   config.memory.aiExtraction.enabled = false;
+  delete config.dailyMessages;
+  delete config.hourlyChat;
   config.listen.port = await unusedPort();
   config.control.port = await unusedPort();
   // Keep the isolated bridge away from the user's live SnowLuma sockets.
@@ -83,7 +85,6 @@ printf '隔离测试回复\\n'
   config.accounts.primary.enabled = false;
   config.accounts.standbys[0].enabled = false;
   config.accounts.failover.enabled = false;
-  config.dailyMessages.enabled = false;
   config.automation.enabled = false;
   config.voice.unexpectedField = "private-fixture-marker";
   config.voice.apiKeyEnv = "invalid-env-name-with-dashes";
@@ -124,7 +125,7 @@ printf '隔离测试回复\\n'
     learningMode: { enabled: true, groupIds: ["123456"], minIntervalMs: 900000, maxQuestionsPerDay: 2 },
     taskMode: { webResearchEnabled: true, allowedWebDomains: ["docs.example.org"] },
     automation: { enabled: true, rules: [{
-      id: "daily_summary", enabled: true, timezone: "Asia/Shanghai",
+      id: "daily_summary", accountId: "primary", enabled: true, timezone: "Asia/Shanghai",
       scope: { conversationIds: ["group:123456"] },
       trigger: { type: "schedule", time: "23:30", daysOfWeek: [1, 2, 3, 4, 5], windowMinutes: 3 },
       action: { kind: "summary" }, prompt: "总结今天的讨论"
@@ -146,7 +147,7 @@ printf '隔离测试回复\\n'
   assert.equal(saved.styleProfiles.profiles[1].systemPrompt, "只回答任务进度。");
   assert.equal(saved.learningMode.groupIds[0], "123456");
   assert.deepEqual(saved.taskMode.allowedWebDomains, ["docs.example.org"]);
-  assert.equal(saved.automation.rules[0].trigger.time, "23:30");
+  assert.equal(saved.automation.accounts.primary.rules[0].trigger.time, "23:30");
   assert.deepEqual(saved.voice.tts.allowedVoices, ["mimo_default", "茉莉"]);
   assert.equal(saved.voice.tts.allowMemberVoiceDesign, false);
   const rolesResponse = await fetch(`${base}/api/config`, {
@@ -269,6 +270,14 @@ printf '隔离测试回复\\n'
   assert.deepEqual(groupActions, ["standby-a"], `dual-addressed task control must not duplicate: ${output}`);
   // Change topology while Hermes is already drafting. The first (independent)
   // draft must not be sent; the retry must use the new failover identity.
+  // This test exercises routing, not automation transfer. Explicitly remove
+  // its disposable rule before regrouping; populated ownership must not drift.
+  const clearSession = (await (await fetch(`${base}/api/admin/session`)).json()).token;
+  const clearSnapshot = await (await fetch(`${base}/api/accounts`, { headers: { "x-hermes-qq-admin": clearSession } })).json();
+  const clearResponse = await fetch(`${base}/api/automation/accounts/primary`, { method: "PATCH",
+    headers: { "Content-Type": "application/json", origin: base, "x-hermes-qq-admin": clearSession },
+    body: JSON.stringify({ expectedRevision: clearSnapshot.revision, rules: [] }) });
+  assert.equal(clearResponse.status, 200);
   privateActions.length = 0;
   writeFileSync(slowOnce, "", { mode: 0o600 });
   const hotSwitchText = "HOTSWITCH 请介绍当前账号关系";
@@ -287,7 +296,9 @@ printf '隔离测试回复\\n'
   for (let attempt = 0; attempt < 100 && privateActions.length < 1; attempt++) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  assert.deepEqual(privateActions, ["primary"], `mode switch must produce exactly one fresh reply: ${output}`);
+  const routeEvidence = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
+  const routeHealth = await (await fetch(`${base}/health`)).json();
+  assert.deepEqual(privateActions, ["primary"], `mode switch must produce exactly one fresh reply: ${output}\n${JSON.stringify({ items: routeEvidence.accounts.items.map(item => ({id:item.id,enabled:item.enabled,features:item.features})), groups:routeEvidence.accounts.failoverGroups.map(group=>({id:group.id,features:group.policy.features})), active:routeHealth.activeAccountId, states:routeHealth.accounts.map(account=>({id:account.id,diagnosis:account.diagnosis?.routeState})) })}`);
   const captured = readFileSync(promptCapture, "utf8").split("---PROMPT---").filter((item) => item.includes("HOTSWITCH"));
   assert.equal(captured.length, 2, "mode switch must discard the old draft and regenerate once");
   assert.match(captured[0], /账号平级，不存在主备接管/);
@@ -317,10 +328,11 @@ printf '隔离测试回复\\n'
     const response = await fetch(`${base}/api/config`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ accounts: { topology: "function_split" },
-        automation: { enabled: true, rules: [] }, taskMode: { enabled: false }, voice: { enabled: false } })
+        automation: { enabled: true }, taskMode: { enabled: false }, voice: { enabled: false } })
     });
     assert.equal(response.status, 200, `private automation regression setup: ${JSON.stringify(await response.json()).slice(0, 600)}`);
     for (const id of ["primary", "standby-a"]) {
+      await mutateRegressionRegistry(`/api/automation/accounts/${id}`, "PATCH", { rules: [] });
       await mutateRegressionRegistry(`/api/accounts/${id}`, "PATCH", {
         patch: { enabled: true, features: { chat: true, task: false, automation: true } }
       });

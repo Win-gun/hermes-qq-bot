@@ -67,7 +67,8 @@
       "enabled": true,
       "styleProfileId": "legacy",
       "promptOverride": "",
-      "displayName": "Hermes小跟班",
+      "displayName": "机器人 A",
+      "selfName": "",
       "protocol": "snowluma",
       "onebotPath": "/onebot",
       "napcatContainer": "napcat",
@@ -85,7 +86,8 @@
         "role": "standby",
         "styleProfileId": "legacy",
         "promptOverride": "",
-        "displayName": "Hermes小跟班2",
+        "displayName": "机器人 B",
+        "selfName": "",
         "protocol": "snowluma",
         "onebotPath": "/onebot",
         "napcatContainer": "napcat-standby-a",
@@ -155,7 +157,11 @@
   },
   "automation": {
     "enabled": false,
-    "rules": []
+    "ownershipVersion": 1,
+    "accounts": {},
+    "groups": {},
+    "rules": [],
+    "routines": { "version": 1 }
   },
   "learningMode": {
     "enabled": true,
@@ -264,7 +270,6 @@
   },
   "botNames": [
     "Hermes",
-    "小跟班",
     "机器人",
     "GPT"
   ],
@@ -653,31 +658,11 @@
     ]
   },
   "dailyMessages": {
-    "enabled": true,
+    "enabled": false,
     "checkIntervalMs": 60000,
     "windowMinutes": 5,
     "requireKnownGroup": true,
-    "schedules": [
-      {
-        "name": "morning",
-        "mode": "morning",
-        "time": "08:30",
-        "prompt": "早安，叫大家起床/开工，语气轻松像群友。"
-      },
-      {
-        "name": "evening",
-        "mode": "evening",
-        "time": "23:00",
-        "prompt": "晚上了，轻松收个尾，可以提醒大家早点休息。"
-      },
-      {
-        "name": "summary",
-        "mode": "summary",
-        "time": "23:30",
-        "requireHistory": true,
-        "prompt": "请总结今天群里的重点、好笑的梗和可能的待办。"
-      }
-    ]
+    "schedules": []
   },
   "history": {
     "maxMessages": 40,
@@ -801,7 +786,7 @@
     "enabled": false,
     "checkIntervalMs": 60000,
     "ownerUserIds": [],
-    "prompt": "现在时间 {{time}}。给你的主人发一条简短的私聊消息，语气活泼亲昵。报时、闲聊、分享趣事都行。不超过40个字，最多一个emoji。"
+    "prompt": ""
   },
   "send": {
     "replyToMessage": true,

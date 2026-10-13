@@ -175,11 +175,14 @@
       <section id="page-api-center" class="page">
         <p class="panel-intro">先配置服务连接与密钥，再给每项功能选模型。共用连接不会强制共用模型；测试只使用本页草稿，不修改线上绑定，也不会发送 QQ 消息。</p>
         <p id="apiCenterState" class="hint" role="status">进入此页后加载 API 方案…</p>
+        <p class="hint">已保存的全局默认方案如下。账号可单独指定方案；编辑连接或模型不会自动切换功能绑定。</p>
         <div id="apiCapabilityCards" class="grid three"></div>
+        <div class="card mt-24"><h3>各账号已保存的问答 / 任务方案</h3><div id="apiAccountModels" class="list"></div></div>
         <div class="grid two mt-24">
           <div class="card api-editor" id="apiConnectionEditor">
             <h3><span><span class="panel-step">1</span>服务连接与凭据</span></h3>
-            <div class="field"><label for="apiConnectionSelect">当前连接</label><select id="apiConnectionSelect"></select></div>
+            <div class="field"><label for="apiConnectionSelect">正在编辑的连接</label><select id="apiConnectionSelect"></select></div>
+            <p class="hint">仅选择编辑对象，不切换线上模型。首次打开默认定位到已绑定的问答连接。</p>
             <div class="form-grid">
               <div class="field"><label for="apiConnectionName">名称</label><input id="apiConnectionName" maxlength="80" /></div>
               <div class="field"><label for="apiConnectionProvider">Provider</label><input id="apiConnectionProvider" maxlength="80" placeholder="deepseek / xiaomi / openai-api / custom" /></div>
@@ -193,7 +196,8 @@
           </div>
           <div class="card api-editor" id="apiProfileEditor">
             <h3><span><span class="panel-step">2</span>模型方案</span></h3>
-            <div class="field"><label for="apiProfileSelect">当前方案</label><select id="apiProfileSelect"></select></div>
+            <div class="field"><label for="apiProfileSelect">正在编辑的模型方案</label><select id="apiProfileSelect"></select></div>
+            <p class="hint">仅选择编辑对象；实际使用哪个方案，以功能绑定和账号设置为准。</p>
             <div class="form-grid">
               <div class="field"><label for="apiProfileName">名称</label><input id="apiProfileName" maxlength="80" /></div>
               <div class="field"><label for="apiProfileKind">用途</label><select id="apiProfileKind"><option value="chat">问答 / 任务</option><option value="vision">识图</option><option value="asr">语音识别 · MiMo</option><option value="tts">语音合成 · MiMo</option></select></div>
@@ -596,15 +600,16 @@
         <div class="grid two">
           <div class="card">
             <h3>活跃度预设</h3>
-            <div class="row">
+            <div class="row" role="group" aria-label="选择活跃度预设">
               <button id="presetRestrained" class="secondary">克制版</button>
               <button id="presetNormal" class="secondary">正常版</button>
-              <button id="presetLively">活跃版</button>
+              <button id="presetLively" class="secondary">活跃版</button>
             </div>
-            <div class="hint mt-12">预设只会填入表单，点“保存配置”后才生效。正常版等于之前的克制版；新的克制版更安静；活跃版更积极参与讨论。</div>
+            <p id="activityPresetState" class="hint mt-12" role="status" aria-live="polite">正在加载活跃度设置…</p>
+            <div class="hint mt-12">按钮和默认模式下拉框都会填入对应预设，点击本页保存按钮后才生效。这里修改全局默认，单独指定档位的账号或群仍使用自己的设置。</div>
             <div class="form-grid mt-16">
               <div class="field">
-                <label>默认模式</label>
+                <label for="behaviorModes.default">默认模式</label>
                 <select id="behaviorModes.default">
                   <option value="normal">正常 normal</option>
                   <option value="restrained">克制 restrained</option>
@@ -949,13 +954,24 @@
       </section>
 
       <section id="page-automation" class="page">
+        <div class="card settings-block">
+          <div class="field"><label for="automationAccountSelect">管理账号的自动化</label><select id="automationAccountSelect" aria-label="自动化账号"></select></div>
+          <p id="automationOwnerHint" class="hint" role="status">选择账号后，只显示和保存该账号的规则。</p>
+          <div class="switch-row">
+            <div><strong>启用此账号自动化</strong><span>控制此目录的全部规则；关闭后保留设置，不影响其他独立账号。</span></div>
+            <input id="automation.enabled" type="checkbox" aria-label="启用此账号自动化" />
+          </div>
+        </div>
+        <div class="card settings-block" id="routinePanel">
+          <h3>此账号的例行规则</h3>
+          <p class="hint">已有定时行为归属原账号，不是框架默认规则，也不会复制给新账号。范围与执行记录保留。</p>
+          <div id="routineEditor">正在加载原有例行规则…</div>
+          <p id="routineState" class="hint" role="status" aria-live="polite"></p>
+          <div class="row"><button id="saveRoutinesBtn" type="button" disabled>保存此账号例行规则</button><button id="refreshRoutinesBtn" class="secondary" type="button">刷新此账号（保留草稿）</button></div>
+        </div>
         <div class="grid two">
           <div class="card">
             <h3>自动化规则 <span id="automationCount" class="pill">加载中</span></h3>
-            <div class="switch-row">
-              <div><strong>启用自动化</strong><span>总开关关闭时保留规则但不运行。</span></div>
-              <input id="automation.enabled" type="checkbox" aria-label="启用自动化" />
-            </div>
             <p class="hint">规则只作用于明确列出的群或私聊。定时规则按指定时区运行；命令规则使用独立的小写斜杠命令。</p>
             <div id="automationRuleList" class="list" aria-label="自动化规则列表"><p class="hint">正在加载配置…</p></div>
             <div class="row settings-block">
@@ -975,7 +991,7 @@
                 <div class="field"><label for="automationRule.id">规则 ID</label><input id="automationRule.id" maxlength="64" placeholder="daily_summary" /></div>
                 <div class="field"><label for="automationRule.action">执行动作</label><select id="automationRule.action"><option value="message">发送消息</option><option value="summary">生成摘要</option><option value="task">创建任务</option></select></div>
                 <div class="field"><label for="automationRule.triggerType">触发方式</label><select id="automationRule.triggerType"><option value="schedule">定时</option><option value="command">斜杠命令</option></select></div>
-                <div class="field"><label for="automationRule.target">执行账号 / 接管组</label><select id="automationRule.target"><option value="">未指定（保留原规则路由）</option></select><p class="hint">只能选择一个账号或接管组；不会扩大会话范围，也不会自动建立跨账号触发。</p></div>
+                <div class="field"><label for="automationRule.target">规则归属（由上方账号选择）</label><select id="automationRule.target" disabled></select><p class="hint">规则只能由此账号执行；切换上方账号可管理其他目录。</p></div>
                 <div class="field full"><label for="automationRule.scope">会话范围（每行一个）</label><textarea id="automationRule.scope" placeholder="group:123456"></textarea><p class="hint">可填写群号、group:&lt;id&gt; 或 private:&lt;id&gt;；必须明确指定 1–100 个会话，不支持“所有群”。</p></div>
                 <div class="field automation-schedule"><label for="automationRule.timezone">时区</label><input id="automationRule.timezone" placeholder="Asia/Shanghai" /></div>
                 <div class="field automation-schedule"><label for="automationRule.time">本地时间</label><input id="automationRule.time" type="time" /></div>
@@ -1222,6 +1238,7 @@
     const promptDrafts = new Map();
     let automationRulesDraft = [];
     let selectedAutomationRuleIndex = -1;
+    const automationAccounts = { selected: "", drafts: new Map() };
     const desktopApi = window.hermesQQ || null;
     let browserHostAvailable = false;
     let hostProgressTimer = null;
@@ -1273,7 +1290,7 @@
         error.status = res.status;
         throw error;
       }
-      if (!["GET", "HEAD"].includes(String(opts.method || "GET").toUpperCase()) && /^\/api\/(?:config|api-center|accounts|account-groups|voice\/credential)(?:[/?]|$)/.test(path)) {
+      if (!["GET", "HEAD"].includes(String(opts.method || "GET").toUpperCase()) && /^\/api\/(?:config|api-center|accounts|account-groups|voice\/credential|automation\/routines)(?:[/?]|$)/.test(path)) {
         registryState.epoch += 1;
         if (/^\/api\/(?:config|api-center)(?:[/?]|$)/.test(path)) registryState.modelLoadedAt = 0;
         if (path === "/api/api-center" && body.center) {
@@ -1356,7 +1373,7 @@
     const scopeNames = {
       "account-status": "账号连接设置", "account-functions": "账号功能", "api-center": "API 管理", "qa:model": "问答模型", "qa:persona": "提示词与风格",
       "qa:behavior": "问答行为", "qa:search": "联网搜索", vision: "识图", "voice:api": "语音 API", "voice:behavior": "语音行为", tasks: "任务",
-      automation: "自动化", archive: "聊天存档", memory: "记忆", reviewer: "高级诊断"
+      automation: "此账号开关与规则", archive: "聊天存档", memory: "记忆", reviewer: "高级诊断"
     };
 
     function currentScope() {
@@ -1372,26 +1389,37 @@
     }
 
     function renderSaveState() {
-      dirty = dirtyScopes.size > 0;
-      $("saveState").textContent = !cfg ? "配置未加载" : dirty ? `未保存：${[...dirtyScopes].map((scope) => scopeNames[scope] || scope).join("、")}` : "已同步";
+      dirty = dirtyScopes.size > 0 || routineState.dirty;
+      const unsaved = [...dirtyScopes].map((scope) => scopeNames[scope] || scope);
+      if (routineState.dirty) unsaved.push("原有例行规则");
+      $("saveState").textContent = !cfg ? "配置未加载" : dirty ? `未保存：${unsaved.join("、")}` : "已同步";
       const scope = currentScope();
       const editable = Boolean(scopeNames[scope]) && scope !== "api-center";
       $("saveBtn").classList.toggle("hidden", !editable || (scope === "account-status" && !dirtyScopes.has(scope) && !$("accountConnectionDetails")?.open));
       $("saveBtn").disabled = !editable || !cfg;
+      if (scope === "automation") {
+        const draft = automationAccounts.drafts.get(automationAccounts.selected);
+        $("saveBtn").disabled = !draft?.loaded || draft.busy || draft.routine.busy;
+      }
       $("pageActionState").textContent = !cfg ? "配置尚未加载" : (conflictedScopes.has(scope) || (scope === "api-center" && apiCenterConflicted))
-        ? "配置已被其他窗口更新；草稿仍在。请刷新配置核对后再保存。"
+        ? "配置版本已更新（可能来自其他窗口或本页其他区域）；草稿仍在，请核对后再保存。"
         : scopeFeedback.get(scope) || (dirtyScopes.has(scope) ? "此区域有未保存修改；刷新不会覆盖草稿。" : "当前区域已同步。");
       for (const button of document.querySelectorAll("#nav [data-page], [data-tabs] [data-tab]")) {
         const scope = button.dataset.tab ? `${button.closest("[data-tabs]").dataset.tabs}:${button.dataset.tab}` : button.dataset.page;
-        button.classList.toggle("has-unsaved", dirtyScopes.has(scope) || (["qa", "voice"].includes(scope) && [...dirtyScopes].some((item) => item.startsWith(`${scope}:`))));
+        button.classList.toggle("has-unsaved", dirtyScopes.has(scope) || (scope === "automation" && routineState.dirty) || (["qa", "voice"].includes(scope) && [...dirtyScopes].some((item) => item.startsWith(`${scope}:`))));
       }
       renderRegistrySaveState();
+      if (routineState.dirty && !$("saveState").textContent.includes("原有例行规则")) $("saveState").textContent += " · 原有例行规则未保存";
     }
 
     function markDirty(eventOrScope) {
       const scope = typeof eventOrScope === "string" ? eventOrScope : eventOrScope?.target ? scopeForElement(eventOrScope.target) : currentScope();
       if (!scopeNames[scope]) return;
       dirtyScopes.add(scope);
+      if (scope === "automation" && eventOrScope?.target?.id !== "automationAccountSelect") {
+        const draft = automationAccounts.drafts.get(automationAccounts.selected);
+        if (draft) { draft.dirty = true; draft.enabled = getVal("automation.enabled"); draft.editVersion++; }
+      }
       scopeFeedback.set(scope, "此区域有未保存修改；刷新不会覆盖草稿。");
       if (scope === "account-functions") $("accountFunctionsFeedback").textContent = "账号功能有未保存的修改。";
       renderSaveState();
@@ -1811,9 +1839,14 @@
       for (const field of document.querySelectorAll(".automation-command")) field.classList.toggle("hidden", isSchedule);
     }
 
-    function renderAutomationTargetPicker(selected = getVal("automationRule.target") || "") {
-      const select = $("automationRule.target");
+    function renderAutomationTargetPicker(selected = getVal("automationRule.target") || "", select = $("automationRule.target")) {
       if (!select) return;
+      const owner = automationAccounts.drafts.get(automationAccounts.selected)?.owner;
+      if (owner) {
+        const option = document.createElement("option"); option.value = owner.key;
+        option.textContent = owner.kind === "group" ? `接管组 · ${registryState.groups.find(group => group.id === owner.id)?.name || owner.id}` : `账号 · ${registryItem(owner.id)?.displayName || owner.id}`;
+        select.replaceChildren(option); select.value = owner.key; select.disabled = true; return;
+      }
       const options = [["", "未指定（保留原规则路由）"],
         ...registryState.items.map((item) => [`account:${item.id}`, `账号 · ${item.displayName || item.id}（${item.id}）`]),
         ...registryState.groups.map((group) => [`group:${group.id}`, `接管组 · ${group.name || group.id}（${group.id}）`])];
@@ -2110,7 +2143,7 @@
       setVal("learningMode.maxQuestionsPerDay", cfg.learningMode?.maxQuestionsPerDay ?? 3);
       setVal("accounts.topology", cfg.accounts?.topology || "failover");
       if (!preserveDirty || !dirtyScopes.has("account-functions")) renderAccountModeFields(cfg);
-      if (!preserveDirty || !dirtyScopes.has("automation")) initializeAutomation(cfg);
+      // Automation is loaded from the selected account endpoint, never a global template.
       setVal("voice.enabled", cfg.voice?.enabled === true);
       setVal("voice.replyMode", cfg.voice?.replyMode || "mixed");
       setVal("voice.credentialSource", cfg.voice?.credentialSource || "existing");
@@ -2165,8 +2198,8 @@
         ? `语音 API 已就绪（${keychainSelected ? "本机 Keychain" : "环境变量或 Hermes 凭据"}；密钥不会回显）。`
         : keychainSelected ? "已选择 Keychain，但当前无法读取凭据；不会自动改用环境变量。" : `尚未找到 ${cfg.voice?.apiKeyEnv || "MIMO_API_KEY"} 或当前 Hermes 凭据。`;
       $("voiceSecretState").textContent = cfg.voice?.keychainStored ? "本机 Keychain 已保存语音密钥；密钥不会回显。" : "本机 Keychain 尚未保存语音密钥。";
-      for (const field of document.querySelectorAll("#page-automation input, #page-automation select, #page-automation textarea, #page-automation button, #page-voice .registry-global input, #page-voice .registry-global select, #page-voice .registry-global textarea, #page-voice .registry-global button")) field.disabled = false;
-      $("newAutomationRuleBtn").disabled = automationRulesDraft.length >= 100;
+      for (const field of document.querySelectorAll("#page-voice .registry-global input, #page-voice .registry-global select, #page-voice .registry-global textarea, #page-voice .registry-global button")) field.disabled = false;
+      renderAutomationAccountState(); renderRoutineState();
 
       setVal("vision.enabled", cfg.vision?.enabled);
       setVal("vision.onlyWhenMentionedOrAsked", cfg.vision?.onlyWhenMentionedOrAsked);
@@ -2215,6 +2248,7 @@
       setVal("proactive.probability.slider", cfg.proactive?.probability);
       setVal("proactive.intervalMs", cfg.proactive?.intervalMs);
       setVal("proactive.cooldownMs", cfg.proactive?.cooldownMs);
+      renderActivityPresetState();
       setVal("socialPlanner.enabled", cfg.socialPlanner?.enabled !== false);
       setVal("socialPlanner.shadowMode", cfg.socialPlanner?.shadowMode === true);
       setVal("socialPlanner.minConfidence", cfg.socialPlanner?.minConfidence ?? 0.55);
@@ -2539,6 +2573,7 @@
         for (const scope of dirtyScopes) if (scope !== selfSavedScope) conflictedScopes.add(scope);
       }
       await refreshAccountRegistry({ configSnapshot: config, selfSavedScope });
+      await refreshRoutines();
       $("qaModelSummary").textContent = `问答：${cfg.ai?.model || "未指定模型"}`;
       $("visionModelSummary").textContent = `识图：${cfg.vision?.model || "未指定模型"}`;
       $("voiceModelSummary").textContent = `ASR：${cfg.voice?.asr?.model || "mimo-v2.5-asr"} · TTS：${cfg.voice?.tts?.model || "未指定模型"}`;
@@ -3116,8 +3151,9 @@
 
     async function saveConfig(buttonId = "saveBtn", { focusAccounts = false } = {}) {
       if (["account-status", "account-functions"].includes(activePage)) return saveRegistryEditor();
-      if (registryState.contexts[activePage]) return saveRegistryContext(activePage);
+      if (registryState.contexts[activePage] && (activePage !== "qa" || activeTabs.qa === "persona")) return saveRegistryContext(activePage);
       const scope = saveScopeByButton[buttonId] || currentScope();
+      if (scope === "automation") return saveAccountAutomation(buttonId);
       if (!cfg) { toast("配置尚未加载，暂不能保存", "bad"); return; }
       if (conflictedScopes.has(scope) && !confirm("配置曾在其他窗口更新。已保留你的草稿；确认在最新配置基础上保存此区域的修改？")) return;
       setBusy(buttonId, true, "保存中...");
@@ -3132,6 +3168,7 @@
         cfg = res.config || cfg;
         dirtyScopes.delete(scope);
         conflictedScopes.delete(scope);
+        if (scope === "qa:behavior") renderActivityPresetState();
         if (scope === "qa:persona") { promptDrafts.clear(); renderPromptEditor(); }
         renderSaveState();
         const message = `${scopeNames[scope] || "配置"}已保存${res.restartRequired ? "；部分项需重启" : "并热生效"}`;
@@ -3188,11 +3225,11 @@
     }
     async function sensitiveApi(path, method, body) {
       await ensureAdminSession();
-      return api(path, {
+      try { return await api(path, {
         method,
         headers: { "content-type": "application/json", "x-hermes-qq-admin": adminSessionToken },
         ...(body === undefined ? {} : { body: JSON.stringify(body) })
-      });
+      }); } catch (error) { if (error.status === 403) adminSessionToken = ""; throw error; }
     }
 
     function apiCenterChanged() {
@@ -3219,9 +3256,25 @@
     function apiCurrentProfile() { return apiCenterDraft?.profiles.find((item) => item.id === selectedApiProfile); }
     function apiCurrentSearch() { return apiCenterDraft?.searchProfiles.find((item) => item.id === selectedApiSearch); }
 
+    function apiBoundPlan(center, capability, overrides = {}) {
+      if (!center) return { binding: "", profile: null, connection: null };
+      const bound = (key) => overrides[key] || (key === "search" ? center.searchBinding : center.bindings[key]);
+      const binding = bound(capability);
+      const id = capability === "task" && binding === "inherit-chat" ? bound("chat") : binding;
+      const profile = (capability === "search" ? center.searchProfiles : center.profiles).find((item) => item.id === id);
+      const connection = center.connections.find((item) => item.id === profile?.connectionId);
+      return { binding, profile, connection };
+    }
+
+    function apiDefaultEditorProfile() {
+      const bound = apiBoundPlan(apiCenterSaved || apiCenterDraft, "chat").profile;
+      return apiCenterDraft?.profiles.find((item) => item.id === bound?.id) || apiCenterDraft?.profiles[0];
+    }
+
     function renderApiConnection() {
       if (!apiCenterDraft) return;
-      selectedApiConnection = apiCurrentConnection()?.id || apiCenterDraft.connections[0]?.id || "";
+      const preferred = (apiCurrentProfile() || apiDefaultEditorProfile())?.connectionId;
+      selectedApiConnection = apiCurrentConnection()?.id || apiCenterDraft.connections.find((item) => item.id === preferred)?.id || apiCenterDraft.connections[0]?.id || "";
       apiSelectOptions($("apiConnectionSelect"), apiCenterDraft.connections, selectedApiConnection, (item) => `${item.name} · ${item.provider}`);
       const item = apiCurrentConnection();
       for (const [id, value] of Object.entries({ apiConnectionName: item?.name || "", apiConnectionProvider: item?.provider || "", apiConnectionUrl: item?.baseUrl || "", apiConnectionSource: item?.credentialSource || "existing", apiConnectionEnv: item?.apiKeyEnv || "" })) $(id).value = value;
@@ -3234,7 +3287,7 @@
 
     function renderApiProfile() {
       if (!apiCenterDraft) return;
-      selectedApiProfile = apiCurrentProfile()?.id || apiCenterDraft.profiles[0]?.id || "";
+      selectedApiProfile = apiCurrentProfile()?.id || apiDefaultEditorProfile()?.id || "";
       apiSelectOptions($("apiProfileSelect"), apiCenterDraft.profiles, selectedApiProfile, (item) => `${item.name} · ${{ chat: "问答", vision: "识图", asr: "ASR", tts: "TTS" }[item.kind]}`);
       apiSelectOptions($("apiProfileConnection"), apiCenterDraft.connections, apiCurrentProfile()?.connectionId, (item) => item.name);
       const item = apiCurrentProfile();
@@ -3247,7 +3300,7 @@
     function renderApiSearch() {
       if (!apiCenterDraft) return;
       selectedApiSearch = apiCurrentSearch()?.id || apiCenterDraft.searchBinding || apiCenterDraft.searchProfiles[0]?.id || "";
-      apiSelectOptions($("apiSearchSelect"), apiCenterDraft.searchProfiles, selectedApiSearch, (item) => `${item.name}${item.id === apiCenterDraft.searchBinding ? " · 当前" : ""}`);
+      apiSelectOptions($("apiSearchSelect"), apiCenterDraft.searchProfiles, selectedApiSearch, (item) => `${item.name}${item.id === apiCenterSaved?.searchBinding ? " · 已保存绑定" : ""}`);
       const item = apiCurrentSearch();
       for (const [id, value] of Object.entries({ apiSearchName: item?.name || "", apiSearchProvider: item?.provider || "", apiSearchOrder: item?.providerOrder?.join(", ") || "", apiSearchLimit: item?.maxResults || 4, apiSearchTimeout: item?.timeoutMs || 8000 })) $(id).value = value;
       const isMimo = item?.provider === "mimo-web-search";
@@ -3303,20 +3356,50 @@
           apiCenterChanged();
         });
         binding.append(label, select); bindings.appendChild(binding);
-        const name = document.createElement("span"); name.className = "binding-name"; name.textContent = select.selectedOptions[0]?.textContent || "尚未绑定方案";
-        const profile = apiCenterDraft.profiles.find((item) => item.id === select.value);
-        const connection = apiCenterDraft.connections.find((item) => item.id === profile?.connectionId);
+        const saved = apiBoundPlan(apiCenterSaved, capability);
+        const draft = apiBoundPlan(apiCenterDraft, capability);
+        const { profile, connection } = saved;
+        const name = document.createElement("span"); name.className = "binding-name";
+        name.textContent = profile ? `${profile.name}${profile.model ? ` · ${profile.model}` : ""}` : "尚未保存绑定";
         const credential = connection && apiCredentialStatus[connection.id];
-        const search = apiCenterDraft.searchProfiles.find((item) => item.id === select.value);
         const hint = document.createElement("div"); hint.className = "hint";
-        hint.textContent = capability === "task" && select.value === "inherit-chat" ? "使用问答连接；执行强度按任务复杂度决定。" : kind === "search" ? (search?.provider === "mimo-web-search" ? `MiMo 官方联网插件 · ${search.model} · 调用可能计费` : "独立网页搜索") : `${connection?.provider || "请选择连接"} · ${credential === "configured" ? "凭据已配置" : credential === "missing" ? "缺少凭据" : credential === "unavailable" ? "凭据不可用" : "外部凭据未在此页验证"}`;
+        hint.textContent = kind === "search" ? (profile?.provider === "mimo-web-search" ? `MiMo 官方联网插件 · 调用可能计费` : "独立网页搜索") : `${saved.binding === "inherit-chat" ? "使用问答方案 · " : ""}${connection?.provider || "未绑定连接"} · ${credential === "configured" ? "凭据已配置" : credential === "missing" ? "缺少凭据" : credential === "unavailable" ? "凭据不可用" : "外部凭据未在此页验证"}`;
+        const pending = document.createElement("div"); pending.className = "hint";
+        pending.textContent = JSON.stringify(saved) !== JSON.stringify(draft) ? `未保存草稿：${draft.profile ? `${draft.profile.name} · ${draft.profile.model || draft.profile.provider}` : "尚未绑定"}；上方仍为已保存方案。` : "";
+        pending.hidden = !pending.textContent;
         const row = document.createElement("div"); row.className = "row";
         const edit = document.createElement("button"); edit.className = "ghost"; edit.textContent = "修改绑定";
         edit.addEventListener("click", () => { select.focus(); $("apiBindingsEditor").scrollIntoView({ behavior: "smooth", block: "start" }); });
         const test = document.createElement("button"); test.className = "secondary"; test.textContent = "测试草稿";
         test.addEventListener("click", () => testApiCapability(capability, test));
         const result = document.createElement("span"); result.className = "hint"; result.textContent = apiTests[capability] || "尚未测试";
-        row.append(edit, test, result); card.append(heading, name, hint, row); host.appendChild(card);
+        row.append(edit, test, result); card.append(heading, name, hint, pending, row); host.appendChild(card);
+      }
+      renderApiAccountModels();
+    }
+
+    function renderApiAccountModels() {
+      const host = $("apiAccountModels"); host.replaceChildren();
+      const center = registryState.modelCenter || apiCenterSaved;
+      if (!registryState.loaded || registryState.error || registryState.modelError || !center) {
+        host.textContent = "账号方案尚未加载或刷新失败；请刷新后查看，不使用全局默认猜测账号配置。";
+        return;
+      }
+      if (!registryState.items.length) { host.textContent = "尚未添加账号"; return; }
+      for (const item of registryState.items) {
+        const effective = registryEffective(item);
+        const group = registryGroup(item.id);
+        const row = document.createElement("div"); row.className = "list-item";
+        const title = document.createElement("strong"); title.textContent = `${effective.displayName || item.id}${item.enabled === false ? " · 已停止处理" : ""}`;
+        row.appendChild(title);
+        for (const [key, label] of [["chat", "问答"], ["task", "任务"]]) {
+          const { binding, profile, connection } = apiBoundPlan(center, key, effective.modelBindings);
+          const text = document.createElement("div"); text.className = "hint";
+          const source = group ? `接管组「${group.name || group.id}」共享 · ` : "";
+          text.textContent = `${label}：${profile ? `${profile.name} · ${profile.model || "默认模型"} · ${connection?.provider || "未绑定连接"}` : "未找到方案"}（${effective.features?.[key] === false ? "功能关闭；" : ""}${source}${binding === "inherit-chat" ? "使用此账号问答方案" : effective.modelBindings?.[key] ? group ? "组内指定" : "账号单独指定" : "全局默认"}）`;
+          row.appendChild(text);
+        }
+        host.appendChild(row);
       }
     }
 
@@ -3810,42 +3893,34 @@
       }
     }
 
-    function applyPreset(kind) {
-      if (kind === "restrained") {
-        setVal("behaviorModes.default", "restrained");
-        setVal("trigger.activeProbability", 0.04);
-        setVal("trigger.activeProbability.slider", 0.04);
-        setVal("trigger.activeCooldownMs", 240000);
-        setVal("proactive.enabled", true);
-        setVal("proactive.probability", 0.08);
-        setVal("proactive.probability.slider", 0.08);
-        setVal("proactive.intervalMs", 900000);
-        setVal("proactive.cooldownMs", 2400000);
-        toast("已填入克制版参数，保存后生效");
-      } else if (kind === "normal") {
-        setVal("behaviorModes.default", "normal");
-        setVal("trigger.activeProbability", 0.12);
-        setVal("trigger.activeProbability.slider", 0.12);
-        setVal("trigger.activeCooldownMs", 120000);
-        setVal("proactive.enabled", true);
-        setVal("proactive.probability", 0.25);
-        setVal("proactive.probability.slider", 0.25);
-        setVal("proactive.intervalMs", 300000);
-        setVal("proactive.cooldownMs", 900000);
-        toast("已填入正常版参数，保存后生效");
-      } else {
-        setVal("behaviorModes.default", "lively");
-        setVal("trigger.activeProbability", 0.25);
-        setVal("trigger.activeProbability.slider", 0.25);
-        setVal("trigger.activeCooldownMs", 60000);
-        setVal("proactive.enabled", true);
-        setVal("proactive.probability", 0.45);
-        setVal("proactive.probability.slider", 0.45);
-        setVal("proactive.intervalMs", 300000);
-        setVal("proactive.cooldownMs", 900000);
-        toast("已填入活跃版参数，保存后生效");
+    function activityPresetValues(kind) {
+      const values = { restrained: [0.04, 240000, 0.08, 900000, 2400000], normal: [0.12, 120000, 0.25, 300000, 900000], lively: [0.25, 60000, 0.45, 300000, 900000] }[kind];
+      if (!values) return null;
+      return { "behaviorModes.default": kind, "trigger.activeProbability": values[0], "trigger.activeCooldownMs": values[1], "proactive.enabled": true, "proactive.probability": values[2], "proactive.intervalMs": values[3], "proactive.cooldownMs": values[4] };
+    }
+
+    function renderActivityPresetState() {
+      const kind = getVal("behaviorModes.default");
+      const names = { restrained: "克制", normal: "正常", lively: "活跃" };
+      for (const [id, mode] of [["presetRestrained", "restrained"], ["presetNormal", "normal"], ["presetLively", "lively"]]) {
+        const selected = mode === kind;
+        $(id).setAttribute("aria-pressed", String(selected));
+        $(id).classList.toggle("secondary", !selected);
       }
-      markDirty();
+      const values = activityPresetValues(kind);
+      const custom = values && Object.entries(values).some(([id, value]) => getVal(id) !== value);
+      $("activityPresetState").textContent = `当前表单：${names[kind] || "尚未加载"}${custom ? " · 参数已自定义" : ""} · ${dirtyScopes.has("qa:behavior") ? "未保存，保存后生效" : "已同步"}`;
+    }
+
+    function applyPreset(kind) {
+      const values = activityPresetValues(kind);
+      if (!values) return;
+      for (const [id, value] of Object.entries(values)) setVal(id, value);
+      setVal("trigger.activeProbability.slider", values["trigger.activeProbability"]);
+      setVal("proactive.probability.slider", values["proactive.probability"]);
+      markDirty("qa:behavior");
+      renderActivityPresetState();
+      toast(`已填入${{ restrained: "克制", normal: "正常", lively: "活跃" }[kind]}版参数，保存后生效`);
     }
 
     function applyModelPreset(kind) {
@@ -4047,7 +4122,7 @@
         button.setAttribute("aria-selected", String(selected));
       }
       for (const panel of document.querySelectorAll(`[data-tab-panel^="${group}:"]`)) panel.classList.toggle("active", panel.dataset.tabPanel === `${group}:${tab}`);
-      if (group === "qa") $("promptAccountPicker").classList.toggle("hidden", tab !== "persona");
+      if (group === "qa") { $("promptAccountPicker").classList.add("hidden"); renderRegistryContexts(true); }
       $("saveBtn").textContent = `保存${scopeNames[currentScope()] || "当前板块"}`;
       renderSaveState();
     }
@@ -4072,6 +4147,7 @@
       renderRegistryContexts(true);
       if (name === "backup") refreshDesktopBackup().catch((error) => toast(error.message, "bad"));
       if (name === "voice") refreshVoiceSecretStatus().catch(() => {});
+      if (name === "automation") refreshRoutines().catch(() => {});
       if (name === "api-center" && (!apiCenterDraft || (!apiCenterDirty && Date.now() - apiCenterLastLoaded > 15000))) refreshApiCenter().catch((error) => { $("apiCenterState").textContent = `加载失败：${error.message}`; });
     }
 
@@ -4180,8 +4256,8 @@
       for (const btn of document.querySelectorAll("[data-tabs] [data-tab]")) btn.addEventListener("click", () => switchTab(btn.closest("[data-tabs]").dataset.tabs, btn.dataset.tab));
       for (const btn of document.querySelectorAll("[data-jump]")) btn.addEventListener("click", () => switchPage(btn.dataset.jump));
       for (const el of document.querySelectorAll("input, textarea, select")) {
-        if (el.closest("#page-api-center") || el.matches("[data-console-theme]")) continue;
-        if (el.id === "memorySearch" || el.id === "memoryDetailSearch" || el.id === "archiveSearch" || el.id === "send.groupSelect" || el.id === "modelPreset" || el.id === "aiProfileSelect" || el.id === "styleProfileSelect" || el.id === "promptAccountSelect" || el.id === "voiceSecretInput" || el.id.startsWith("send.") || el.id.startsWith("backup") || el.id.startsWith("desktop")) continue;
+        if (el.closest("#page-api-center, #routinePanel") || el.matches("[data-console-theme]")) continue;
+        if (el.id === "automationAccountSelect" || el.id === "memorySearch" || el.id === "memoryDetailSearch" || el.id === "archiveSearch" || el.id === "send.groupSelect" || el.id === "modelPreset" || el.id === "aiProfileSelect" || el.id === "styleProfileSelect" || el.id === "promptAccountSelect" || el.id === "voiceSecretInput" || el.id.startsWith("send.") || el.id.startsWith("backup") || el.id.startsWith("desktop")) continue;
         el.addEventListener("input", markDirty);
         el.addEventListener("change", markDirty);
       }
@@ -4273,6 +4349,10 @@
       $("presetRestrained").addEventListener("click", () => applyPreset("restrained"));
       $("presetNormal").addEventListener("click", () => applyPreset("normal"));
       $("presetLively").addEventListener("click", () => applyPreset("lively"));
+      $("behaviorModes.default").addEventListener("change", (event) => applyPreset(event.target.value));
+      for (const id of Object.keys(activityPresetValues("normal")).filter((id) => id !== "behaviorModes.default").concat(["trigger.activeProbability.slider", "proactive.probability.slider"])) {
+        for (const event of ["input", "change"]) $(id).addEventListener(event, renderActivityPresetState);
+      }
       $("modelPreset").addEventListener("change", (e) => { if (e.target.value) applyModelPreset(e.target.value); e.target.value = ""; });
       $("aiProfileSelect").addEventListener("change", (e) => {
         syncSelectedAiProfileFromForm();
@@ -4472,6 +4552,193 @@
     window.addEventListener("error", (e) => showFatalError(`前端脚本错误：${e.message || e.error || "unknown error"}`));
     window.addEventListener("unhandledrejection", (e) => showFatalError(`异步加载错误：${e.reason?.message || e.reason || "unknown rejection"}`));
 
+    // Drafts, requests and revisions are account-scoped; late responses cannot
+    // replace another account's editor. Drafts remain in memory, never localStorage.
+    const newRoutineState = () => ({ revision: null, value: null, catalog: [], dirty: false, dirtyPaths: new Set(), conflict: false, error: "", loading: null, busy: false, loadedAt: 0 });
+    const automationBaseline = result => JSON.stringify({ owner: result.owner, enabled: result.enabled, rules: result.rules, routines: result.routines });
+    let routineState = newRoutineState();
+    const automationEditorIds = ["enabled", "id", "action", "triggerType", "target", "scope", "timezone", "time", "windowMinutes", "command", "prompt"];
+    function rememberAutomationDraft() {
+      const draft = automationAccounts.drafts.get(automationAccounts.selected); if (!draft) return;
+      draft.rules = automationRulesDraft; draft.index = selectedAutomationRuleIndex; draft.enabled = getVal("automation.enabled");
+      draft.editor = Object.fromEntries(automationEditorIds.map(id => [id, getVal(`automationRule.${id}`)]));
+      draft.days = [...document.querySelectorAll("[data-automation-day]")].map(node => node.checked);
+    }
+    function showAutomationDraft() {
+      const draft = automationAccounts.drafts.get(automationAccounts.selected); if (!draft) return;
+      automationRulesDraft = draft.rules; selectedAutomationRuleIndex = draft.index; routineState = draft.routine;
+      setVal("automation.enabled", draft.enabled); loadAutomationEditor();
+      if (draft.editor && draft.index >= 0) {
+        for (const [id, value] of Object.entries(draft.editor)) if (id !== "target") setVal(`automationRule.${id}`, value);
+        [...document.querySelectorAll("[data-automation-day]")].forEach((node, index) => { node.checked = draft.days[index]; });
+        toggleAutomationTriggerFields();
+      }
+      renderAutomationTargetPicker(); renderRoutines(true); renderAutomationAccountState();
+    }
+    function renderAutomationAccountState() {
+      const draft = automationAccounts.drafts.get(automationAccounts.selected);
+      const pending = [...automationAccounts.drafts.values()].some(item => item.dirty || item.routine.dirty);
+      if (pending) dirtyScopes.add("automation"); else dirtyScopes.delete("automation");
+      const exists = registryState.items.some(item => item.id === automationAccounts.selected && !item.archived);
+      for (const field of document.querySelectorAll("#automationEditor input, #automationEditor select, #automationEditor textarea, #automationEditor button")) field.disabled = !exists || !draft?.loaded;
+      $("automationRule.target").disabled = true;
+      $("automationAccountSelect").disabled = false;
+      const name = registryItem(automationAccounts.selected)?.displayName || automationAccounts.selected;
+      $("automationOwnerHint").textContent = !draft ? "尚无账号。请先在账号状态中新增账号。" : draft.routine.error || `${name} · ${draft.owner?.kind === "group" ? "此接管组共用一份规则，由当前成员执行" : "独立自动化目录，仅管理此账号"}${draft.dirty || draft.routine.dirty ? " · 有未保存修改" : ""}${draft.conflict || draft.routine.conflict ? " · 配置已变化，请核对后保存" : ""}${draft.unassignedCount ? ` · ${draft.unassignedCount} 条旧规则归属不明，已隔离停用` : ""}`;
+      for (const id of ["newAutomationRuleBtn", "saveAutomationBtn", "automation.enabled"]) $(id).disabled = !exists || !draft?.loaded || draft.busy;
+      $("newAutomationRuleBtn").disabled ||= automationRulesDraft.length >= 100;
+      renderSaveState();
+    }
+    async function selectAutomationAccount(id) {
+      rememberAutomationDraft(); automationAccounts.selected = id;
+      if (id && !automationAccounts.drafts.has(id)) automationAccounts.drafts.set(id, { rules: [], index: -1, enabled: false, dirty: false, editVersion: 0, routine: newRoutineState(), owner: null, loaded: false, busy: false });
+      if (id) showAutomationDraft();
+      return refreshRoutines();
+    }
+    async function refreshRoutines({ force = false } = {}) {
+      const picker = $("automationAccountSelect");
+      const items = registryState.items.filter(item => !item.archived);
+      picker.replaceChildren(...items.map(item => { const option = document.createElement("option"); option.value = item.id; const draft = automationAccounts.drafts.get(item.id); option.textContent = `${item.displayName || item.id}${draft?.dirty || draft?.routine.dirty ? " · 未保存" : ""}`; return option; }));
+      if (!automationAccounts.selected && items.length) return selectAutomationAccount(items[0].id);
+      picker.value = automationAccounts.selected;
+      const id = automationAccounts.selected, draft = automationAccounts.drafts.get(id);
+      if (!draft || !items.some(item => item.id === id)) { renderAutomationAccountState(); return; }
+      const state = draft.routine;
+      if (state.loading) return state.loading;
+      if ((state.busy || draft.busy) && !force) return;
+      if (!force && Date.now() - state.loadedAt < 15000) return;
+      const requestEpoch = draft.requestEpoch || 0;
+      state.loading = (async () => {
+        try {
+          const result = await sensitiveApi(`/api/automation/accounts/${encodeURIComponent(id)}`, "GET");
+          if (requestEpoch !== (draft.requestEpoch || 0)) return; // An older GET cannot undo a completed save.
+          if (!result.ok || result.revision == null || result.routines?.version !== 1) throw new Error("例行规则接口尚未就绪");
+          if (state.revision !== result.revision && draft.baseline !== automationBaseline(result)) { if (state.dirty) state.conflict = true; if (draft.dirty) draft.conflict = true; }
+          if (!state.dirty) state.value = structuredClone(result.routines);
+          if (!draft.dirty) { draft.rules = structuredClone(result.rules); draft.enabled = result.enabled; draft.editor = null; draft.index = Math.min(draft.index < 0 ? 0 : draft.index, draft.rules.length - 1); }
+          draft.owner = result.owner; draft.loaded = true; draft.unassignedCount = result.unassignedCount || 0;
+          draft.baseline = automationBaseline(result);
+          state.revision = result.revision; state.catalog = result.catalog || []; state.error = ""; state.loadedAt = Date.now();
+        } catch (error) { if (requestEpoch !== (draft.requestEpoch || 0)) return; state.error = `加载失败：${error.message}。已有草稿保留。`; }
+        if (automationAccounts.selected === id) {
+          if (draft.dirty || document.getElementById("automationEditor").contains(document.activeElement)) { renderAutomationAccountState(); renderRoutines(); }
+          else showAutomationDraft();
+        }
+      })().finally(() => { state.loading = null; });
+      return state.loading;
+    }
+    async function saveAccountAutomation(buttonId = "saveBtn") {
+      const id = automationAccounts.selected, draft = automationAccounts.drafts.get(id);
+      if (!draft?.loaded || draft.busy || draft.routine.busy) return;
+      let patch;
+      try { patch = automationPatch(); } catch (error) { toast(error.message, "bad"); return; }
+      if (draft.conflict && !confirm("配置在其他区域或窗口更新。确认在最新版本上只保存此账号的规则？")) return;
+      const version = draft.editVersion;
+      draft.busy = true; setBusy(buttonId, true, "保存中…"); renderAutomationAccountState();
+      try {
+        const result = await sensitiveApi(`/api/automation/accounts/${encodeURIComponent(id)}`, "PATCH", { expectedRevision: draft.routine.revision, ...patch });
+        draft.requestEpoch = (draft.requestEpoch || 0) + 1;
+        draft.routine.revision = result.revision; draft.conflict = false; draft.baseline = automationBaseline(result);
+        if (draft.editVersion === version) { draft.dirty = false; draft.rules = result.rules; draft.enabled = result.enabled; draft.editor = null; }
+        toast("此账号规则已保存，其他账号未改动");
+        if (automationAccounts.selected === id && draft.editVersion === version) showAutomationDraft();
+      } catch (error) {
+        if (error.status === 409) { draft.conflict = true; await refreshRoutines({ force: true }); }
+        draft.routine.error = `保存失败：${error.message}。草稿保留。`; toast(draft.routine.error, "bad");
+      } finally { draft.busy = false; setBusy(buttonId, false); renderAutomationAccountState(); }
+    }
+    function routineTarget(value) { return value.accountId && value.groupId ? "!conflict" : value.groupId ? `group:${value.groupId}` : value.accountId ? `account:${value.accountId}` : ""; }
+    function routinePatch(value, dirtyPaths = routineState.dirtyPaths) {
+      const patch = {}, schedules = new Map();
+      for (const path of dirtyPaths) {
+        const [kind, key, index, leaf] = path.split(".");
+        const source = value[kind]; if (!["daily", "hourly"].includes(kind) || !source) throw new Error("不能创建缺失的例行来源");
+        const scheduled = kind === "daily" && key === "schedules";
+        const field = scheduled ? leaf : key;
+        if (scheduled ? !source.schedules?.[index] || !["enabled", "time", "prompt", "requireHistory"].includes(field) : !(kind === "daily" ? ["enabled", "windowMinutes", "accountId", "groupId"] : ["enabled", "prompt", "accountId", "groupId"]).includes(field)) throw new Error("例行规则编辑字段无效");
+        const next = registryGet(value, path);
+        if (field === "time" && !/^([01]\d|2[0-3]):[0-5]\d$/.test(next)) throw new Error("时间须为 HH:MM（00:00–23:59）");
+        if (field === "prompt" && (typeof next !== "string" || next.length > 4000)) throw new Error("例行提示词最多 4000 字符");
+        if (field === "windowMinutes" && (!Number.isInteger(next) || next < 1 || next > 1440)) throw new Error("例行发送窗口须为 1–1440 分钟");
+        if (["enabled", "requireHistory"].includes(field) && typeof next !== "boolean") throw new Error("例行开关须为布尔值");
+        if (["accountId", "groupId"].includes(field)) {
+          if (source.accountId && source.groupId) throw new Error("发送账号与接管组互斥，请重新选择");
+          if (source.accountId && !registryItem(source.accountId)) throw new Error("发送账号已移除或尚未加载");
+          if (source.groupId && !registryState.groups.some((group) => group.id === source.groupId)) throw new Error("接管组已移除或尚未加载");
+        }
+        if (scheduled) {
+          if (!schedules.has(index)) schedules.set(index, { id: `daily-${index}` });
+          schedules.get(index)[field] = next;
+        } else (patch[kind] ||= {})[field] = ["accountId", "groupId"].includes(field) ? next || null : next;
+      }
+      if (schedules.size) (patch.daily ||= {}).schedules = [...schedules.values()];
+      return patch;
+    }
+    function renderRoutineState() {
+      $("routineState").className = routineState.error || routineState.conflict ? "warning" : "hint";
+      $("routineState").textContent = routineState.error || (routineState.conflict ? "配置修订已变化；草稿保留，下次保存须确认。" : routineState.dirty ? "例行规则有独立草稿；不会覆盖下方自动化规则。" : "原有范围和执行记录不变；仅保存此区域。定期私聊不随每日规则启用。");
+      $("saveRoutinesBtn").disabled = !routineState.value || !routineState.dirty || routineState.busy;
+      $("refreshRoutinesBtn").disabled = routineState.busy;
+      renderSaveState();
+    }
+    function renderRoutines(force = false) {
+      const host = $("routineEditor"); if (!host) return;
+      renderRoutineState();
+      if (!force && host.contains(document.activeElement)) return;
+      const expanded = new Set([...host.querySelectorAll("details[open]")].map((node) => node.dataset.routineEntry));
+      host.replaceChildren();
+      if (!routineState.value) { host.textContent = routineState.error ? "例行规则暂不可用，请刷新重试。" : "正在加载原有例行规则…"; return; }
+      const change = (path, next) => { registrySet(routineState.value, path, next); routineState.dirtyPaths.add(path); routineState.dirty = true; renderRoutineState(); };
+      const route = fields => { const note = document.createElement("p"); note.className = "hint"; note.textContent = `执行者：${registryItem(automationAccounts.selected)?.displayName || automationAccounts.selected}（当前自动化目录）`; fields.append(note); };
+      const daily = routineState.value.daily, hourly = routineState.value.hourly;
+      if (!daily && !hourly) { host.textContent = "此账号没有例行规则。不会自动带入其他账号的问候或总结；可在下方新建自己的自动化。"; return; }
+      if (daily) {
+      const fields = document.createElement("div"); fields.className = "form-grid";
+      registryField(fields, "启用每日例行规则", "enabled", daily.enabled !== false, (path, next) => change(`daily.${path}`, next), { type: "checkbox", disabled: routineState.busy });
+      registryField(fields, "发送窗口（分钟）", "windowMinutes", daily.windowMinutes ?? routineState.catalog.find((row) => row.kind === "daily")?.windowMinutes ?? 3, (path, next) => change(`daily.${path}`, next), { type: "number", disabled: routineState.busy }); route(fields, daily, "daily"); host.append(fields);
+      (daily.schedules || []).forEach((item, index) => {
+        const section = document.createElement("details"); section.className = "routine-entry panel-details";
+        section.dataset.routineEntry = `daily-${index}`; section.open = expanded.has(section.dataset.routineEntry);
+        const catalog = routineState.catalog.find((row) => row.kind === "daily" && row.id === `daily-${index}`);
+        const title = document.createElement("summary"); const label = { morning: "早间问候", evening: "晚间问候", summary: "每日总结" }[item.name || item.mode]; title.textContent = `${catalog?.title || label || catalog?.name || item.name || `每日例行 ${index + 1}`} · ${item.time || "未设置时间"} · ${daily.enabled !== false && item.enabled !== false ? "已配置" : "已关闭"}`; section.append(title);
+        const scope = document.createElement("p"); scope.className = "hint";
+        scope.textContent = `模式：${item.mode || catalog?.mode || "原模式"} · 范围：${catalog?.scopeStrategy || "原目标群"} · 仅此账号执行`; section.append(scope);
+        const row = document.createElement("div"); row.className = "form-grid";
+        for (const [label, path, type] of [["启用此项", "enabled", "checkbox"], ["时间（HH:MM）", "time", "text"], ["需要聊天历史", "requireHistory", "checkbox"], ["此时发送什么（不是人格提示词）", "prompt", "textarea"]]) registryField(row, label, path, path === "enabled" ? item.enabled !== false : path === "prompt" ? item.prompt ?? catalog?.prompt ?? "" : item[path], (key, next) => change(`daily.schedules.${index}.${key}`, next), { type, disabled: routineState.busy });
+        section.append(row); host.append(section);
+      });
+      }
+      if (hourly) {
+      const section = document.createElement("details"); section.className = "routine-entry panel-details";
+      section.dataset.routineEntry = "hourly"; section.open = expanded.has("hourly");
+      const title = document.createElement("summary"); title.textContent = `定期主人私聊（至少间隔一小时） · ${hourly.enabled !== false ? "已启用" : "已关闭"}`; section.append(title);
+      const scope = document.createElement("p"); scope.className = "hint"; const hourlyCatalog = routineState.catalog.find((row) => row.kind === "hourly");
+      scope.textContent = `范围：${hourlyCatalog?.scopeStrategy || "原私聊对象"} · 仅此账号执行`; section.append(scope);
+      const row = document.createElement("div"); row.className = "form-grid";
+      registryField(row, "启用定期主人私聊", "enabled", hourly.enabled !== false, (path, next) => change(`hourly.${path}`, next), { type: "checkbox", disabled: routineState.busy }); route(row, hourly, "hourly");
+      registryField(row, "私聊消息提示词", "prompt", hourly.prompt ?? hourlyCatalog?.prompt ?? "", (path, next) => change(`hourly.${path}`, next), { type: "textarea", disabled: routineState.busy });
+      section.append(row); host.append(section);
+      }
+    }
+    async function saveRoutines() {
+      const id = automationAccounts.selected, draft = automationAccounts.drafts.get(id), state = draft?.routine;
+      if (!state || state.busy || draft.busy || !state.value || !state.dirty) return;
+      state.busy = true; state.error = ""; renderRoutines(true);
+      try {
+        await state.loading;
+        const routines = routinePatch(state.value, state.dirtyPaths);
+        if (state.conflict && !confirm("配置修订已变化。确认只保存此账号例行规则？其他草稿不会提交。")) return;
+        const result = await sensitiveApi(`/api/automation/accounts/${encodeURIComponent(id)}`, "PATCH", { expectedRevision: state.revision, routines });
+        draft.requestEpoch = (draft.requestEpoch || 0) + 1;
+        state.revision = result.revision; state.value = result.routines; state.catalog = result.catalog; draft.baseline = automationBaseline(result);
+        state.dirty = false; state.dirtyPaths.clear(); state.conflict = false;
+        toast("此账号例行规则已保存；其他草稿保留");
+      } catch (error) {
+        if (error.status === 409) { state.conflict = true; if (automationAccounts.selected === id) await refreshRoutines({ force: true }); }
+        state.error = `保存失败：${error.message}。例行草稿保留，不会自动重试。`;
+      } finally { state.busy = false; if (automationAccounts.selected === id) renderRoutines(true); renderAutomationAccountState(); }
+    }
+
     // Dynamic registry UI. Drafts contain only editable, credential-free fields and
     // stay in memory across polling/navigation; no login material is persisted here.
     const registryState = {
@@ -4479,11 +4746,11 @@
       drafts: new Map(), contexts: { qa: "", vision: "", voice: "" },
       error: "", busy: false, refreshing: null, wizard: null, wizards: new Map(), operations: new Map(), groupDraft: null, modelCenter: null, modelLoadedAt: 0, modelError: ""
     };
-    const registryTabs = { identity: "身份与连接", features: "功能", sendTypes: "发送内容", scope: "会话范围", models: "模型与语音" };
+    const registryTabs = { identity: "基本", style: "风格", features: "功能", sendTypes: "发送", scope: "范围", models: "模型", connection: "连接高级" };
     const registryFeatures = { chat: "聊天问答", task: "正式任务", proactive: "主动参与", automation: "自动化", webSearch: "联网搜索", vision: "识图", asr: "语音识别", learning: "学习模式" };
     const registrySendTypes = { text: "文字", image: "图片", record: "语音", video: "视频", file: "文件" };
-    const registryIdentityKeys = ["displayName", "qq", "protocol", "managed", "onebotWsUrl", "onebotPath", "protocolContainer", "napcatContainer", "webuiPort", "noVncPort", "vncPort", "snowlumaImage", "styleProfileId", "promptOverride", "behaviorMode"];
-    const registryPolicyKeys = ["displayName", "styleProfileId", "promptOverride", "features", "sendTypes", "scope", "modelBindings", "voice", "behaviorMode"];
+    const registryIdentityKeys = ["displayName", "selfName", "qq", "protocol", "managed", "onebotWsUrl", "onebotPath", "protocolContainer", "napcatContainer", "webuiPort", "noVncPort", "vncPort", "snowlumaImage", "behaviorMode"];
+    const registryPolicyKeys = ["displayName", "selfName", "style", "features", "sendTypes", "scope", "modelBindings", "voice", "behaviorMode"];
 
     function registryStatus(id) {
       const rows = registryState.statuses;
@@ -4497,6 +4764,34 @@
       const group = registryGroup(item?.id);
       return group ? { ...item, ...group.policy } : item;
     }
+    function registryStyle(item = {}, config = cfg) {
+      // Explicit emptiness is intentional. Only missing snapshots resolve old
+      // promptOverride/profile settings, once, when building the editable draft.
+      if (Object.hasOwn(item, "style")) return { systemPrompt: typeof item.style?.systemPrompt === "string" ? item.style.systemPrompt : "" };
+      if (typeof item.promptOverride === "string" && item.promptOverride.trim()) return { systemPrompt: item.promptOverride };
+      const profiles = config?.styleProfiles?.profiles || [];
+      const profile = profiles.find((row) => row.id === (item.styleProfileId || config?.styleProfiles?.activeId || "legacy")) || profiles.find((row) => row.id === "legacy");
+      return { systemPrompt: String(profile?.systemPrompt || config?.prompt?.system || "") };
+    }
+    function registryCopyStyle(host, value, change, disabled = false) {
+      const box = document.createElement("div"); box.className = "registry-style-copy";
+      const sources = [["", "选择一次性复制来源"], ["original", "已有提示词模板"],
+        ...(cfg?.styleProfiles?.profiles || []).map((profile) => [`template:${profile.id}`, `模板 · ${profile.name || profile.id}`]),
+        ...registryState.items.map((item) => [`account:${item.id}`, `账号快照 · ${item.displayName || item.id}`])];
+      const picker = registryField(box, "复制风格到当前草稿", "styleCopySource", "", () => {}, { options: sources, disabled });
+      const copy = registryButton("复制为独立草稿", () => {
+        if (!picker.value) throw new Error("请先选择复制来源");
+        if (value.style?.systemPrompt && !confirm("替换当前风格草稿？复制后独立，不会修改来源。")) return;
+        const [kind, id] = picker.value.split(":");
+        if (kind === "account" && !registryItem(id)) throw new Error("复制来源账号已移除，请重新选择");
+        if (kind === "template" && !cfg?.styleProfiles?.profiles?.some((profile) => profile.id === id)) throw new Error("复制来源模板已移除，请重新选择");
+        const source = kind === "account" ? registryStyle(registryEffective(registryItem(id)))
+          : { systemPrompt: kind === "template" ? String(cfg?.styleProfiles?.profiles?.find((profile) => profile.id === id)?.systemPrompt ?? "") : String(cfg?.prompt?.system ?? "") };
+        change("style.systemPrompt", source.systemPrompt);
+        const editor = host.querySelector('[data-registry-field="style.systemPrompt"]'); if (editor) editor.value = source.systemPrompt;
+        registryFeedback("已复制到当前草稿；保存后生效，之后不跟随来源。身份、权限、记忆和自动化均未复制。");
+      }); copy.disabled = disabled; box.append(copy); host.append(box);
+    }
     function registryEditable(item) {
       const result = {};
       for (const key of [...registryIdentityKeys, "features", "sendTypes", "scope", "modelBindings", "voice"]) {
@@ -4506,7 +4801,9 @@
       result.sendTypes = { text: true, image: true, record: true, video: true, file: true, ...result.sendTypes };
       result.scope = { groups: true, private: true, groupMode: "all", groupIds: [], ...result.scope };
       result.modelBindings = { chat: "", task: "", vision: "", asr: "", tts: "", search: "", ...result.modelBindings };
+      result.selfName = typeof item.selfName === "string" ? item.selfName : String(item.displayName || "");
       result.voice = { mode: "inherit", preset: "", ...result.voice };
+      result.style = registryStyle(item);
       return result;
     }
     function registryDraft(id = registryState.selected) {
@@ -4611,13 +4908,14 @@
           registryState.loaded = true; registryState.error = "";
           if (models?.center) { registryState.modelCenter = structuredClone(models.center); registryState.modelLoadedAt = Date.now(); registryState.modelError = ""; }
           if (!registryItem()) registryState.selected = registryState.items[0]?.id || "";
+          if (!registryItem(registryState.contexts.qa)) registryState.contexts.qa = registryState.selected;
           if (configChanged) fillConfig({ preserveDirty: true });
           renderAutomationTargetPicker();
         } catch (error) {
           if (!cfg && configSnapshot) cfg = configSnapshot;
           registryState.error = `账号管理加载失败：${error.message}。已有草稿保留，请重试。`;
         }
-        renderRegistryLists(); renderRegistryEditor(); renderRegistryContexts(); renderRegistrySaveState();
+        renderRegistryLists(); renderRegistryEditor(); renderRegistryContexts(); renderRegistrySaveState(); renderApiAccountModels();
       })().finally(() => { registryState.refreshing = null; });
       return registryState.refreshing;
     }
@@ -4625,8 +4923,10 @@
       const wrapper = document.createElement("div"); wrapper.className = "field";
       const label = document.createElement("label"); label.textContent = labelText;
       const control = document.createElement(options ? "select" : type === "textarea" ? "textarea" : "input");
+      control.setAttribute("aria-label", labelText);
       if (!options && type !== "textarea") control.type = type;
       control.dataset.registryField = path;
+      if (path === "style.systemPrompt") control.maxLength = 12000;
       if (options) {
         const choices = [...options];
         if (value && !choices.some(([key]) => key === value)) choices.push([value, `${value}（现有值 / 方案缺失）`]);
@@ -4640,8 +4940,8 @@
         if (path === "scope.groupIds") next = [...new Set(control.value.split(/[\s,，]+/).filter(Boolean))];
         change(path, next);
       });
-      // Nesting the control in its label supplies a stable accessible name even
-      // when the same account has editors in more than one page.
+      // Keep label association; aria-label above excludes select option text
+      // from the accessible name used by exact-label navigation.
       label.append(control); wrapper.append(label);
       if (hint) { const note = document.createElement("p"); note.className = "hint"; note.textContent = hint; wrapper.append(note); }
       host.append(wrapper); return control;
@@ -4654,12 +4954,15 @@
     function registryFields(host, value, tab, change, { policy = false, disabled = false } = {}) {
       const field = (label, path, options = {}) => registryField(host, label, path, registryGet(value, path), change, { disabled, ...options });
       if (tab === "identity") {
-        field("机器人自称（不修改 QQ 昵称）", "displayName");
-        field("风格预设", "styleProfileId", { options: [["", "继承全局风格"], ...(cfg?.styleProfiles?.profiles || []).map((item) => [item.id, item.name || item.id])] });
-        field("账号专属提示词（留空继承）", "promptOverride", { type: "textarea" });
-        field("发言档位", "behaviorMode", { options: [["", "继承全局"], ["restrained", "克制"], ["normal", "正常"], ["lively", "活跃"]] });
+        field("账号名称（管理与识别）", "displayName", { hint: "用于账号列表和身份名称，不修改 QQ 昵称，也不要求与自称一致。" });
+        field("机器人自称（对话中使用）", "selfName", { hint: "可与账号名称不同，例如名称为“小助手”，自称为“我”；留空时使用本账号名称。不改变触发称呼、其他账号或风格提示词。" });
+        field("发言档位（不是风格绑定）", "behaviorMode", { options: [["", `使用问答页面的公共档位 · ${{ restrained: "克制", normal: "正常", lively: "活跃" }[cfg?.behaviorModes?.default] || cfg?.behaviorModes?.default || "未指定"}`], ["restrained", "克制"], ["normal", "正常"], ["lively", "活跃"]] });
+        if (!policy) field("预期 QQ（可留空，登录后识别）", "qq");
+      } else if (tab === "style") {
+        registryCopyStyle(host, value, change, disabled);
+        field("此账号系统提示词 · 独立快照", "style.systemPrompt", { type: "textarea", hint: "留空就是空提示词，不回退到模板或其他账号。复制只取已保存的快照，不建立绑定；定时发送请到自动化配置。" });
+      } else if (tab === "connection") {
         if (!policy) {
-          field("预期 QQ（可留空，登录后识别）", "qq");
           field("协议", "protocol", { options: [["snowluma", "SnowLuma"], ["napcat", "NapCat"]] });
           field("由本机托管协议端", "managed", { type: "checkbox", hint: "关闭表示接入已有外部 OneBot；不会创建或管理容器。" });
           field("正向 OneBot WebSocket（两种协议均支持）", "onebotWsUrl", { hint: "只填写不含凭据的 ws:// 或 wss:// 地址；凭据在协议端配置。" });
@@ -4679,7 +4982,9 @@
       }
     }
     function registryValidate(value, keys) {
-      if (keys.includes("displayName") && (!String(value.displayName || "").trim() || String(value.displayName).length > 60)) throw new Error("机器人自称须为 1–60 字");
+      if (keys.includes("style") && (typeof value.style?.systemPrompt !== "string" || value.style.systemPrompt.length > 12000)) throw new Error("风格提示词须为文本，最多 12000 字符；允许留空");
+      if (keys.includes("displayName") && (!String(value.displayName || "").trim() || String(value.displayName).length > 100)) throw new Error("账号名称须为 1–100 字");
+      if (keys.includes("selfName") && (typeof value.selfName !== "string" || value.selfName.length > 100)) throw new Error("机器人自称须为文本，最多 100 字；允许留空");
       if (keys.includes("qq") && value.qq && !/^\d{5,20}$/.test(value.qq)) throw new Error("QQ 须为 5–20 位数字或留空");
       if (keys.includes("scope") && (value.scope?.groupIds || []).some((id) => !/^\d{1,20}$/.test(id))) throw new Error("群号须为 1–20 位数字");
       if (keys.includes("onebotWsUrl") && value.onebotWsUrl) {
@@ -4688,7 +4993,7 @@
       }
       for (const key of keys.filter((key) => key.endsWith("Port"))) if (value[key] != null && (!Number.isInteger(value[key]) || value[key] < 1 || value[key] > 65535)) throw new Error("端口须为 1–65535 或留空");
     }
-    function registryTabKeys(tab) { return tab === "identity" ? registryIdentityKeys : tab === "models" ? ["modelBindings", "voice"] : [tab]; }
+    function registryTabKeys(tab) { return tab === "identity" ? ["displayName", "selfName", "qq", "behaviorMode"] : tab === "connection" ? registryIdentityKeys.filter((key) => !["displayName", "selfName", "qq", "behaviorMode"].includes(key)) : tab === "models" ? ["modelBindings", "voice"] : [tab]; }
     function registryPatch(draft, keys) {
       registryValidate(draft.value, keys);
       const patch = {};
@@ -4706,19 +5011,30 @@
       }
       try {
         const patch = registryPatch(draft, keys);
+        draft.saveState = { label: cleanTab || "当前标签", keys: [...keys], status: "saving" };
+        renderRegistrySaveState();
         const result = await registryRequest(`/api/accounts/${encodeURIComponent(id)}`, "PATCH", { expectedRevision: registryState.revision, patch });
         registryState.revision = result.revision ?? registryState.revision;
         // Preserve other tab drafts and apply only the saved fields locally.
         Object.assign(registryItem(id), patch);
+        // The accepted patch is our new baseline, even if the user continued
+        // typing while PATCH was in flight. Do not mistake that newer local
+        // draft for an external conflict when the confirmed snapshot arrives.
+        draft.base ||= registryEditable(registryItem(id));
+        Object.assign(draft.base, structuredClone(patch));
         for (const path of [...draft.dirty]) if (keys.includes(path.split(".")[0]) && JSON.stringify(registryGet(draft.value, path)) === JSON.stringify(registryGet(patch, path))) draft.dirty.delete(path);
         draft.revision = registryState.revision; draft.conflict = false;
         await refreshAccountRegistry();
+        draft.saveState.status = "saved";
         registryFeedback(`${cleanTab || "当前标签"}已保存；其他标签草稿保留。`);
       } catch (error) {
+        draft.saveState = { label: cleanTab || "当前标签", keys: [...keys], status: "failed" };
         if (error.status === 409) { draft.conflict = true; await refreshAccountRegistry(); }
         registryFeedback(`保存失败：${error.message}。草稿完整保留。`, true);
         error.registryReported = true;
         throw error;
+      } finally {
+        renderSaveState();
       }
     }
     async function saveRegistryEditor() {
@@ -4758,9 +5074,23 @@
         $("saveBtn").classList.add("hidden");
         $("pageActionState").textContent = registryState.error || "每个账号独立工作；使用编辑器中的按钮，只保存当前标签。";
       }
-      if (registryState.contexts[activePage]) $("saveBtn").classList.add("hidden");
+      for (const node of document.querySelectorAll("[data-registry-edit-state]")) {
+        const state = registryDraftStatus(node.dataset.accountId, node.dataset.registryTab || null);
+        node.textContent = state.text; node.className = `pill ${state.kind === "saved" ? "good" : ["failed", "conflict"].includes(state.kind) ? "bad" : ""}`;
+      }
+      if (registryState.contexts[activePage] && (activePage !== "qa" || activeTabs.qa === "persona")) $("saveBtn").classList.add("hidden");
       const button = $("registrySaveTab");
-      if (button) button.disabled = registryState.busy || !registryState.loaded || !!registryState.error || !!registryGroup(registryState.selected);
+      if (button) button.disabled = registryState.busy || !registryState.loaded || !!registryState.error || (!!registryGroup(registryState.selected) && registryState.tab !== "connection");
+    }
+    function registryDraftStatus(id, tab = null) {
+      const draft = registryState.drafts.get(id);
+      const keys = tab ? registryTabKeys(tab) : null;
+      const relevant = !keys || draft?.saveState?.keys?.some((key) => keys.includes(key));
+      if (relevant && draft?.saveState?.status === "saving") return { kind: "saving", text: "保存中…" };
+      if (draft?.conflict) return { kind: "conflict", text: "版本冲突 · 草稿保留" };
+      if (relevant && draft?.saveState?.status === "failed") return { kind: "failed", text: "保存失败 · 草稿保留" };
+      if ([...(draft?.dirty || [])].some((path) => !keys || keys.includes(path.split(".")[0]))) return { kind: "dirty", text: "有未保存修改" };
+      return { kind: "saved", text: tab ? `${registryTabs[tab]}已保存` : "配置已保存" };
     }
     function renderRegistryLists() {
       for (const host of document.querySelectorAll("[data-registry-list]")) {
@@ -4774,6 +5104,20 @@
         if (!registryState.items.length) { const empty = document.createElement("p"); empty.className = "hint"; empty.textContent = "还没有账号。从添加账号开始；账号数量不设上限。"; host.append(empty); }
         for (const item of registryState.items) {
           const status = registryStatus(item.id); const group = registryGroup(item.id);
+          if (host.dataset.registryList === "select") {
+            const row = registryButton("", () => registrySelect(item.id), "registry-account-option");
+            row.setAttribute("role", "radio"); row.setAttribute("aria-checked", String(item.id === registryState.selected));
+            row.dataset.accountId = item.id; row.tabIndex = item.id === registryState.selected ? 0 : -1;
+            row.addEventListener("keydown", (event) => {
+              if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+              event.preventDefault(); const ids = registryState.items.map((account) => account.id);
+              const next = event.key === "Home" ? ids[0] : event.key === "End" ? ids.at(-1) : ids[(ids.indexOf(item.id) + (event.key === "ArrowDown" ? 1 : ids.length - 1)) % ids.length];
+              registrySelect(next); [...host.querySelectorAll("[data-account-id]")].find((node) => node.dataset.accountId === next)?.focus();
+            });
+            const title = document.createElement("strong"); title.textContent = item.displayName || item.id;
+            const summary = document.createElement("span"); summary.textContent = `QQ ${status.qq || item.qq || "待识别"} · ${item.enabled === false ? "已暂停" : status.connected ? "已连接" : "未连接"}${registryState.drafts.get(item.id)?.dirty.size ? " · 草稿" : ""}`;
+            row.append(title, summary); host.append(row); continue;
+          }
           const operation = registryState.operations.get(item.id);
           const card = document.createElement("article"); card.className = "account-manager-card";
           const head = document.createElement("div"); head.className = "account-manager-head";
@@ -4786,9 +5130,11 @@
           health.textContent = status.statusReason || status.statusText || (status.connected ? "连接不等于收发验证；可执行只读检测。" : "等待连接或登录；检测不会发送 QQ 消息。");
           if (operation) health.textContent += ` · 协议操作：${({ queued: "排队中", running: "执行中", completed: "已完成", failed: "失败" })[operation.status] || operation.status}${operation.error ? `（${operation.error}）` : ""}`;
           const actions = document.createElement("div"); actions.className = "row account-actions";
-          actions.append(registryButton(item.id === registryState.selected ? "正在编辑" : "编辑账号", () => { registrySelect(item.id); switchPage("account-functions"); }),
+          const editState = document.createElement("span"); editState.dataset.registryEditState = ""; editState.dataset.accountId = item.id; editState.setAttribute("role", "status");
+          actions.append(registryButton("编辑账号", () => { registrySelect(item.id); switchPage("account-functions"); }),
             registryButton(item.enabled === false ? "恢复参与" : "暂停参与", () => registryAction(item, item.enabled === false ? "resume" : "pause")),
             registryButton("检测（不发消息）", () => registryAction(item, "probe")));
+          actions.append(editState);
           const webui = registrySafeLink(status.webui?.url || status.webuiUrl);
           if (webui) { const link = document.createElement("a"); link.className = "pill"; link.href = webui; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = "打开登录 WebUI"; actions.append(link); }
           const details = document.createElement("details"); details.className = "panel-details";
@@ -4831,16 +5177,26 @@
     function renderRegistryEditor(force = false) {
       const host = $("dynamicAccountEditor"); if (!host) return;
       // Polling must never replace any focused control, including save/tab buttons.
-      if (!force && registryItem() && host.querySelector('[data-registry-field="selected"]')?.value === registryState.selected && host.contains(document.activeElement)) {
+      if (!force && registryItem() && host.dataset.accountId === registryState.selected && host.contains(document.activeElement)) {
         const draft = registryDraft(); const group = registryGroup(registryState.selected);
         if (draft) syncRegistryDraftControls(host, group ? registryEditable(registryEffective(registryItem())) : draft.value, group);
+        const paused = registryItem().enabled === false;
+        const badge = host.querySelector("[data-registry-participation-state]"); if (badge) { badge.textContent = paused ? "已暂停参与" : "参与中"; badge.className = `pill ${paused ? "" : "good"}`; }
+        const action = host.querySelector("[data-registry-participation]"); if (action) action.textContent = paused ? "恢复参与" : "暂停参与";
         return;
       }
       host.replaceChildren();
       const item = registryItem(); if (!item) { host.textContent = "选择一个账号开始编辑，或添加账号。"; return; }
       const draft = registryDraft(); const group = registryGroup(item.id);
-      const picker = document.createElement("div"); picker.className = "form-grid";
-      registryField(picker, "正在编辑的账号", "selected", item.id, (_path, id) => registrySelect(id), { options: registryState.items.map((row) => [row.id, `${row.displayName || row.id} · ${row.id}`]) }); host.append(picker);
+      host.dataset.accountId = item.id;
+      const heading = document.createElement("h3"); heading.textContent = item.displayName || item.id; host.append(heading);
+      const participation = document.createElement("div"); participation.className = "row registry-participation";
+      const badge = document.createElement("span"); badge.className = `pill ${item.enabled === false ? "" : "good"}`; badge.textContent = item.enabled === false ? "已暂停参与" : "参与中"; badge.dataset.registryParticipationState = "";
+      const participationAction = registryButton(item.enabled === false ? "恢复参与" : "暂停参与", () => { const current = registryItem(item.id); if (!current) throw new Error("账号已移除"); return registryAction(current, current.enabled === false ? "resume" : "pause"); }); participationAction.dataset.registryParticipation = "";
+      participation.append(badge, participationAction); host.append(participation);
+      const participationHint = document.createElement("p"); participationHint.className = "hint"; participationHint.textContent = "暂停 / 恢复立即生效，不退出 QQ，也不保存或放弃其他草稿。协议维护请到账号状态。"; host.append(participationHint);
+      const identity = document.createElement("p"); identity.className = "hint"; identity.textContent = `${item.id} · 当前账号的草稿跨标签和页面保留。`; host.append(identity);
+      const editState = document.createElement("span"); editState.dataset.registryEditState = ""; editState.dataset.accountId = item.id; editState.dataset.registryTab = registryState.tab; editState.setAttribute("role", "status"); host.append(editState);
       const tabs = document.createElement("div"); tabs.className = "subnav"; tabs.setAttribute("role", "tablist"); tabs.setAttribute("aria-label", "账号设置标签");
       for (const [key, label] of Object.entries(registryTabs)) {
         const button = registryButton(label, () => registrySelect(item.id, key));
@@ -4849,28 +5205,23 @@
         tabs.append(button);
       }
       host.append(tabs);
-      if (group) { const note = document.createElement("p"); note.className = "warning"; note.textContent = `共享身份与功能由接管组「${group.name}」管理；QQ 和连接仍属于此账号。请在下方接管组编辑共享策略。`; host.append(note); }
+      if (group) { const note = document.createElement("p"); note.className = "warning"; note.textContent = `共享身份与功能由接管组「${group.name}」管理；连接仍属于此账号。请在下方接管组编辑共享策略。`; host.append(note); }
       const fields = document.createElement("div"); fields.className = "form-grid";
       registryFields(fields, group ? registryEditable(registryEffective(item)) : draft.value, registryState.tab, (path, value) => {
+        if (draft.saveState?.status !== "saving") draft.saveState = null;
         registrySet(draft.value, path, value); draft.dirty.add(path); renderRegistrySaveState();
         if (path === "managed") renderRegistryEditor(true);
-      }, { disabled: !!group });
+      }, { disabled: !!group && registryState.tab !== "connection" });
       host.append(fields);
       const note = document.createElement("p"); note.className = draft.conflict ? "warning" : "hint"; note.dataset.registryFeedback = ""; note.setAttribute("role", "status");
       note.textContent = draft.conflict ? "配置修订已变化。草稿保留；保存前将刷新并请求确认。" : registryState.tab === "models" && registryState.modelError ? registryState.modelError : "只保存当前标签，不保存其他账号或其他标签。模型只引用 API 管理中的方案，不包含密钥。"; host.append(note);
-      const save = registryButton(`保存${registryTabs[registryState.tab]}`, saveRegistryEditor, ""); save.id = "registrySaveTab"; host.append(save);
-      if (group && registryState.tab === "identity") {
-        const transportKeys = registryIdentityKeys.filter((key) => !registryPolicyKeys.includes(key));
-        for (const control of fields.querySelectorAll("[data-registry-field]")) if (transportKeys.includes(control.dataset.registryField)) control.disabled = false;
-        save.textContent = "保存此账号连接"; save.disabled = false;
-        const transportSave = registryButton("保存此账号连接", () => saveRegistryPatch(item.id, transportKeys, "此账号连接"), "");
-        transportSave.disabled = !!registryState.error; save.replaceWith(transportSave);
-      }
+      const save = registryButton(`保存「${item.displayName || item.id}」· ${registryTabs[registryState.tab]}`, saveRegistryEditor, ""); save.id = "registrySaveTab"; host.append(save);
       renderRegistrySaveState();
     }
     function renderRegistryContexts(force = false) {
       for (const page of ["qa", "vision", "voice"]) {
         const host = document.querySelector(`[data-registry-context="${page}"]`); if (!host) continue;
+        if (page === "qa") host.hidden = activeTabs.qa !== "persona";
         if (!force && registryItem(registryState.contexts[page]) && host.contains(document.activeElement)) {
           const draft = registryDraft(registryState.contexts[page]); const group = registryGroup(registryState.contexts[page]);
           if (draft) syncRegistryDraftControls(host, group ? registryEditable(registryEffective(registryItem(registryState.contexts[page]))) : draft.value, group);
@@ -4881,15 +5232,15 @@
         const picker = document.createElement("div"); picker.className = "form-grid";
         registryField(picker, "设置作用域", "context", selected, (_path, id) => {
           registryState.contexts[page] = id; renderRegistryContexts(true); renderSaveState();
-        }, { options: [["", "全局默认（仅影响继承账号）"], ...registryState.items.map((item) => [item.id, `${item.displayName || item.id} · ${item.id}`])] }); host.append(picker);
-        const globalPanel = $(`page-${page}`).querySelector(".registry-global"); globalPanel.hidden = !!selected;
+        }, { options: [...(page === "qa" ? [] : [["", "全局默认（仅影响继承账号）"]]), ...registryState.items.map((item) => [item.id, `${item.displayName || item.id} · ${item.id}`])] }); host.append(picker);
+        const globalPanel = $(`page-${page}`).querySelector(".registry-global"); globalPanel.hidden = page === "qa" || !!selected;
         // The old prompt picker remains available only for the global prompt.
         if (page === "qa" && !selected) {
           $("promptAccountPicker").classList.add("hidden");
           if (selectedPromptAccountId !== "default") { selectedPromptAccountId = "default"; renderPromptEditor(); }
         }
         if (!selected) {
-          const note = document.createElement("p"); note.className = "hint"; note.textContent = "以下是全局默认；选择账号可编辑其独立功能、方案和身份。暂停账号请到账号状态操作。"; host.append(note); continue;
+          const note = document.createElement("p"); note.className = "hint"; note.textContent = page === "qa" ? "请选择账号编辑独立风格；已有提示词可作为一次性复制模板。" : "以下是全局默认；选择账号可编辑其独立功能与方案。暂停账号请到账号状态操作。"; host.append(note); continue;
         }
         const item = registryItem(selected); const draft = registryDraft(selected);
         if (!item || !draft) { host.append(document.createTextNode("账号已被移除；草稿仍保留，请重新选择账号。")); continue; }
@@ -4900,11 +5251,7 @@
         const change = (path, next) => { registrySet(draft.value, path, next); draft.dirty.add(path); renderRegistrySaveState(); };
         const field = (label, path, options = {}) => registryField(fields, label, path, registryGet(value, path), change, { disabled: !!group, ...options });
         if (page === "qa") {
-          field("机器人自称", "displayName");
-          field("账号提示词（留空继承全局 / 风格）", "promptOverride", { type: "textarea" });
-          field("风格预设", "styleProfileId", { options: [["", "继承全局风格"], ...(cfg?.styleProfiles?.profiles || []).map((profile) => [profile.id, profile.name || profile.id])] });
-          for (const key of ["chat", "proactive", "webSearch", "learning"]) field(registryFeatures[key], `features.${key}`, { type: "checkbox" });
-          for (const key of ["chat", "search"]) field(`${key === "chat" ? "问答" : "搜索"}方案`, `modelBindings.${key}`, { options: registryModelOptions(key) });
+          registryFields(fields, value, "style", change, { disabled: !!group });
         } else if (page === "vision") {
           field("启用此账号识图", "features.vision", { type: "checkbox" });
           field("识图方案", "modelBindings.vision", { options: registryModelOptions("vision") });
@@ -4916,15 +5263,15 @@
           field("预设音色", "voice.preset", { options: [["", "继承全局音色"], ...VOICE_PRESET_IDS.map((id) => [id, id])] });
         }
         host.append(fields);
-        const save = registryButton("保存此账号当前页", () => saveRegistryContext(page), ""); save.disabled = !!group || !!registryState.error; host.append(save);
-        host.append(registryButton("打开完整账号编辑器", () => { registrySelect(selected, page === "qa" ? "identity" : "models"); switchPage("account-functions"); }));
+        const save = registryButton(`保存「${item.displayName || item.id}」· ${page === "qa" ? "风格" : "当前页"}`, () => saveRegistryContext(page), ""); save.disabled = !!group || !!registryState.error; host.append(save);
+        host.append(registryButton("配置账号功能与模型", () => { registrySelect(selected, page === "qa" ? "features" : "models"); switchPage("account-functions"); }));
       }
     }
     async function saveRegistryContext(page) {
       const id = registryState.contexts[page]; const draft = registryDraft(id); if (!draft) throw new Error("请选择账号");
       // Context pages may touch a subset of a nested tab. Send only those leaves,
       // not unsaved values from the full editor's other controls.
-      const paths = page === "qa" ? ["displayName", "styleProfileId", "promptOverride", "features.chat", "features.proactive", "features.webSearch", "features.learning", "modelBindings.chat", "modelBindings.search"]
+      const paths = page === "qa" ? ["style.systemPrompt"]
         : page === "vision" ? ["features.vision", "modelBindings.vision"]
         : ["features.asr", "sendTypes.record", "modelBindings.asr", "modelBindings.tts", "voice.mode", "voice.preset"];
       if (registryGroup(id)) throw new Error("请在接管组中修改共享策略");
@@ -4957,7 +5304,7 @@
       if (registryState.error || !registryState.loaded) throw new Error(registryState.error || "账号配置尚未加载");
       if (id && registryState.wizards.has(id)) registryState.wizard = registryState.wizards.get(id);
       if (!registryState.wizard || (id && id !== registryState.wizard.id) || registryState.wizard.complete) {
-        registryState.wizard = { step, id, value: { displayName: "新机器人", qq: "", protocol: "snowluma", managed: true, onebotWsUrl: "", onebotPath: "" }, operationId: "", verified: false, busy: false, error: "", complete: false };
+        registryState.wizard = { step, id, copyStyleFromAccountId: "", value: { displayName: "新机器人", qq: "", protocol: "snowluma", managed: true, onebotWsUrl: "", onebotPath: "", style: { systemPrompt: "" } }, operationId: "", verified: false, busy: false, error: "", complete: false };
       }
       if (registryState.wizard.id) registryState.wizards.set(registryState.wizard.id, registryState.wizard);
       renderRegistryWizard(); if (!$("registryWizard").open) $("registryWizard").showModal();
@@ -4983,11 +5330,19 @@
       };
       if (wizard.step === 1) {
         const change = (path, value) => registrySet(wizard.value, path, value);
-        for (const [label, path, options] of [["机器人自称", "displayName", {}], ["预期 QQ（可留空）", "qq", {}], ["协议", "protocol", { options: [["snowluma", "SnowLuma"], ["napcat", "NapCat"]] }], ["接入方式", "managed", { options: [["true", "本机托管（自动分配端口 / 容器）"], ["false", "外部已有 OneBot"]] }], ["外部正向 WebSocket（可选）", "onebotWsUrl", {}], ["反向 OneBot 路径（可选）", "onebotPath", {}]]) registryField(fields, label, path, path === "managed" ? String(wizard.value.managed) : wizard.value[path], (key, value) => change(key, key === "managed" ? value === "true" : value), { ...options, disabled: wizard.busy });
+        registryField(fields, "第一步 · 风格起点", "copyStyleFromAccountId", wizard.copyStyleFromAccountId, (_path, id) => { wizard.copyStyleFromAccountId = id; renderRegistryWizard(); }, {
+          options: [["", "从零开始 · 空提示词（默认）"], ...registryState.items.map((item) => [item.id, `复制账号风格 · ${item.displayName || item.id}`])], disabled: wizard.busy,
+          hint: "只在创建时复制源账号已保存的有效风格，之后完全独立；不复制身份、权限、记忆、自动化或其他设置。"
+        });
+        const preview = document.createElement("p"); preview.className = "account-effect";
+        preview.textContent = wizard.copyStyleFromAccountId ? `将复制「${registryItem(wizard.copyStyleFromAccountId)?.displayName || wizard.copyStyleFromAccountId}」的风格快照。可在创建后独立编辑。` : "从零：新账号的系统提示词为空，不自动复制其他账号。"; fields.append(preview);
+        for (const [label, path, options] of [["账号名称", "displayName", {}], ["机器人自称", "selfName", { hint: "可与名称不同；留空使用本账号名称。" }], ["预期 QQ（可留空）", "qq", {}], ["协议", "protocol", { options: [["snowluma", "SnowLuma"], ["napcat", "NapCat"]] }], ["接入方式", "managed", { options: [["true", "本机托管（自动分配端口 / 容器）"], ["false", "外部已有 OneBot"]] }], ["外部正向 WebSocket（可选）", "onebotWsUrl", {}], ["反向 OneBot 路径（可选）", "onebotPath", {}]]) registryField(fields, label, path, path === "managed" ? String(wizard.value.managed) : wizard.value[path], (key, value) => change(key, key === "managed" ? value === "true" : value), { ...options, disabled: wizard.busy });
         run("创建配置并继续", async () => {
           registryValidate(wizard.value, registryIdentityKeys);
           if (wizard.value.managed === false && !wizard.value.onebotWsUrl) throw new Error("外部账号须填写已有协议端的正向 OneBot WS 地址");
-          const result = await registryRequest("/api/accounts", "POST", { expectedRevision: registryState.revision, account: { ...wizard.value, enabled: false, protocolEnabled: true } });
+          const account = { ...wizard.value, enabled: false, protocolEnabled: true };
+          if (wizard.copyStyleFromAccountId) { delete account.style; account.copyStyleFromAccountId = wizard.copyStyleFromAccountId; }
+          const result = await registryRequest("/api/accounts", "POST", { expectedRevision: registryState.revision, account });
           wizard.id = result.account?.id || result.item?.id || result.accountId || result.id || "";
           if (!wizard.id) throw new Error("创建响应缺少账号 ID；请刷新账号列表，不要重复创建");
           registryState.wizards.set(wizard.id, wizard);
@@ -5125,8 +5480,11 @@
       for (const [mount, editable] of [["accountStatusMount", false], ["accountFunctionsMount", true]]) {
         const toolbar = document.createElement("div"); toolbar.className = "row panel-intro";
         toolbar.append(registryButton("添加账号", () => openRegistryWizard(), ""), registryButton("刷新账号", refreshAccountRegistry)); $(mount).append(toolbar);
-        if (editable) { const editor = document.createElement("div"); editor.id = "dynamicAccountEditor"; editor.className = "card"; $(mount).append(editor); }
-        const list = document.createElement("div"); list.className = "registry-list"; list.dataset.registryList = ""; $(mount).append(list);
+        const layout = document.createElement("div"); layout.className = editable ? "registry-workspace" : "registry-status-workspace"; $(mount).append(layout);
+        const list = document.createElement("div"); list.className = editable ? "registry-account-list" : "registry-list"; list.dataset.registryList = editable ? "select" : "status";
+        if (editable) { list.setAttribute("role", "radiogroup"); list.setAttribute("aria-label", "选择要编辑的账号"); }
+        layout.append(list);
+        if (editable) { const editor = document.createElement("div"); editor.id = "dynamicAccountEditor"; editor.className = "card"; layout.append(editor); }
       }
       const groups = document.createElement("details"); groups.className = "card registry-group"; groups.id = "registryGroups";
       const summary = document.createElement("summary"); summary.textContent = "高级 · 可选接管组"; groups.append(summary);
@@ -5139,10 +5497,21 @@
         while (section.firstChild) globals.append(section.firstChild);
         const context = document.createElement("div"); context.className = "card registry-context"; context.dataset.registryContext = page;
         section.append(context, globals);
+        if (page === "qa") {
+          // Keep the original behaviour page reachable, with its own scoped
+          // save. Only the obsolete prompt/inheritance editors stay hidden.
+          const intro = globals.querySelector(".panel-intro"); if (intro) section.insertBefore(intro, context);
+          const tabs = globals.querySelector(".qa-persona-bar"); section.insertBefore(tabs, context);
+          $("promptAccountPicker").classList.add("hidden");
+          section.append($("qa-behavior"));
+        }
       }
       window.addEventListener("beforeunload", (event) => {
-        if ([...registryState.drafts.values()].some((draft) => draft.dirty.size) || registryState.groupDraft || (registryState.wizard && !registryState.wizard.id)) { event.preventDefault(); event.returnValue = ""; }
+        if ([...registryState.drafts.values()].some((draft) => draft.dirty.size) || [...automationAccounts.drafts.values()].some(draft => draft.dirty || draft.routine.dirty) || registryState.groupDraft || (registryState.wizard && !registryState.wizard.id)) { event.preventDefault(); event.returnValue = ""; }
       });
+      $("saveRoutinesBtn").addEventListener("click", saveRoutines);
+      $("refreshRoutinesBtn").addEventListener("click", () => refreshRoutines({ force: true }));
+      $("automationAccountSelect").addEventListener("change", event => selectAutomationAccount(event.target.value));
       renderRegistryContexts(); renderRegistryLists();
     }
 

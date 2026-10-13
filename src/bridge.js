@@ -19,10 +19,12 @@ import { publicTask, TaskRuntime } from "./task-runtime.js";
 import { ensureRequestedTaskArtifacts, taskRequestsPdf } from "./task-artifacts.js";
 import { ReplyCoordinator } from "./reply-coordinator.js";
 import { accountCanChat, accountCanOfferTask, accountIdentityForPrompt, accountTopology, botModeForAccount, botSelfSlot, systemPromptForAccount, configForAccountCapabilities } from "./bot-capabilities.js";
-import { registryConfig, normalizeAccountRegistry, accountItems, accountGroup, effectiveAccount, newAccount, mergeAccountPatch, syncLegacyAccountPatch, accountScopeAllows, publicAccount } from "./account-registry.js";
+import { registryConfig, normalizeAccountRegistry, accountItems, accountGroup, effectiveAccount, newAccount, mergeAccountPatch, syncLegacyAccountPatch, accountScopeAllows, publicAccount, accountPolicy, ACCOUNT_POLICY_KEYS } from "./account-registry.js";
 import { accountDeliveryDecision, GroupSendCoordinator } from "./account-delivery.js";
 import { botCommandText, botCommandFeedback, groupCommandBots, routeBotCommand, GroupBotMembership } from "./bot-command-routing.js";
 import { automationOccurrenceKey, dueAutomationRules, matchAutomationCommand, validateAutomationRules } from "./automation-rules.js";
+import { normalizeAutomationRoutines, legacyRoutineConfig, routineCatalog, patchAutomationRoutines, publicAutomationRoutines } from "./legacy-automation.js";
+import { normalizeAccountAutomation, automationOwnerEntries, automationForAccount, patchAccountAutomation, syncLegacyAutomationPatch, hasOwnedAutomation, assertAutomationOwnershipTransition } from "./account-automation.js";
 import { synthesizeSpeechFile, transcribeAudioFile } from "./voice-service.js";
 import { voiceApiEnvironment, voiceApiKeyAvailable } from "./voice-credentials.js";
 import { getVoiceSecret, setVoiceSecret, deleteVoiceSecret } from "./voice-secret-store.js";
@@ -331,8 +333,12 @@ function loadConfig() {
   const chosen = fs.existsSync(configPath) ? configPath : fallbackConfigPath;
   const raw = fs.readFileSync(chosen, "utf8");
   const source = JSON.parse(raw);
-  registryMigrationPending ||= source.accounts?.version !== 2;
-  const cfg = registryConfig(source);
+  registryMigrationPending ||= source.accounts?.version !== 2
+    || source.accounts?.items?.some((account) => !account.style)
+    || source.accounts?.failoverGroups?.some((group) => !group.policy?.style);
+  registryMigrationPending ||= !source.automation?.routines && Boolean(source.dailyMessages || source.hourlyChat);
+  registryMigrationPending ||= source.automation?.ownershipVersion !== 1;
+  const cfg = normalizeAccountAutomation(normalizeAutomationRoutines(registryConfig(source)));
   for (const key of Object.keys(cfg)) if (key.startsWith("__")) delete cfg[key];
   if (cfg.apiCenter?.connections?.length) applyApiCenterBindings(cfg, normalizeApiCenter(cfg), "");
   cfg.__path = chosen;
@@ -368,7 +374,7 @@ function saveConfig(config) {
     const backup = `${target}.bak.${new Date().toISOString().replace(/[:.]/g, "-")}`;
     fs.copyFileSync(target, backup);
   }
-  const copy = registryConfig(config, { strict: true });
+  const copy = normalizeAccountAutomation(registryConfig(config, { strict: true }));
   for (const key of Object.keys(copy)) if (key.startsWith("__")) delete copy[key];
   const tmp = `${target}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(copy, null, 2)}\n`);
@@ -720,7 +726,7 @@ function writeJsonFileSafe(filePath, value) {
 }
 
 function botDisplayName(config) {
-  return config.__activeAccountDisplayName || config.persona?.displayName || "Hermes小跟班";
+  return config.__activeAccountDisplayName || config.persona?.displayName || "Hermes Bot";
 }
 
 function redactSensitive(text, config) {
@@ -1362,9 +1368,9 @@ function ensureUserMemory(gm, senderId, senderName = "") {
 function ensureBotSelfMemory(gm, config = {}) {
   const displayName = botDisplayName(config);
   const bot = botSelfSlot(gm, config);
-  bot.names ||= [displayName, "小跟班", "Hermes"];
+  bot.names ||= [displayName];
   bot.identity ||= [
-    `我是 ${displayName}，通过 Hermes 接入 QQ 的 AI 群友/小跟班。`,
+    `我是 ${displayName}，通过 Hermes 接入 QQ 的 AI 群友。`,
     "我不是群管理员，也不能真的转账、充值、踢人、@群主或替用户操作 QQ。"
   ];
   bot.personality ||= [
@@ -1413,7 +1419,8 @@ function updateBotSelfMemoryFromMessage(memory, groupId, text, config, meta = {}
   while (bot.recentMessages.length > Number(config.memory?.botSelf?.maxRecentMessages || 16)) bot.recentMessages.shift();
   if (
     message.length >= Number(config.memory?.botSelf?.notableMinLength || 12)
-    || /(我|小跟班|Hermes|记住|以后|不会|能|不能|承认|抱歉|我刚)/.test(message)
+    || /(我|记住|以后|不会|能|不能|承认|抱歉|我刚)/.test(message)
+    || asArray(bot.names).some(name => name && message.includes(name))
   ) {
     dedupePushObject(bot.notableMessages, item, "text", Number(config.memory?.botSelf?.maxNotableMessages || 24));
   }
@@ -2873,7 +2880,7 @@ function detectWebSearchRequest(text, config, context = {}) {
 
 function webSearchJudgePrompt(candidate, { text, history = [], current = null, config }) {
   const recent = history.slice(-8).map(shortMessageForPrompt).join("\n");
-  const botNames = asArray(config.botNames).filter(Boolean).join("、") || "小跟班";
+  const botNames = asArray(config.botNames).filter(Boolean).join("、") || botDisplayName(config);
   return `你是 QQ 群聊机器人的联网搜索意图裁判。请判断当前消息是否真的需要联网搜索。
 
 规则：
@@ -5896,7 +5903,7 @@ function latestNapcatLoginEventKey(qqLogin) {
 function adminLoginAttemptNotificationText({ qqLogin, onebotConnected, onebotStale = false, config }) {
   const status = qqLogin?.status || "unknown";
   const lines = [
-    "【小跟班登录尝试】",
+    "【Hermes 登录尝试】",
     `状态：${qqLogin?.message || status}`,
     `OneBot：${onebotStale ? "疑似卡住" : onebotConnected ? "已连接" : "未连接"}`
   ];
@@ -5917,7 +5924,7 @@ function adminLoginAttemptNotificationText({ qqLogin, onebotConnected, onebotSta
 function adminStatusNotificationText({ qqLogin, onebotConnected, onebotStale = false, config }) {
   const status = qqLogin?.status || "unknown";
   const lines = [
-    "【小跟班状态提醒】",
+    "【Hermes 状态提醒】",
     `状态：${qqLogin?.message || status}`,
     `OneBot：${onebotStale ? "疑似卡住" : onebotConnected ? "已连接" : "未连接"}`
   ];
@@ -5962,7 +5969,7 @@ function adminRecoveryNotificationText({ incident, qqLogin, onebotConnected, one
   const startAt = incident?.startedAt || endAt;
   const duration = formatDuration(endAt - startAt);
   const lines = [
-    "【小跟班中断恢复】",
+    "【Hermes 中断恢复】",
     `中断开始：${formatLocalDateTime(startAt)}`,
     `恢复时间：${formatLocalDateTime(endAt)}`,
     `中断时长：${duration}`,
@@ -5984,10 +5991,10 @@ function adminRecoveryNotificationText({ incident, qqLogin, onebotConnected, one
 
 function loginRecoveryNotificationText({ stage, reason = "", qqLogin, onebotConnected, onebotStale = false, qrcode = null, action = "" }) {
   const title = stage === "recovered"
-    ? "【小跟班自动恢复成功】"
+    ? "【Hermes 自动恢复成功】"
     : stage === "need_scan"
-      ? "【小跟班需要扫码】"
-      : "【小跟班自动恢复】";
+      ? "【Hermes 需要扫码】"
+      : "【Hermes 自动恢复】";
   const lines = [
     title,
     `状态：${qqLogin?.message || qqLogin?.status || "未知"}`,
@@ -6017,7 +6024,7 @@ function adminPeriodicStatusText({ qqLogin, onebotConnected, onebotStale, config
     ? Math.round((Date.now() - runtimeStatus.lastOneBotMessageAt) / 1000)
     : null;
   const lines = [
-    "【小跟班半小时状态】",
+    "【Hermes 半小时状态】",
     `时间：${localNowText()}`,
     `QQ：${qqLogin?.message || qqLogin?.status || "未知"}`,
     `OneBot：${onebotStale ? "疑似假在线" : onebotConnected ? "已连接" : "未连接"}`,
@@ -7112,7 +7119,7 @@ async function runHermesAgentTask(task, { signal, outputsDir, config: runtimeCon
   }
   const fileContext = taskGrantedFileContext(task, config);
   const taskAccount = accountById(config, task.accountId) || accountById(config, config.accounts?.primary?.id || "primary");
-  const taskStyle = accountTopology(config) !== "failover" && (taskAccount?.styleProfileId || taskAccount?.promptOverride)
+  const taskStyle = taskAccount
     ? systemPromptForAccount(config, taskAccount.id).trim().slice(0, 3000)
     : "";
   const prompt = `你正在执行一个由 QQ Bot 正式确认的后台任务。保持 Hermes Agent 的规划和工具能力，但严格遵守权限。
@@ -7219,12 +7226,18 @@ ${accountIdentityForPrompt(config, taskAccount?.id || "primary")}
 // --- Hourly Chat ---
 
 const hourlyChatState = { lastSentAt: 0, inFlight: false };
+const hourlyChatByOwner = new Map();
 
 async function runHourlyChat({ ws, config, isCurrent = () => true }) {
+  config = legacyRoutineConfig(config);
+  if (config.automation?.enabled !== true) return;
   if (config.hourlyChat?.enabled === false) return;
   if (ws.readyState !== 1) return;
 
   const hc = config.hourlyChat || {};
+  const ownerKey = config.__automationOwnerKey;
+  if (ownerKey && !hourlyChatByOwner.has(ownerKey)) hourlyChatByOwner.set(ownerKey, { lastSentAt: 0, inFlight: false });
+  const state = ownerKey ? hourlyChatByOwner.get(ownerKey) : hourlyChatState;
   const intervalMs = Number(hc.checkIntervalMs || 60000);
 
   // Determine owner user IDs: prefer explicit config, fall back to admin notification recipients or ownerUserIds
@@ -7235,8 +7248,8 @@ async function runHourlyChat({ ws, config, isCurrent = () => true }) {
 
   const nowMs = Date.now();
   const hourMs = 3600000;
-  if (hourlyChatState.inFlight || nowMs - hourlyChatState.lastSentAt < hourMs) return;
-  hourlyChatState.inFlight = true;
+  if (state.inFlight || nowMs - state.lastSentAt < hourMs) return;
+  state.inFlight = true;
 
   const timeStr = localNowText();
   const prompt = `${systemPromptForAccount(config, config.__activeAccountId || "primary")}
@@ -7248,7 +7261,7 @@ ${accountIdentityForPrompt(config, config.__activeAccountId || "primary")}
     const response = await callHermes(prompt, config);
     const trimmed = (response || "").trim();
     if (!trimmed || trimmed === "__SKIP__") {
-      hourlyChatState.lastSentAt = nowMs;
+      state.lastSentAt = nowMs;
       return;
     }
     if (!isCurrent()) return;
@@ -7256,17 +7269,18 @@ ${accountIdentityForPrompt(config, config.__activeAccountId || "primary")}
     for (const uid of ownerIds) {
       if (!await sendPrivateMessageToUser(ws, uid, trimmed, config)) throw new Error("hourly chat delivery not confirmed");
     }
-    hourlyChatState.lastSentAt = Date.now();
+    state.lastSentAt = Date.now();
     log(`hourly chat sent to ${ownerIds.join(",")} text=${JSON.stringify(trimmed)}`);
   } catch (err) {
-    hourlyChatState.lastSentAt = nowMs;
+    state.lastSentAt = nowMs;
     warn(`hourly chat failed: ${err.message}`);
   } finally {
-    hourlyChatState.inFlight = false;
+    state.inFlight = false;
   }
 }
 
 async function runDailyMessages({ ws, config, memory, historyByGroup, lastEventByGroup, lastBotMessageByGroup, activeSocket, isCurrent = () => true, sendMessage }) {
+  config = legacyRoutineConfig(config);
   const daily = config.dailyMessages;
   if (daily?.enabled === false) return;
   if (ws.readyState !== 1) return;
@@ -7282,13 +7296,16 @@ async function runDailyMessages({ ws, config, memory, historyByGroup, lastEventB
 
   for (const schedule of schedules) {
     if (schedule.enabled === false) continue;
-    const key = String(schedule.name || schedule.mode || schedule.time || "daily");
+    const legacyKey = String(schedule.legacyLedgerKey || schedule.name || schedule.mode || schedule.time || "daily");
+    const key = config.__automationOwnerKey ? `routine:${config.__automationOwnerKey}:${legacyKey}` : legacyKey;
+    const occupied = (groupId) => wasDailySent(memory, groupId, key, dateKey)
+      || (config.__legacyRoutineLedger === true && wasDailySent(memory, groupId, legacyKey, dateKey));
     if (!isWithinScheduleWindow(schedule.time, windowMinutes)) continue;
 
     for (const groupIdRaw of groups) {
       const groupId = asStringId(groupIdRaw);
       if (!isCurrent() || activeSocket() !== ws || ws.readyState !== 1) return;
-      if (!groupId || wasDailySent(memory, groupId, key, dateKey) || isQuiet(memory, groupId, config)) continue;
+      if (!groupId || occupied(groupId) || isQuiet(memory, groupId, config)) continue;
 
       const history = historyByGroup.get(groupId) || [];
       const lastEvent = lastEventByGroup.get(groupId);
@@ -7309,14 +7326,14 @@ async function runDailyMessages({ ws, config, memory, historyByGroup, lastEventB
           config,
           history,
           current,
-          mode: schedule.mode || key,
+          mode: schedule.mode || legacyKey,
           memoryText,
           contextBundle
         });
         const response = trimForGroup(await callHermes(prompt, config), config);
         if (!response) continue;
         if (!isCurrent() || activeSocket() !== ws || ws.readyState !== 1) return;
-        if (isQuiet(memory, groupId, config) || wasDailySent(memory, groupId, key, dateKey)) continue;
+        if (isQuiet(memory, groupId, config) || occupied(groupId)) continue;
         // Claim before sending: a lost OneBot acknowledgement must not trigger a duplicate summary.
         markDailySent(memory, groupId, key, dateKey, "sending");
         saveMemory(memory);
@@ -7337,13 +7354,13 @@ async function runDailyMessages({ ws, config, memory, historyByGroup, lastEventB
           config,
           memory,
           meta: {
-            source: schedule.mode || key,
+            source: schedule.mode || legacyKey,
             mentionedUserIds: relatedUserIdsFromText(response, groupMemory(memory, groupId))
           }
         });
 
         const gm = groupMemory(memory, groupId);
-        if ((schedule.mode || key) === "summary") {
+        if ((schedule.mode || legacyKey) === "summary") {
           gm.summaries.push({ date: dateKey, text: response, at: now() });
           while (gm.summaries.length > Number(config.memory?.maxSummaries || 14)) gm.summaries.shift();
         }
@@ -7369,7 +7386,8 @@ function publicConfig(config) {
     revision: configRevision,
     botFeatures: deepClone(config.botFeatures || {}),
     styleProfiles: deepClone(config.styleProfiles || {}),
-    automation: deepClone(config.automation || { enabled: false, rules: [] }),
+    automation: { enabled: config.automation?.enabled === true, ownershipVersion: 1, rules: [],
+      unassignedCount: config.automation?.unassigned?.length || 0 },
     learningMode: deepClone(config.learningMode || { enabled: true, groupIds: [] }),
     voice: {
       enabled: config.voice?.enabled === true,
@@ -7894,7 +7912,7 @@ function sanitizeConfigPatch(patch, currentConfig) {
       next.accounts.primary ||= {};
       setIfPresent(next.accounts.primary, patch.accounts.primary, "id", (x) => asStringId(x) || "primary");
       setIfPresent(next.accounts.primary, patch.accounts.primary, "qq", (x) => asStringId(x));
-      setIfPresent(next.accounts.primary, patch.accounts.primary, "displayName", (x) => stringValue(x, "Hermes小跟班").trim() || "Hermes小跟班");
+      setIfPresent(next.accounts.primary, patch.accounts.primary, "displayName", (x) => stringValue(x, "机器人 A").trim() || "机器人 A");
       setIfPresent(next.accounts.primary, patch.accounts.primary, "styleProfileId", (x) => stringValue(x).trim().slice(0, 40));
       setIfPresent(next.accounts.primary, patch.accounts.primary, "promptOverride", (x) => stringValue(x).slice(0, 12000));
       setIfPresent(next.accounts.primary, patch.accounts.primary, "enabled", (x) => booleanValue(x, true));
@@ -7918,7 +7936,7 @@ function sanitizeConfigPatch(patch, currentConfig) {
           id: asStringId(merged.id || `standby-${index + 1}`),
           qq: asStringId(merged.qq || ""),
           role: "standby",
-          displayName: stringValue(merged.displayName || merged.name || `Hermes小跟班${index + 2}`).trim() || `Hermes小跟班${index + 2}`,
+          displayName: stringValue(merged.displayName || merged.name || `机器人 ${index + 2}`).trim() || `机器人 ${index + 2}`,
           styleProfileId: stringValue(merged.styleProfileId || "").trim().slice(0, 40),
           promptOverride: stringValue(merged.promptOverride || "").slice(0, 12000),
           protocol: accountProtocol(merged),
@@ -8011,7 +8029,7 @@ function sanitizeConfigPatch(patch, currentConfig) {
     applyApiCenterBindings(next, next.apiCenter, "");
   }
   next.__path = currentConfig.__path || configPath;
-  return syncLegacyAccountPatch(currentConfig, next, patch);
+  return syncLegacyAutomationPatch(currentConfig, syncLegacyAccountPatch(currentConfig, next, patch), patch);
 }
 
 function publicAccountRegistry(config) {
@@ -8734,7 +8752,8 @@ async function main() {
   }
 
   function validateAccountConfig(candidate) {
-    const next = registryConfig(candidate, { strict: true });
+    assertAutomationOwnershipTransition(config, candidate);
+    const next = normalizeAccountAutomation(registryConfig(candidate, { strict: true }));
     for (const previous of accountItems(config)) {
       if (!accountById(next, previous.id) && accountReferences(previous.id).length) throw new Error("账号仍有活动任务、接管组或自动化引用，不能归档");
     }
@@ -8747,7 +8766,7 @@ async function main() {
         } catch { throw new Error(`账号 ${item.id} 引用的 API 模型方案不存在或类型不匹配，请先修改账号或接管组绑定`); }
       }
     }
-    for (const rule of next.automation?.rules || []) {
+    for (const rule of automationOwnerEntries(next).flatMap((owner) => owner.rules)) {
       if (rule.accountId && !accountById(next, rule.accountId)) throw new Error("自动化引用了不存在的账号");
       if (rule.groupId && !next.accounts.failoverGroups.some((group) => group.id === rule.groupId)) throw new Error("自动化引用了不存在的接管组");
     }
@@ -8766,6 +8785,9 @@ async function main() {
     for (const [id, active] of activeGroupAccounts) if (!config.accounts.failoverGroups.some((group) => group.id === id && group.memberIds.includes(active.id))) activeGroupAccounts.delete(id);
     if (accountTopology(config) !== "failover") for (const group of config.accounts.failoverGroups) selectedGroupAccount(group);
     ensureForwardOneBotConnections();
+    // Route changes must take effect before queued work resumes, not only when
+    // somebody later opens /health. Reuse the existing evidence-based election.
+    loginRecoverySnapshot();
   }
 
   function accountsPayload() {
@@ -8800,8 +8822,9 @@ async function main() {
     const references = [];
     if ([...taskRuntime.tasks.values()].some((task) => task.accountId === id && !["completed", "failed", "cancelled"].includes(task.status))) references.push("active tasks");
     if (config.accounts.failoverGroups.some((group) => group.memberIds.includes(id))) references.push("failover group");
-    if ((config.automation?.rules || []).some((rule) => rule.accountId === id || rule.senderAccountId === id || rule.conversationId?.endsWith(`:${id}`))) references.push("automation");
+    if (automationOwnerEntries(config).some((owner) => owner.accountId === id && hasOwnedAutomation(owner))) references.push("automation");
     if (config.dailyMessages?.accountId === id) references.push("daily messages");
+    if (Object.values(config.automation?.routines || {}).some((routine) => routine?.accountId === id)) references.push("automation routines");
     if ([...accountOperations.values()].some((operation) => operation.accountId === id && ["queued", "running"].includes(operation.status))) references.push("protocol operation");
     return references;
   }
@@ -10003,8 +10026,8 @@ async function main() {
     if (!wantsQr) return false;
     const force = /(强制|重登|重新登录|清理|reset)/i.test(raw);
     const latest = /(最新|刷新|新的|更新|重新生成)/i.test(raw);
-    const wantsStandby = /(备用|备号|小跟班2|standby|standby-a|备用号)/i.test(raw);
-    const wantsPrimary = /(主号|主账号|primary|小跟班(?!2))/i.test(raw);
+    const wantsStandby = /(备用|备号|standby|standby-a|备用号)/i.test(raw);
+    const wantsPrimary = /(主号|主账号|primary)/i.test(raw);
     const configured = configuredAccountDefinitions(config);
     const firstStandby = configured.find((account) => account.role === "standby");
     let account = configured.find((item, index) => raw.includes(item.qq) && item.qq?.length >= 5
@@ -10520,9 +10543,9 @@ async function main() {
       log(`account route switched ${previous} -> ${account.id}${reason ? ` reason=${reason}` : ""}`);
       if (accountTopology(config) !== "failover") return true;
       if (account.role === "standby" && cfg.announceTakeover) {
-        queueAdminNotification(`【小跟班账号接管】\n主账号暂不可用，已切到备用账号 ${account.id}${state.selfId ? `（${state.selfId}）` : ""}。\n原因：${clampText(reason || "主账号异常", 240)}`);
+        queueAdminNotification(`【Hermes 账号接管】\n主账号暂不可用，已切到备用账号 ${account.id}${state.selfId ? `（${state.selfId}）` : ""}。\n原因：${clampText(reason || "主账号异常", 240)}`);
       } else if (account.role === "primary") {
-        queueAdminNotification(`【小跟班账号切回】\n主账号已恢复，已切回 ${account.id}。`);
+        queueAdminNotification(`【Hermes 账号切回】\n主账号已恢复，已切回 ${account.id}。`);
       }
       announceAccountSwitchToRecentGroups(previousAccount, account, reason).then((sentCount) => {
         if (!sentCount && activeAccountId === account.id && config.accounts?.failover?.announceInGroups !== false) {
@@ -11290,6 +11313,7 @@ async function main() {
           return replyJson(200, { ok: true, token: adminSessionToken });
         }
         if (["/api/voice/credential", "/api/voice/test", "/api/api-center", "/api/api-center/test"].includes(url.pathname)
+          || /^\/api\/automation\/(?:routines|accounts(?:\/[^/]+)?)$/.test(url.pathname)
           || /^\/api\/(?:accounts|account-groups)(?:\/|$)/.test(url.pathname)
           || /^\/api\/tasks(?:\/|$)/.test(url.pathname)
           || /^\/api\/api-center\/credentials\/[0-9a-f-]+$/.test(url.pathname)) {
@@ -11374,6 +11398,31 @@ async function main() {
           return replyJson(200, publicConfig(config));
         }
 
+        const automationAccountMatch = url.pathname.match(/^\/api\/automation\/accounts\/([^/]+)$/);
+        if (automationAccountMatch || url.pathname === "/api/automation/routines") {
+          const id = automationAccountMatch ? decodeURIComponent(automationAccountMatch[1]) : url.searchParams.get("account_id");
+          if (!id) return replyJson(400, { ok: false, error: "请选择账号；不再提供无归属的自动化设置" });
+          if (!accountById(config, id)) return replyJson(404, { ok: false, error: "账号不存在或已归档" });
+          if (req.method === "GET") return replyJson(200, {
+            ok: true, revision: configRevision, accountId: id, ...automationForAccount(config, id)
+          });
+          if (req.method !== "PATCH") return replyJson(405, { ok: false, error: "method not allowed" });
+          const body = await readBody();
+          if (!isPlainObject(body) || body.expectedRevision !== configRevision)
+            return replyJson(409, { ok: false, revision: configRevision, error: "配置已更新，例行规则草稿已保留，请刷新核对" });
+          if (dailyMessagesRunning || hourlyChatState.inFlight || [...hourlyChatByOwner.values()].some(state => state.inFlight) || automationRunning)
+            return replyJson(409, { ok: false, revision: configRevision, error: "例行规则正在执行，请稍后保存；草稿无需重填" });
+          let next;
+          try {
+            const patch = automationAccountMatch ? Object.fromEntries(Object.entries(body).filter(([key]) => key !== "expectedRevision")) : { routines: body.routines };
+            next = validateAccountConfig(patchAccountAutomation(config, id, patch));
+          }
+          catch (error) { return replyJson(400, { ok: false, error: error.message }); }
+          commitAccountConfig(next);
+          return replyJson(200, { ok: true, revision: configRevision,
+            accountId: id, ...automationForAccount(config, id) });
+        }
+
         if ((url.pathname !== "/api/accounts/peer-ping" && /^\/api\/accounts(?:\/operations\/[a-f0-9]+|\/[^/]+(?:\/(?:pause|resume|provision|protocol\/stop))?)?$/.test(url.pathname))
           || /^\/api\/account-groups(?:\/[^/]+)?$/.test(url.pathname)) {
           const operationMatch = url.pathname.match(/^\/api\/accounts\/operations\/([a-f0-9]+)$/);
@@ -11412,7 +11461,7 @@ async function main() {
               const index = next.accounts.items.findIndex((item) => item.id === id && !item.archived);
               if (index < 0) return replyJson(404, { ok: false, error: "账号不存在或已归档" });
               const account = next.accounts.items[index];
-              if (req.method === "PATCH" && !match[2]) next.accounts.items[index] = mergeAccountPatch(account, body.patch);
+              if (req.method === "PATCH" && !match[2]) next.accounts.items[index] = mergeAccountPatch(account, body.patch, next);
               else if (req.method === "DELETE" && !match[2]) {
                 const references = accountReferences(id);
                 if (references.length) return replyJson(409, { ok: false, revision: configRevision, references, error: "请先移除账号引用或结束活动任务" });
@@ -11434,7 +11483,7 @@ async function main() {
               const index = next.accounts.failoverGroups.findIndex((group) => group.id === id);
               if (req.method === "DELETE" && groupMatch[1]) {
                 if (index < 0) return replyJson(404, { ok: false, error: "接管组不存在" });
-                if ((next.automation?.rules || []).some((rule) => rule.groupId === id)) return replyJson(409, { ok: false, revision: configRevision, error: "自动化仍引用此接管组，请先移除引用" });
+                if (automationOwnerEntries(next).some(owner => owner.groupId === id && (owner.rules.length || Object.keys(owner.routines).some(key => key !== "version")))) return replyJson(409, { ok: false, revision: configRevision, error: "自动化仍引用此接管组，请先移除引用" });
                 next.accounts.failoverGroups.splice(index, 1);
               } else if (["POST", "PATCH"].includes(req.method) && isPlainObject(body.group)) {
                 if (body.group.id && body.group.id !== id) throw new Error("接管组 ID 不可修改");
@@ -11442,7 +11491,12 @@ async function main() {
                 if (req.method === "PATCH" && index < 0) return replyJson(404, { ok: false, error: "接管组不存在" });
                 const group = { ...(index >= 0 ? next.accounts.failoverGroups[index] : {}), ...body.group, id };
                 const policySource = next.accounts.items.find((item) => item.id === group.policyAccountId);
-                if (!group.policy) group.policy = Object.fromEntries(["displayName", "styleProfileId", "promptOverride", "features", "sendTypes", "scope", "modelBindings", "voice", "behaviorMode"].filter((key) => policySource?.[key] !== undefined).map((key) => [key, deepClone(policySource[key])]));
+                if (isPlainObject(body.group.policy)) {
+                  if (Object.keys(body.group.policy).some((key) => !ACCOUNT_POLICY_KEYS.includes(key))) throw new Error("接管组策略字段无效");
+                  const previousPolicy = index >= 0 ? next.accounts.failoverGroups[index].policy : {};
+                  group.policy = accountPolicy(mergeAccountPatch({ ...policySource, ...previousPolicy }, body.group.policy, next));
+                }
+                if (!group.policy) group.policy = Object.fromEntries(ACCOUNT_POLICY_KEYS.filter((key) => policySource?.[key] !== undefined).map((key) => [key, deepClone(policySource[key])]));
                 if (index >= 0) next.accounts.failoverGroups[index] = group; else next.accounts.failoverGroups.push(group);
               } else throw new Error("接管组请求无效");
               commitAccountConfig(next);
@@ -11610,7 +11664,9 @@ async function main() {
             return replyJson(409, { ok: false, error: "配置已在别处更新，请刷新后重试" });
           const configPatch = { ...patch };
           delete configPatch.expectedRevision;
-          const next = validateAccountConfig(sanitizeConfigPatch(configPatch, config));
+          let next;
+          try { next = validateAccountConfig(sanitizeConfigPatch(configPatch, config)); }
+          catch (error) { return replyJson(400, { ok: false, error: error.message }); }
           const enabledAccounts = configuredAccountDefinitions(next).filter((item) => item.enabled !== false);
           saveConfig(next);
           replaceConfigInPlace(config, loadConfig());
@@ -11631,6 +11687,7 @@ async function main() {
             config.__activeAccountDisplayName = active?.displayName || botDisplayName(config);
           }
           log("admin config saved and hot reloaded");
+          loginRecoverySnapshot();
           return replyJson(200, { ok: true, config: publicConfig(config), restartRequired: false });
         }
 
@@ -12628,19 +12685,20 @@ async function main() {
         return;
       }
 
-      if (config.automation?.enabled === true && Array.isArray(config.automation.rules)) {
+      const accountAutomation = automationForAccount(config, accountState.id);
+      if (accountAutomation.enabled && accountAutomation.rules.length) {
         // Automation scopes identify the human private chat, while reply
         // history/archives identify each independent bot's private chat.
         const automationConversationId = isPrivate ? `private:${senderId}` : `group:${asStringId(event.group_id)}`;
-        const matchedRules = matchAutomationCommand(text, config.automation.rules, automationConversationId);
+        const matchedRules = matchAutomationCommand(text, accountAutomation.rules, automationConversationId);
         if (matchedRules.length) {
           const eventId = asStringId(event.message_id) || stableMessageFingerprint(event, text);
           for (const rule of matchedRules) {
             if (rule.action.kind === "task" && !taskModeConfig(config).ownerUserIds.includes(senderId)
               && (isPrivate || !taskModeConfig(config).allowedGroupIds.includes(asStringId(event.group_id)))) continue;
-            const dedupeKey = `${rule.id}:${automationConversationId}:${eventId}`;
+            const dedupeKey = `${accountAutomation.owner.key}:${rule.id}:${automationConversationId}:${eventId}`;
             if (automationCommandSeen.has(dedupeKey)) continue;
-            const cooldownKey = `${rule.id}:${automationConversationId}`;
+            const cooldownKey = `${accountAutomation.owner.key}:${rule.id}:${automationConversationId}`;
             if (Date.now() - Number(automationCommandLastRun.get(cooldownKey) || 0) < 60_000) continue;
             automationCommandSeen.add(dedupeKey);
             automationCommandLastRun.set(cooldownKey, Date.now());
@@ -13244,15 +13302,17 @@ async function main() {
 
     // Hourly chat — send periodic private messages to bot owner
     const hourlyTimer = setInterval(() => {
-      const chatAccount = connectedAccountForRole("chat", { preferAccountId: ws.__hermesAccountId, strictPreferred: true });
-      if (chatAccount?.ws === ws) {
+      for (const owner of automationOwnerEntries(config)) {
+        if (!owner.routines.hourly || owner.routines.hourly.enabled === false) continue;
+        const chatAccount = routineSender(owner);
+        if (chatAccount?.ws !== ws) continue;
         const expectedRevision = configRevision;
         const hourlyBinding = oneBotBinding(ws, chatAccount.id);
-        runHourlyChat({ ws, config: configForReplyAccount(chatAccount),
+        void runHourlyChat({ ws, config: configForRoutineOwner(chatAccount, owner),
           isCurrent: () => configRevision === expectedRevision && oneBotBindingCurrent(ws, hourlyBinding)
-            && connectedAccountForRole("chat", { preferAccountId: chatAccount.id, strictPreferred: true })?.ws === ws });
+            && routineSender(owner)?.ws === ws }).catch(error => warn(`hourly scheduler failed: ${error.message}`));
       }
-    }, Number(config.hourlyChat?.checkIntervalMs || 60_000));
+    }, routineCheckInterval("hourly"));
     ws.on("close", () => clearInterval(hourlyTimer));
   }
 
@@ -13612,11 +13672,16 @@ async function main() {
   }
 
   async function executeAutomationRule(rule, conversationId, { event = null, senderId = "", senderName = "", source = "schedule" } = {}) {
+    if (!rule.accountId && !rule.groupId) return false;
+    const ownerKey = rule.groupId ? `group:${rule.groupId}` : `account:${rule.accountId}`;
+    const owner = automationOwnerEntries(config).find(entry => entry.key === ownerKey);
+    if (!owner) return false;
+    const ledgerKey = `automation:${ownerKey}:${rule.id}`;
     const group = rule.groupId ? config.accounts.failoverGroups.find((item) => item.id === rule.groupId) : null;
     if (rule.groupId && !group) return false;
     const targetAccountId = group ? (accountTopology(config) === "failover" ? activeAccountId : selectedGroupAccount(group)) : rule.accountId;
-    const selectedAccount = targetAccountId ? accountById(config, targetAccountId)
-      : connectedAccountForRole(rule.action.kind === "task" ? "task" : "chat");
+    if (group && !group.memberIds.includes(targetAccountId)) return false;
+    const selectedAccount = targetAccountId ? accountById(config, targetAccountId) : null;
     const ws = selectedAccount ? oneBotAccounts.get(selectedAccount.id)?.ws : null;
     if (!ws || ws.readyState !== 1 || config.automation?.enabled !== true) return false;
     const replyConfig = configForReplyAccount(selectedAccount);
@@ -13630,7 +13695,8 @@ async function main() {
     if (rule.action.kind === "task" ? !accountCanOfferTask(config, selectedAccount.id) : !accountCanChat(config, selectedAccount.id)) return false;
     const occurrenceDay = source === "schedule"
       ? JSON.parse(automationOccurrenceKey(rule, conversationId, new Date()))[2] : "";
-    if (source === "schedule" && wasDailySent(memory, conversationId, `automation:${rule.id}`, occurrenceDay)) return false;
+    if (source === "schedule" && (wasDailySent(memory, conversationId, ledgerKey, occurrenceDay)
+      || (owner.legacyRuleIds.includes(rule.id) && wasDailySent(memory, conversationId, `automation:${rule.id}`, occurrenceDay)))) return false;
     const logicalGroup = accountGroup(config, selectedAccount.id);
     const outboundEvent = { ...(event || (isPrivate
       ? { message_type: "private", user_id: recipientId }
@@ -13676,7 +13742,7 @@ async function main() {
     if (!isPrivate && isQuiet(memory, recipientId, replyConfig)) return false;
     if (source === "schedule") {
       // Claim immediately before the irreversible send. AI generation failures remain retryable.
-      markDailySent(memory, conversationId, `automation:${rule.id}`, occurrenceDay, "sending");
+      markDailySent(memory, conversationId, ledgerKey, occurrenceDay, "sending");
       saveMemory(memory);
     }
     try {
@@ -13686,7 +13752,7 @@ async function main() {
       }, { timeoutMs: 30_000, binding: automationBinding });
     } catch (error) {
       if (source === "schedule") {
-        markDailySent(memory, conversationId, `automation:${rule.id}`, occurrenceDay, "unconfirmed");
+        markDailySent(memory, conversationId, ledgerKey, occurrenceDay, "unconfirmed");
         saveMemory(memory);
       }
       throw error;
@@ -13696,7 +13762,7 @@ async function main() {
     archiveBotReply({ event: outboundEvent, config: replyConfig, memory, text: response,
       meta: { source: `automation:${rule.id}`, user_id: outboundEvent.self_id, replyToUserId: senderId, replyToSender: senderName } });
     if (source === "schedule") {
-      markDailySent(memory, conversationId, `automation:${rule.id}`, occurrenceDay);
+      markDailySent(memory, conversationId, ledgerKey, occurrenceDay);
       saveMemory(memory);
     }
     log(`automation sent rule=${rule.id} conversation=${conversationId} source=${source}`);
@@ -13705,15 +13771,11 @@ async function main() {
 
   async function runScheduledAutomation() {
     if (automationRunning || config.automation?.enabled !== true) return;
-    const result = validateAutomationRules(config.automation.rules || []);
-    if (!result.valid) {
-      warn(`automation config invalid: ${result.errors.map((error) => error.message).join("; ")}`);
-      return;
-    }
+    const rules = automationOwnerEntries(config).flatMap(owner => owner.rules);
     automationRunning = true;
     try {
       const date = new Date();
-      for (const rule of result.rules) {
+      for (const rule of rules) {
         if (rule.trigger.type !== "schedule") continue;
         for (const conversationId of rule.scope.conversationIds) {
           if (!dueAutomationRules(date, [rule], conversationId).length) continue;
@@ -13729,26 +13791,52 @@ async function main() {
     }
   }
 
+  function routineSender(routine) {
+    const group = routine?.groupId ? config.accounts.failoverGroups.find((item) => item.id === routine.groupId) : null;
+    if (routine?.groupId && !group) return null;
+    const id = group ? (accountTopology(config) === "failover" ? activeAccountId : selectedGroupAccount(group)) : routine?.accountId;
+    if (!id || (group && !group.memberIds.includes(id))) return null;
+    const account = connectedAccountForRole("chat", { preferAccountId: id, strictPreferred: Boolean(id) });
+    return id && account?.id !== id ? null : account;
+  }
+
+  function configForRoutineOwner(account, owner) {
+    const base = configForReplyAccount(account);
+    return { ...base, __automationOwnerKey: owner.key,
+      __legacyRoutineLedger: owner.legacyRoutineLedger?.daily === true,
+      automation: { ...base.automation, routines: structuredClone(owner.routines) } };
+  }
+
+  function routineCheckInterval(kind) {
+    const intervals = automationOwnerEntries(config).filter(owner => owner.routines[kind]).map(owner => Number(owner.routines[kind].checkIntervalMs || 60_000))
+      .filter(interval => Number.isFinite(interval) && interval > 0);
+    return intervals.length ? Math.min(...intervals) : 60_000;
+  }
+
   async function runScheduledDailyMessages() {
-    if (dailyMessagesRunning || config.dailyMessages?.enabled === false) return;
-    const chatAccount = connectedAccountForRole("chat");
-    if (!chatAccount) return;
-    const ws = chatAccount.ws;
-    if (!ws || ws.readyState !== 1) return;
-    const replyConfig = configForReplyAccount(chatAccount);
-    if (!replyConfig.automation?.enabled) return;
-    const expectedRevision = configRevision;
+    if (dailyMessagesRunning || config.automation?.enabled !== true) return;
     dailyMessagesRunning = true;
     try {
-      await runDailyMessages({
-        ws, config: replyConfig, memory, historyByGroup, lastEventByGroup, lastBotMessageByGroup,
-        activeSocket: () => connectedAccountForRole("chat")?.ws || null,
-        isCurrent: () => configRevision === expectedRevision,
-        sendMessage: (socket, groupId, response) => oneBotRequest(socket, "send_group_msg", {
-          group_id: groupId,
-          message: response
-        }, { timeoutMs: 30_000 })
-      });
+      for (const owner of automationOwnerEntries(config)) {
+        if (!owner.routines.daily || owner.routines.daily.enabled === false) continue;
+        const chatAccount = routineSender(owner);
+        if (!chatAccount) continue;
+        const ws = chatAccount.ws;
+        if (!ws || ws.readyState !== 1) continue;
+        const replyConfig = configForRoutineOwner(chatAccount, owner);
+        if (!replyConfig.automation?.enabled) continue;
+        const expectedRevision = configRevision;
+        const dailyBinding = oneBotBinding(ws, chatAccount.id);
+        await runDailyMessages({
+          ws, config: replyConfig, memory, historyByGroup, lastEventByGroup, lastBotMessageByGroup,
+          activeSocket: () => routineSender(owner)?.ws || null,
+          isCurrent: () => configRevision === expectedRevision && oneBotBindingCurrent(ws, dailyBinding),
+          sendMessage: (socket, groupId, response) => oneBotRequest(socket, "send_group_msg", {
+            group_id: groupId,
+            message: response
+          }, { timeoutMs: 30_000, binding: dailyBinding })
+        });
+      }
     } finally {
       dailyMessagesRunning = false;
     }
@@ -13757,7 +13845,7 @@ async function main() {
   // One scheduler per bridge process, not one scheduler per connected QQ account.
   setInterval(() => {
     void runScheduledDailyMessages().catch((err) => warn(`daily scheduler failed: ${err.message}`));
-  }, Number(config.dailyMessages?.checkIntervalMs || 60_000));
+  }, routineCheckInterval("daily"));
   setInterval(() => {
     void runScheduledAutomation().catch((err) => warn(`automation scheduler failed: ${err.message}`));
   }, 30_000);

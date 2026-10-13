@@ -5,20 +5,46 @@ const object = (value) => value && typeof value === "object" && !Array.isArray(v
 const ID = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
 export const ACCOUNT_FEATURES = ["chat", "task", "proactive", "automation", "webSearch", "vision", "asr", "learning"];
 export const ACCOUNT_SEND_TYPES = ["text", "image", "record", "video", "file"];
-export const ACCOUNT_POLICY_KEYS = ["displayName", "styleProfileId", "promptOverride", "features", "sendTypes", "scope", "modelBindings", "voice", "behaviorMode"];
-const ITEM_KEYS = new Set(["id", "qq", "displayName", "styleProfileId", "promptOverride", "enabled", "protocolEnabled", "archived", "managed", "protocol", "onebotPath", "onebotWsUrl", "napcatContainer", "protocolContainer", "webuiPort", "noVncPort", "vncPort", "snowlumaImage", "snowlumaVolumes", "behaviorMode", "features", "sendTypes", "scope", "modelBindings", "voice"]);
+export const ACCOUNT_POLICY_KEYS = ["displayName", "selfName", "style", "styleProfileId", "promptOverride", "features", "sendTypes", "scope", "modelBindings", "voice", "behaviorMode"];
+const ITEM_KEYS = new Set(["id", "qq", "displayName", "selfName", "style", "styleProfileId", "promptOverride", "enabled", "protocolEnabled", "archived", "managed", "protocol", "onebotPath", "onebotWsUrl", "napcatContainer", "protocolContainer", "webuiPort", "noVncPort", "vncPort", "snowlumaImage", "snowlumaVolumes", "behaviorMode", "features", "sendTypes", "scope", "modelBindings", "voice"]);
 const bools = (keys, values, fallback) => Object.fromEntries(keys.map((key) => [key, values?.[key] ?? fallback]));
 const featureDefaults = (config, mode = "all") => ({ chat: mode !== "task", task: mode !== "chat",
   proactive: config.proactive?.enabled !== false, automation: config.automation?.enabled === true,
   webSearch: config.webSearch?.enabled !== false, vision: config.vision?.enabled !== false,
   asr: config.voice?.enabled === true && config.voice?.asr?.enabled !== false, learning: config.learningMode?.enabled === true });
 
+function validateStyle(style) {
+  if (!object(style) || Object.keys(style).some((key) => key !== "systemPrompt")
+    || typeof style.systemPrompt !== "string" || style.systemPrompt.length > 12000) throw new Error("账号 style 必须是有效的 systemPrompt 文本快照（最多 12000 字符）");
+  return clone(style);
+}
+
+function validateSelfName(value) {
+  if (typeof value !== "string" || value.length > 100 || (value !== "" && !value.trim())
+    || /[\x00-\x1f\x7f]/.test(value)) throw new Error("账号 selfName 必须是最多 100 字符的自称文本，可留空使用账号名称");
+  return value;
+}
+
+// Used only when migrating missing snapshots or explicitly updating legacy
+// fields. Empty canonical prompts are intentional, never an inheritance flag.
+function legacyStyle(account, config) {
+  if (typeof account.promptOverride === "string" && account.promptOverride.trim()) return validateStyle({ systemPrompt: account.promptOverride });
+  const profiles = Array.isArray(config.styleProfiles?.profiles) ? config.styleProfiles.profiles : [];
+  const selectedId = account.styleProfileId || config.styleProfiles?.activeId || "legacy";
+  const profile = profiles.find((item) => item?.id === selectedId) || profiles.find((item) => item?.id === "legacy");
+  return validateStyle({ systemPrompt: String(profile?.systemPrompt || config.prompt?.system || "") });
+}
+
 function normalizeItem(raw, config, index, legacy = false) {
   const id = String(raw.id || (index === 0 ? "primary" : `standby-${index}`));
   const mode = config.botFeatures?.accountModes?.[id] || config.botFeatures?.defaultMode || "all";
   const protocol = raw.protocol || "napcat";
+  const displayName = String(raw.displayName || raw.name || (index === 0 ? config.persona?.displayName : "") || `机器人 ${index + 1}`);
   return { ...clone(raw), id, qq: String(raw.qq || raw.uin || ""),
-    displayName: String(raw.displayName || raw.name || (index === 0 ? config.persona?.displayName : "") || `机器人 ${index + 1}`),
+    displayName,
+    // Missing old values freeze the previous name once; explicit blank follows
+    // this owner's effective displayName without rewriting the stored field.
+    selfName: Object.hasOwn(raw, "selfName") ? validateSelfName(raw.selfName) : displayName,
     enabled: raw.enabled ?? true, protocolEnabled: raw.protocolEnabled ?? true, archived: raw.archived ?? false,
     managed: raw.managed ?? true, protocol,
     ...(legacy && index === 0 && protocol === "napcat" && !raw.napcatStateDir && !raw.napcatDataDir ? { napcatStateDir: "napcat" } : {}),
@@ -31,6 +57,7 @@ function normalizeItem(raw, config, index, legacy = false) {
       vncPort: raw.vncPort ?? (index === 0 ? 5902 : index === 1 ? 5901 : 5903 + index - 2),
       snowlumaImage: raw.snowlumaImage || "motricseven7/snowluma:latest"
     } : {}),
+    style: Object.hasOwn(raw, "style") ? validateStyle(raw.style) : legacyStyle(raw, config),
     styleProfileId: raw.styleProfileId || "", promptOverride: raw.promptOverride || "",
     behaviorMode: raw.behaviorMode || (legacy && index > 0 ? "normal" : ""),
     features: { ...featureDefaults(config, mode), ...(raw.features || {}) },
@@ -64,6 +91,15 @@ export function normalizeAccountRegistry(config = {}, { strict = false } = {}) {
     const policySource = items.find((item) => item.id === group.policyAccountId);
     if (!policySource || !object(group.policy)) return group;
     const policy = { ...accountPolicy(policySource), ...group.policy };
+    // An old group could override its shared name independently of the source
+    // account. Resolve that legacy name before inheriting the new source field.
+    policy.selfName = Object.hasOwn(group.policy, "selfName") ? validateSelfName(group.policy.selfName)
+      : Object.hasOwn(group.policy, "displayName") ? policy.displayName : policySource.selfName;
+    // Old group overrides must be resolved before considering the source's
+    // new snapshot, or migration would silently discard the shared old prompt.
+    policy.style = Object.hasOwn(group.policy, "style") ? validateStyle(group.policy.style)
+      : Object.hasOwn(group.policy, "promptOverride") || Object.hasOwn(group.policy, "styleProfileId")
+        ? legacyStyle(policy, config) : clone(policySource.style);
     for (const key of ["features", "sendTypes", "scope", "modelBindings", "voice"]) {
       if (object(group.policy[key])) policy[key] = { ...policySource[key], ...group.policy[key] };
     }
@@ -85,6 +121,8 @@ function validateRegistry(registry) {
     if (item.qq && !item.archived && qqs.has(item.qq)) throw new Error("该 QQ 已添加，请编辑已有账号");
     if (item.qq && !item.archived) qqs.add(item.qq);
     if (!item.displayName.trim() || item.displayName.length > 100 || typeof item.promptOverride !== "string" || item.promptOverride.length > 12000) throw new Error("账号名称或提示词长度无效");
+    validateSelfName(item.selfName);
+    validateStyle(item.style);
     for (const key of ["enabled", "protocolEnabled", "archived", "managed"]) if (typeof item[key] !== "boolean") throw new Error(`账号 ${key} 必须是开关`);
     for (const [values, keys] of [[item.features, ACCOUNT_FEATURES], [item.sendTypes, ACCOUNT_SEND_TYPES]]) {
       if (!object(values) || Object.keys(values).some((key) => !keys.includes(key)) || keys.some((key) => typeof values[key] !== "boolean")) throw new Error("账号功能或内容权限无效");
@@ -160,7 +198,10 @@ export function registryConfig(config = {}, { strict = false } = {}) {
   return next;
 }
 
-export function mergeAccountPatch(account, patch) {
+// Pass the global config when accepting legacy promptOverride/styleProfileId
+// edits so clearing/selecting them snapshots the effective legacy text once.
+// Explicit canonical style wins if a client supplies both representations.
+export function mergeAccountPatch(account, patch, config = {}) {
   if (!object(patch) || Object.keys(patch).some((key) => !ITEM_KEYS.has(key)) || (patch.id && patch.id !== account.id)) throw new Error("账号设置字段无效");
   for (const key of ["enabled", "protocolEnabled", "archived", "managed"]) {
     if (patch[key] !== undefined && typeof patch[key] !== "boolean") throw new Error(`账号 ${key} 必须是开关`);
@@ -168,7 +209,12 @@ export function mergeAccountPatch(account, patch) {
   for (const key of ["displayName", "styleProfileId", "promptOverride", "onebotWsUrl", "protocolContainer", "snowlumaImage"]) {
     if (patch[key] !== undefined && typeof patch[key] !== "string") throw new Error(`账号 ${key} 必须是文本`);
   }
+  if (Object.hasOwn(patch, "selfName")) validateSelfName(patch.selfName);
   const merged = { ...account, ...clone(patch), id: account.id };
+  if (!Object.hasOwn(merged, "selfName")) merged.selfName = String(account.displayName || merged.displayName || "");
+  merged.style = Object.hasOwn(patch, "style") ? validateStyle(patch.style)
+    : Object.hasOwn(patch, "promptOverride") || Object.hasOwn(patch, "styleProfileId") || !Object.hasOwn(account, "style")
+      ? legacyStyle(merged, config) : validateStyle(account.style);
   for (const key of ["features", "sendTypes", "scope", "modelBindings", "voice", "snowlumaVolumes"]) {
     if (patch[key] !== undefined) {
       if (!object(patch[key])) throw new Error(`账号 ${key} 必须是对象`);
@@ -179,14 +225,23 @@ export function mergeAccountPatch(account, patch) {
 }
 
 export function newAccount(config, input = {}, allocatedPorts = []) {
-  const id = input.id || `account_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
-  const base = { id, qq: "", displayName: `机器人 ${accountItems(config).length + 1}`, protocol: "snowluma", managed: true,
+  if (!object(input)) throw new Error("账号设置字段无效");
+  const { copyStyleFromAccountId, ...patch } = input;
+  let style = { systemPrompt: "" };
+  if (copyStyleFromAccountId !== undefined) {
+    if (typeof copyStyleFromAccountId !== "string" || !copyStyleFromAccountId) throw new Error("复制风格的源账号 ID 无效");
+    const source = effectiveAccount(config, copyStyleFromAccountId);
+    if (!source) throw new Error("复制风格的源账号不存在或已归档");
+    style = validateStyle(source.style);
+  }
+  const id = patch.id || `account_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
+  const base = { id, qq: "", displayName: `机器人 ${accountItems(config).length + 1}`, selfName: "", protocol: "snowluma", managed: true,
     enabled: false, protocolEnabled: true, archived: false, protocolContainer: `snowluma-${id}`,
     features: { chat: true, task: false, proactive: false, automation: false, webSearch: true, vision: true, asr: false, learning: false },
     sendTypes: { text: true, image: false, record: false, video: false, file: false },
     scope: { groups: true, private: true, groupMode: "all", groupIds: [] },
-    snowlumaImage: "motricseven7/snowluma:latest", modelBindings: {}, voice: {} };
-  const item = mergeAccountPatch(base, input);
+    snowlumaImage: "motricseven7/snowluma:latest", modelBindings: {}, voice: {}, style };
+  const item = mergeAccountPatch(base, patch, config);
   if (item.managed !== false && allocatedPorts.length === 4) {
     item.webuiPort ??= allocatedPorts[0]; item.noVncPort ??= allocatedPorts[1]; item.vncPort ??= allocatedPorts[2];
     item.onebotWsUrl ||= `ws://127.0.0.1:${allocatedPorts[3]}`;
@@ -205,12 +260,12 @@ export function syncLegacyAccountPatch(current, next, patch = {}) {
     const index = result.accounts.items.findIndex((item) => item.id === id);
     if (index < 0) throw new Error("旧接口无法定位账号，请使用账号 ID 更新");
     const clean = Object.fromEntries(Object.entries(incoming).filter(([key]) => ITEM_KEYS.has(key) && key !== "id"));
-    result.accounts.items[index] = mergeAccountPatch(result.accounts.items[index], clean);
+    result.accounts.items[index] = mergeAccountPatch(result.accounts.items[index], clean, next);
   }
   for (const [id, promptOverride] of Object.entries(changes.promptOverrides || {})) {
-    const item = result.accounts.items.find((entry) => entry.id === id);
-    if (!item) throw new Error("未知提示词账号");
-    item.promptOverride = promptOverride;
+    const index = result.accounts.items.findIndex((entry) => entry.id === id);
+    if (index < 0) throw new Error("未知提示词账号");
+    result.accounts.items[index] = mergeAccountPatch(result.accounts.items[index], { promptOverride }, next);
   }
   for (const [id, mode] of Object.entries(patch.botFeatures?.accountModes || {})) {
     const item = result.accounts.items.find((entry) => entry.id === id);

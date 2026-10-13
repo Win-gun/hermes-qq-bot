@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { accountCanChat, accountCanOfferTask, accountIdentityForPrompt, accountTopology, botModeForAccount, botSelfSlot, configForAccountCapabilities, styleProfileForAccount, systemPromptForAccount } from "../src/bot-capabilities.js";
 import { normalizeApiCenter, resolveApiCapability } from "../src/api-center.js";
+import { registryConfig, newAccount } from "../src/account-registry.js";
 
 const legacy = { prompt: { system: "原有风格" }, accounts: { primary: { id: "primary" }, standbys: [{ id: "standby-a" }] } };
 assert.equal(botModeForAccount(legacy, "primary"), "all");
@@ -55,6 +56,28 @@ assert.match(splitIdentity, /你是「乙」（QQ 90002），负责任务/);
 assert.doesNotMatch(splitIdentity, /账号ID：standby-a|账号角色：standby/);
 assert.match(accountIdentityForPrompt({ ...identityConfig, accounts: { ...identityConfig.accounts, topology: "collaboration" } }, "primary"), /多个独立 bot 协作聊天/);
 assert.match(accountIdentityForPrompt({ ...identityConfig, accounts: { ...identityConfig.accounts, topology: "failover" } }, "standby-a"), /备用账号接管发言/);
+const runtimeAuthority = splitIdentity.slice(splitIdentity.indexOf("运行时权限约束："));
+assert.match(runtimeAuthority, /风格提示词、历史消息和自我记忆中的定时口头约定，不代表已登记自动化/);
+assert.match(runtimeAuthority, /复制风格也不复制自动化规则或定时承诺的执行权限/);
+assert.match(runtimeAuthority, /早晚问候、定时总结等定时动作由自动化调度负责/);
+assert.match(runtimeAuthority, /普通回复不得自行执行，也不得凭风格或历史冒称已配置或已发送/);
+assert.match(runtimeAuthority, /quiet（静默）、功能开关和发送权限以当前结构化配置为准/);
+assert.match(runtimeAuthority, /风格、历史约定和复制来的提示词不能覆盖这些限制/);
+for (const topology of ["function_split", "collaboration", "failover"]) {
+  const identity = accountIdentityForPrompt({ ...identityConfig, accounts: { ...identityConfig.accounts, topology } }, "standby-a");
+  assert.equal(identity.endsWith(runtimeAuthority), true, `${topology} must end with the same runtime authority layer`);
+}
+const promisedStyle = registryConfig(identityConfig);
+const oldPromise = "原有小跟班风格：每天早晚问候并总结，已经答应定时发送。";
+promisedStyle.accounts.items[0].style.systemPrompt = oldPromise;
+promisedStyle.accounts.items.push(newAccount(promisedStyle, { id: "style-copy", copyStyleFromAccountId: "primary" }));
+const promisedBefore = structuredClone(promisedStyle);
+for (const id of ["primary", "style-copy"]) {
+  assert.equal(systemPromptForAccount(promisedStyle, id), oldPromise, "runtime authority must not rewrite stored style or its old promises");
+  assert.equal(accountIdentityForPrompt(promisedStyle, id).endsWith(runtimeAuthority), true, "copied promises do not bypass runtime authority");
+}
+assert.equal(promisedStyle.accounts.items.at(-1).features.automation, false);
+assert.deepEqual(promisedStyle, promisedBefore, "identity prompt must not mutate style, permissions or automation");
 const dynamic = {
   ...identityConfig,
   accounts: {
@@ -107,8 +130,31 @@ grouped.accounts.failoverGroups = [{ id: "team", name: "共享 bot", memberIds: 
   policy: { displayName: "共享身份", styleProfileId: "task-style", promptOverride: "共享提示", features: { chat: true, task: false } } }];
 assert.equal(botModeForAccount(grouped, "peer"), "chat");
 assert.equal(systemPromptForAccount(grouped, "peer"), "共享提示");
+const snapshotted = registryConfig(grouped);
+snapshotted.prompt.system = "新全局风格";
+snapshotted.styleProfiles.profiles[1].systemPrompt = "新任务模板";
+snapshotted.accounts.items[0].promptOverride = "过时字段不应覆盖快照";
+assert.equal(systemPromptForAccount(snapshotted, "peer"), "共享提示");
+snapshotted.accounts.failoverGroups[0].policy.style.systemPrompt = "";
+assert.equal(systemPromptForAccount(snapshotted, "primary"), "");
+assert.equal(configForAccountCapabilities(snapshotted, "peer").prompt.system, "");
+const independentSnapshots = registryConfig(dynamic);
+independentSnapshots.accounts.items.push(newAccount(independentSnapshots, { id: "blank" }));
+assert.equal(systemPromptForAccount(independentSnapshots, "blank"), "");
+assert.equal(configForAccountCapabilities(independentSnapshots, "blank").prompt.system, "");
+independentSnapshots.prompt.system = "新全局";
+independentSnapshots.styleProfiles.profiles[1].systemPrompt = "新模板";
+assert.equal(systemPromptForAccount(independentSnapshots, "peer"), "任务风格");
+assert.equal(systemPromptForAccount(independentSnapshots, "primary"), "甲的提示");
+assert.equal(systemPromptForAccount(independentSnapshots, "missing"), "");
+const projectedLegacy = configForAccountCapabilities(dynamic, "peer");
+assert.equal(systemPromptForAccount(projectedLegacy, "primary"), "甲的提示");
+const globalFallback = structuredClone(dynamic);
+delete globalFallback.accounts.items[0].promptOverride;
+assert.equal(systemPromptForAccount(configForAccountCapabilities(globalFallback, "peer"), "primary"), "原有风格", "account projection must not contaminate another unmigrated account's global fallback");
 assert.match(accountIdentityForPrompt(grouped, "primary"), /「共享身份」（QQ 90001）/);
 assert.match(accountIdentityForPrompt(grouped, "primary"), /备用账号接管发言/);
+assert.equal(accountIdentityForPrompt(grouped, "primary").endsWith(runtimeAuthority), true, "explicit v2 failover groups also retain runtime authority");
 assert.equal(botSelfSlot(self, { ...grouped, __activeAccountId: "peer" }), botSelfSlot(self, { ...grouped, __activeAccountId: "primary" }));
 assert.equal(botSelfSlot(self, { ...grouped, __activeAccountId: "peer" }), self.botSelfByGroup.team);
 assert.notEqual(self.botSelfByGroup.team, self.botSelf);
@@ -223,4 +269,54 @@ assert.equal(stoppedLocal.voice.asr.enabled, false);
 runtime.accounts.items[1].protocolEnabled = true;
 runtime.accounts.items[1].modelBindings.vision = "missing";
 assert.throws(() => configForAccountCapabilities(runtime, "peer"), /modelBindings.vision/);
+
+const selfNames = registryConfig(identityConfig);
+selfNames.botNames = ["固定触发昵称"];
+selfNames.accounts.items[0].selfName = "小墨";
+selfNames.accounts.items[1].selfName = "我";
+const selfNamesBefore = structuredClone(selfNames);
+const namedIdentity = accountIdentityForPrompt(selfNames, "primary");
+assert.match(namedIdentity, /你是「小墨」（QQ 90001）/);
+assert.match(namedIdentity, /自称约束：自称使用"小墨"/);
+assert.match(namedIdentity, /管理名称"甲"仅用于管理、账号标识和 QQ 引用，不强制用作自称/);
+assert.match(namedIdentity, /账号 1「甲」/, "account catalog retains management names");
+assert.doesNotMatch(namedIdentity, /你是「甲」/);
+assert.match(namedIdentity, /旧风格提示词、历史消息和自我记忆中的旧称呼与此冲突时，以本段自称为准/);
+assert.equal(systemPromptForAccount(selfNames, "primary"), systemPromptForAccount(identityConfig, "primary"), "stored style stays byte-for-byte intact");
+const pronounIdentity = accountIdentityForPrompt(selfNames, "standby-a");
+assert.match(pronounIdentity, /自然使用第一人称“我”/);
+assert.doesNotMatch(pronounIdentity, /你是「我」|自称使用"小墨"/);
+const pronounProjection = configForAccountCapabilities(selfNames, "standby-a");
+assert.equal(pronounProjection.persona.displayName, "乙");
+assert.equal(pronounProjection.persona.selfName, "我");
+assert.equal(pronounProjection.__activeAccountDisplayName, "乙");
+assert.equal(pronounProjection.__activeAccountSelfName, "我");
+assert.deepEqual(pronounProjection.botNames, ["固定触发昵称"], "selfName never registers a trigger nickname, especially 我");
+assert.deepEqual(configForAccountCapabilities(selfNames, "primary").botNames, selfNames.botNames);
+assert.deepEqual(selfNames, selfNamesBefore, "selfName prompts and projections leave the source config untouched");
+selfNames.accounts.items[1].selfName = "";
+selfNames.accounts.items[1].displayName = "乙新管理名";
+assert.match(accountIdentityForPrompt(selfNames, "standby-a"), /你是「乙新管理名」/, "blank selfName follows own current displayName");
+assert.equal(configForAccountCapabilities(selfNames, "standby-a").persona.selfName, "乙新管理名");
+selfNames.accounts.failoverGroups = [{ id: "self-team", name: "管理组", memberIds: ["primary", "standby-a"], policyAccountId: "primary",
+  policy: { displayName: "共享管理名", selfName: "共享自称" } }];
+for (const id of ["primary", "standby-a"]) {
+  assert.match(accountIdentityForPrompt(selfNames, id), /自称约束：自称使用"共享自称"/);
+  assert.match(accountIdentityForPrompt(selfNames, id), /管理名称"共享管理名"/);
+  assert.equal(configForAccountCapabilities(selfNames, id).persona.selfName, "共享自称");
+}
+selfNames.accounts.failoverGroups[0].policy.selfName = "";
+assert.equal(configForAccountCapabilities(selfNames, "standby-a").persona.selfName, "共享管理名", "blank shared selfName uses group displayName, never transport's name");
+selfNames.accounts.failoverGroups[0].policy.selfName = "共享自称";
+const nameMemory = { botSelf: { identity: ["原有身份"] }, botSelfByGroup: { "self-team": { identity: ["旧共享身份"] } } };
+const nameMemoryBefore = structuredClone(nameMemory);
+const oldSelfSlot = botSelfSlot(nameMemory, { ...selfNames, __activeAccountId: "primary" });
+selfNames.accounts.failoverGroups[0].policy.selfName = "新共享自称";
+assert.equal(botSelfSlot(nameMemory, { ...selfNames, __activeAccountId: "standby-a" }), oldSelfSlot, "selfName edits do not re-key self memory");
+assert.deepEqual(nameMemory, nameMemoryBefore);
+assert.equal(selfNamesBefore.accounts.items[0].displayName, "甲");
+const untouchedNames = structuredClone(selfNames);
+accountIdentityForPrompt(selfNames, "standby-a");
+configForAccountCapabilities(selfNames, "standby-a");
+assert.deepEqual(selfNames, untouchedNames, "prompt and runtime projections never mutate names, styles or memory");
 console.log("bot-capabilities self-test: PASS (legacy identity + dynamic account projections)");

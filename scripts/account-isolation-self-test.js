@@ -10,6 +10,7 @@ import { botCommandFeedback, botCommandText, groupCommandBots, routeBotCommand }
 import { normalizeVoiceReplyMode, voiceReplyMode } from "../src/voice-mode.js";
 import { accountDeliveryDecision, GroupSendCoordinator } from "../src/account-delivery.js";
 import { ReplyCoordinator } from "../src/reply-coordinator.js";
+import { automationForAccount } from "../src/account-automation.js";
 
 // Read source only. Never import/start main(), open sockets, spawn a service,
 // read live config/state, or persist anything. The complete real message callback
@@ -69,7 +70,7 @@ function fixtureConfig() {
     account.enabled = true;
     account.protocolEnabled = true;
     account.features = { ...account.features, chat: true, task: false, proactive: false, automation: false, asr: false };
-    account.promptOverride = account.id === A ? "fixture persona Alpha" : "fixture persona Beta";
+    account.style = { systemPrompt: account.id === A ? "fixture persona Alpha" : "fixture persona Beta" };
     account.voice = { mode: "mixed" };
     account.behaviorMode = "";
   }
@@ -104,7 +105,7 @@ function harness(config = fixtureConfig(), mutation = {}) {
   const context = vm.createContext({
     Date: FakeDate, structuredClone, randomBytes, AbortController,
     Math: Object.assign(Object.create(Math), { random: () => 0.5 }),
-    accountGroup, accountItems, accountPolicy, accountScopeAllows, effectiveAccount, normalizeAccountRegistry,
+    accountGroup, accountItems, accountPolicy, accountScopeAllows, effectiveAccount, normalizeAccountRegistry, automationForAccount,
     accountDeliveryDecision, groupSendCoordinator: new GroupSendCoordinator({ minDelayMs: () => 0 }),
     accountCanChat, accountCanOfferTask, accountTopology, configForAccountCapabilities,
     botCommandFeedback, botCommandText, groupCommandBots, routeBotCommand, normalizeVoiceReplyMode, voiceReplyMode,

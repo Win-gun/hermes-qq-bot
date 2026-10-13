@@ -13,7 +13,7 @@ npm run app:package
 npm run app:make
 ```
 
-`app:package` 生成 `out/` 下的应用包；`app:make` 生成 `out/make/` 下的 arm64 ZIP 与 DMG。若已有应用正在从默认 `out/` 运行，先设置 `HERMES_QQ_BUILD_OUT=out/parity-dev`，避免覆盖运行中的应用。打开 DMG 后将 App 拖入“应用程序”，再从该目录启动。当前代码版本是 `1.0.0-beta.7`；测试版采用 ad-hoc 签名，未完成 Apple 公证或跨设备验收。首次打开可能需要在 Finder 中右键应用并选择“打开”。
+`app:package` 生成 `out/` 下的应用包；`app:make` 生成 `out/make/` 下的 arm64 ZIP 与 DMG。若已有应用正在从默认 `out/` 运行，先设置 `HERMES_QQ_BUILD_OUT=out/parity-dev`，避免覆盖运行中的应用。打开 DMG 后将 App 拖入“应用程序”，再从该目录启动。当前代码版本是 `1.0.0-beta.11`；测试版采用 ad-hoc 签名，未完成 Apple 公证或跨设备验收。首次打开可能需要在 Finder 中右键应用并选择“打开”。
 
 打包配置以不包含当前机器的 `config.json`、QQ 号、API 密钥、记忆、聊天记录、日志或 SnowLuma 登录态为目标；公开分发前必须检查实际 ZIP/DMG 内容，不能只依据忽略规则判断安全。
 
