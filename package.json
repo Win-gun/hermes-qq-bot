@@ -1,6 +1,6 @@
 {
   "name": "qq-hermes-onebot-bridge",
-  "version": "1.0.0-beta.11",
+  "version": "1.0.0-beta.12",
   "description": "Local desktop manager and OneBot bridge for Hermes-powered QQ bots",
   "main": "desktop/main.cjs",
   "private": true,
