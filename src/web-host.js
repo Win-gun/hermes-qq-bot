@@ -33,6 +33,21 @@ let retryDelay = 2000;
 let operation = null;
 let progress = null;
 
+function acquireOperation(kind, controller) {
+  if (operation) {
+    const error = new Error("another host operation is running");
+    error.code = "HOST_BUSY";
+    throw error;
+  }
+  const owner = { kind, controller };
+  operation = owner;
+  return owner;
+}
+
+function releaseOperation(owner) {
+  if (operation === owner) operation = null;
+}
+
 function readConfig() {
   try { return JSON.parse(fs.readFileSync(configFile, "utf8")); } catch { return null; }
 }
@@ -319,11 +334,8 @@ async function verifyMigratedAccounts(accounts) {
 }
 
 async function migrateLocalLegacy(options) {
-  if (operation) throw new Error("another host operation is running");
   const legacy = legacyProject(options.path);
   const wasRunning = Boolean(child);
-  operation = { kind: "legacy-migrate" };
-  publish({ status: "running", type: "legacy-migrate", stage: "prepare", percent: 0 });
   const domain = process.platform === "darwin" ? `gui/${process.getuid()}` : "";
   const agents = ["com.codex.qq-hermes-snowluma-bootstrap", "com.codex.qq-hermes-onebot-bridge"].map((label) => ({
     label, service: `${domain}/${label}`, plist: path.join(os.homedir(), "Library", "LaunchAgents", `${label}.plist`)
@@ -332,7 +344,9 @@ async function migrateLocalLegacy(options) {
   const disabled = [];
   let migrated;
   let success = false;
+  const owner = acquireOperation("legacy-migrate");
   try {
+    publish({ status: "running", type: "legacy-migrate", stage: "prepare", percent: 0 });
     await stopBridge();
     if (process.platform === "darwin") {
       for (const agent of agents) {
@@ -383,47 +397,49 @@ async function migrateLocalLegacy(options) {
     publish({ status: "failed", type: "legacy-migrate", stage: "finished", percent: progress?.percent || 0, rollbackFailed });
     throw error;
   } finally {
-    operation = null;
+    releaseOperation(owner);
     if (!success && !wasRunning) intentionalStop = true;
   }
 }
 
 async function createLocalBackup(options) {
-  if (operation) throw new Error("another backup operation is running");
   const type = options.type === "full" ? "full" : "safe";
   if (type === "full" && !String(options.password || "")) throw new Error("full backup requires password");
   const controller = new AbortController();
   const wasRunning = Boolean(child);
-  operation = { kind: "backup", controller };
-  publish({ status: "running", type, stage: "prepare", percent: 0 });
-  let result;
-  let failure;
+  const owner = acquireOperation("backup", controller);
   try {
-    if (type === "full") await stopBridge();
-    if (controller.signal.aborted) throw new backup.BackupCancelledError();
-    result = await backup.createBackup({ type, password: options.password || "", includeLogs: type === "full" && options.includeLogs === true, destinationDir: backupRoot, stateRoot, hermesHome, logRoot, signal: controller.signal, onProgress: (item) => publish({ type, status: "running", ...item }) });
-    fs.chmodSync(result.path, 0o600);
-  } catch (error) { failure = error; }
-  try {
-    if (type === "full") { publish({ type, status: "running", stage: "restart", percent: 99 }); await restoreBridge(wasRunning); }
-  } catch (error) { failure = new Error(`bridge restart failed: ${error.message}`); }
-  const cancelled = failure?.name === "BackupCancelledError";
-  publish({ type, status: failure ? (cancelled ? "cancelled" : "failed") : "completed", stage: "finished", percent: failure ? progress?.percent || 0 : 100 });
-  operation = null;
-  if (failure) throw failure;
-  return result;
+    publish({ status: "running", type, stage: "prepare", percent: 0 });
+    let result;
+    let failure;
+    try {
+      if (type === "full") await stopBridge();
+      if (controller.signal.aborted) throw new backup.BackupCancelledError();
+      result = await backup.createBackup({ type, password: options.password || "", includeLogs: type === "full" && options.includeLogs === true, destinationDir: backupRoot, stateRoot, hermesHome, logRoot, signal: controller.signal, onProgress: (item) => publish({ type, status: "running", ...item }) });
+      fs.chmodSync(result.path, 0o600);
+    } catch (error) { failure = error; }
+    try {
+      if (type === "full") { publish({ type, status: "running", stage: "restart", percent: 99 }); await restoreBridge(wasRunning); }
+    } catch (error) { failure = new Error(`bridge restart failed: ${error.message}`); }
+    const cancelled = failure?.name === "BackupCancelledError";
+    publish({ type, status: failure ? (cancelled ? "cancelled" : "failed") : "completed", stage: "finished", percent: failure ? progress?.percent || 0 : 100 });
+    if (failure) throw failure;
+    return result;
+  } finally { releaseOperation(owner); }
 }
 
 async function restoreLocalBackup(options) {
-  if (operation) throw new Error("another backup operation is running");
-  const { file } = fileForName(options.name);
-  const inspected = await backup.inspectBackup({ path: file, password: options.password || "" });
-  operation = { kind: "restore" };
-  publish({ status: "running", type: "restore", stage: "prepare", percent: 0 });
+  const owner = acquireOperation("restore");
   let rollback;
   let restored;
-  let rollbackType = inspected.manifest.type === "full" && options.password ? "full" : "safe";
+  let rollbackType;
+  let bridgeTouched = false;
   try {
+    publish({ status: "running", type: "restore", stage: "prepare", percent: 0 });
+    const { file } = fileForName(options.name);
+    const inspected = await backup.inspectBackup({ path: file, password: options.password || "" });
+    rollbackType = inspected.manifest.type === "full" && options.password ? "full" : "safe";
+    bridgeTouched = true;
     await stopBridge();
     try {
       rollback = await backup.createBackup({ type: rollbackType, password: rollbackType === "full" ? options.password : "", destinationDir: backupRoot, stateRoot, hermesHome });
@@ -441,6 +457,10 @@ async function restoreLocalBackup(options) {
     const warnings = [restored.manifest.mayRequireQqRescan ? "QQ 可能需要重新扫码" : "", restored.voiceCredentialRequired ? "语音已停用；请重新配置本机语音凭据后手动启用" : "", restored.apiCredentialReconfigurationRequired ? "API Keychain 凭据需要重新录入；问答、任务和识图可能暂不可用" : ""].filter(Boolean);
     return { ok: true, manifest: restored.manifest, rollbackName: path.basename(rollback.path), warning: warnings.join("；") };
   } catch (error) {
+    if (!bridgeTouched) {
+      publish({ status: "failed", type: "restore", stage: "finished", percent: 0 });
+      throw error;
+    }
     await stopBridge();
     let rollbackFailed = false;
     try {
@@ -456,7 +476,7 @@ async function restoreLocalBackup(options) {
     publish({ status: "failed", type: "restore", stage: "finished", percent: progress?.percent || 0, rollbackFailed });
     if (rollbackFailed) throw new Error("恢复失败且自动回滚未完成；桥接已停止，请检查 Keychain 与回滚快照");
     throw error;
-  } finally { operation = null; }
+  } finally { releaseOperation(owner); }
 }
 
 async function upload(req) {
@@ -539,9 +559,12 @@ async function route(req, res) {
     if (operation) return reply(res, 409, { ok: false, error: "host_busy" });
     const action = pathname.match(/^\/api\/host\/bridge\/(start|stop|restart)$/);
     if (req.method === "POST" && action) {
-      if (action[1] !== "start") await stopBridge();
-      if (action[1] !== "stop") await startBridge();
-      return reply(res, 200, { ok: true, running: Boolean(child) });
+      const owner = acquireOperation(`bridge-${action[1]}`);
+      try {
+        if (action[1] !== "start") await stopBridge();
+        if (action[1] !== "stop") await startBridge(true);
+        return reply(res, 200, { ok: true, running: Boolean(child) });
+      } finally { releaseOperation(owner); }
     }
     if (req.method === "POST" && pathname === "/api/host/backup") return reply(res, 200, await createLocalBackup(await jsonBody(req)));
     if (req.method === "POST" && pathname === "/api/host/backup/upload") return reply(res, 200, await upload(req));
@@ -549,7 +572,12 @@ async function route(req, res) {
     const match = pathname.match(/^\/api\/host\/backups\/([^/]+?)(\/download)?$/);
     if (match) {
       const { file, stat } = fileForName(decodeURIComponent(match[1]));
-      if (req.method === "DELETE" && !match[2]) return reply(res, 200, backup.deleteLocalBackup(file, backupRoot));
+      if (req.method === "DELETE" && !match[2]) {
+        const owner = acquireOperation("backup-delete");
+        try {
+          return reply(res, 200, await backup.deleteLocalBackup(file, backupRoot));
+        } finally { releaseOperation(owner); }
+      }
       if (req.method === "GET" && match[2]) {
         res.writeHead(200, { "content-type": "application/octet-stream", "content-length": stat.size, "content-disposition": `attachment; filename="${path.basename(file)}"`, "cache-control": "no-store", "x-content-type-options": "nosniff" });
         return fs.createReadStream(file).pipe(res);
@@ -564,6 +592,7 @@ async function route(req, res) {
     if (req.method === "POST" && pathname === "/api/host/legacy/migrate") return reply(res, 200, await migrateLocalLegacy(await jsonBody(req)));
     return reply(res, 404, { ok: false, error: "not_found" });
   } catch (error) {
+    if (error.code === "HOST_BUSY") return reply(res, 409, { ok: false, error: "host_busy" });
     const badInput = /invalid|too large|incomplete|requires password|octet-stream|not a regular|ENOENT/.test(error.message);
     return reply(res, badInput ? 400 : 500, { ok: false, error: errorMessage(error) });
   }

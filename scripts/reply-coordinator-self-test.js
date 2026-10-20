@@ -125,18 +125,21 @@ const toSecondary = peerCoordinator.enqueue({
 });
 await toSecondary;
 assert.deepEqual(peerSent, ["primary", "standby-a"], "同一条 QQ 消息明确点名两个独立 bot 时，不应跨账号去重");
+let releaseFirstPeer;
+const firstPeerGate = new Promise((resolve) => { releaseFirstPeer = resolve; });
 const firstPeer = peerCoordinator.enqueue({
   conversationId: "group:peer-2", senderId: "u1", accountId: "primary", mode: "at", direct: true,
   messageIds: ["peer-a"], current: { user_id: "u1", text: "@甲 问题一" },
-  execute: async () => { await delay(15); peerSent.push("primary-2"); return { sent: true }; }
+  execute: async () => { await firstPeerGate; peerSent.push("primary-2"); return { sent: true }; }
 });
-await delay(2);
 const secondPeer = peerCoordinator.enqueue({
   conversationId: "group:peer-2", senderId: "u1", accountId: "standby-a", mode: "at", direct: true,
   messageIds: ["peer-b"], current: { user_id: "u1", text: "@乙 问题二" },
   execute: async () => { peerSent.push("standby-2"); return { sent: true }; }
 });
+await secondPeer;
+releaseFirstPeer();
 await Promise.all([firstPeer, secondPeer]);
-assert.deepEqual(peerSent.slice(-2), ["primary-2", "standby-2"], "同一人问两个独立 bot 的问题不能被合并");
+assert.deepEqual(peerSent.slice(-2), ["standby-2", "primary-2"], "独立 bot 应并行生成，同一人的问题不能跨 bot 合并");
 
 console.log(JSON.stringify({ ok: true, runs, sent, order, peerSent, metrics: coordinator.snapshot() }));

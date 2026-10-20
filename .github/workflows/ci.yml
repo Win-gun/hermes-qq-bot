@@ -21,6 +21,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - run: npm run test:audit
+      - run: npm run test:memory
+      - run: npm run test:memory-guards
+      - run: npm run test:kernel
+      - run: npm run test:retrieval
       - run: npm run test:social
       - run: npm run test:reply
       - run: npm run test:accounts

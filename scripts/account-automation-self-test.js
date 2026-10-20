@@ -64,6 +64,5 @@ check(() => assert.throws(() => assertAutomationOwnershipTransition(config, grou
 check(() => assert.doesNotThrow(() => assertAutomationOwnershipTransition(config, config)));
 const cleanInstall = normalizeAccountAutomation(JSON.parse(fs.readFileSync(new URL('../config.example.json', import.meta.url), 'utf8')));
 check(() => assert(automationOwnerEntries(cleanInstall).every(owner => owner.rules.length === 0 && !owner.routines.daily && !owner.routines.hourly)));
-const reserved = structuredClone(config); reserved.accounts.items.push(newAccount(config, { id: 'constructor' }));
-check(() => assert.deepEqual(automationForAccount(reserved, 'constructor').rules, []));
+check(() => assert.throws(() => newAccount(config, { id: 'constructor' }), /原型保留名称/));
 console.log(JSON.stringify({ ok: true, checks, fixtureOnly: true, migration: 'deterministic-account-owner', writes: false }));

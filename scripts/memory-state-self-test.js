@@ -1,0 +1,50 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { MemoryRepository } from "../src/memory-repository.js";
+import { commitMemoryDraft, reconcileMemoryInPlace } from "../src/memory-state.js";
+
+const home = fs.mkdtempSync(path.join(os.tmpdir(), "hermesqq-memory-state-"));
+const repository = new MemoryRepository({ filePath: path.join(home, "memory.json") });
+try {
+  repository.acquireWriter();
+  const live = repository.load();
+  live.groups.g = { users: { u: { names: ["old"], confidence: { ai: 0.5 } } }, pending: ["first"] };
+  repository.save(live);
+  const group = live.groups.g, user = group.users.u, names = user.names, pending = group.pending;
+  const before = structuredClone(live);
+  const invalid = structuredClone(live);
+  invalid.groups.g.users.u.confidence.ai = NaN;
+  assert.throws(() => commitMemoryDraft(live, invalid, (draft) => repository.save(draft)));
+  assert.deepEqual(live, before, "a rejected AI candidate cannot poison live memory");
+  assert.equal(repository.status().writable, true, "validation rejection must not prevent later valid saves");
+  const next = structuredClone(live);
+  next.groups.g.users.u.names.push("new");
+  next.groups.g.pending = ["second", "third"];
+  next.groups.g.added = "keep";
+  commitMemoryDraft(live, next, (draft) => repository.save(draft));
+  assert.equal(live.groups.g, group);
+  assert.equal(group.users.u, user);
+  assert.equal(user.names, names);
+  assert.equal(group.pending, pending);
+  assert.deepEqual(names, ["old", "new"]);
+  assert.deepEqual(pending, ["second", "third"]);
+  assert.deepEqual(live, next);
+  reconcileMemoryInPlace(live, { groups: { g: { users: { u: { names: [] } } } } });
+  assert.equal(live.groups.g.users.u, user);
+  assert.equal(user.names, names);
+  assert.equal(names.length, 0);
+  assert.equal(Object.hasOwn(user, "confidence"), false);
+  assert.equal(Object.hasOwn(group, "added"), false);
+  const unusual = JSON.parse('{"__proto__":{"sentinel":true},"constructor":"data"}');
+  const destination = {};
+  reconcileMemoryInPlace(destination, unusual);
+  assert.equal(Object.getPrototypeOf(destination), Object.prototype);
+  assert.equal({}.sentinel, undefined);
+  assert.deepEqual(destination, unusual);
+  console.log("memory state: failed commit isolation, later recovery, stable references and safe JSON keys passed");
+} finally {
+  repository.close();
+  fs.rmSync(home, { recursive: true, force: true });
+}

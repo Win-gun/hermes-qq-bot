@@ -14,15 +14,19 @@ function safeId(value, fallback = "task") {
 }
 
 function writeJsonAtomic(filePath, value) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const tmp = `${filePath}.tmp`;
-  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`);
-  fs.renameSync(tmp, filePath);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const tmp = `${filePath}.${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    fs.renameSync(tmp, filePath);
+  } finally {
+    if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+  }
 }
 
 function appendJsonl(filePath, value) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.appendFileSync(filePath, `${JSON.stringify(value)}\n`);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  fs.appendFileSync(filePath, `${JSON.stringify(value)}\n`, { mode: 0o600 });
 }
 
 function readJson(filePath, fallback = null) {
@@ -39,14 +43,38 @@ function containsPath(parent, child) {
   return target === base || target.startsWith(`${base}${path.sep}`);
 }
 
+export function taskOwnedBy(task, logicalBotId) {
+  return typeof logicalBotId === "string" && logicalBotId.length > 0 && task?.logicalBotId === logicalBotId;
+}
+
+function assignedOwner(task) {
+  return typeof task?.logicalBotId === "string" && task.logicalBotId.trim().length > 0 && !task.logicalBotId.startsWith("unassigned:");
+}
+
+function backupBeforeOwnerMigration(filePath) {
+  const backupPath = `${filePath}.pre-logical-owner.bak`;
+  fs.chmodSync(path.dirname(filePath), 0o700);
+  try {
+    fs.writeFileSync(backupPath, fs.readFileSync(filePath), { flag: "wx", mode: 0o600 });
+  } catch (err) {
+    if (err.code !== "EEXIST") throw err;
+    // A prior migration attempt may have backed up before its atomic write failed.
+    // Never overwrite that first original, nor follow a substituted backup symlink.
+    if (!fs.lstatSync(backupPath).isFile()) throw new Error("task owner backup is not a regular file");
+    if (!fs.readFileSync(backupPath).equals(fs.readFileSync(filePath))) throw new Error("task owner backup does not match original task");
+    fs.chmodSync(backupPath, 0o600);
+  }
+}
+
 export class TaskRuntime {
-  constructor({ rootDir, config, execute, notify, log = () => {}, warn = () => {} }) {
+  constructor({ rootDir, config, execute, notify, log = () => {}, warn = () => {}, ownerForAccount = (id) => id ? `account:${id}` : "legacy:default" }) {
     this.rootDir = rootDir;
     this.getConfig = typeof config === "function" ? config : () => config || {};
     this.execute = execute;
     this.notify = notify;
     this.log = log;
     this.warn = warn;
+    this.ownerForAccount = ownerForAccount;
     this.tasks = new Map();
     this.running = new Set();
     this.queue = [];
@@ -89,21 +117,39 @@ export class TaskRuntime {
     return path.join(this.taskDir(taskId), "outputs");
   }
 
+  resolveLogicalOwner(accountId = "", explicitOwner) {
+    const id = String(accountId || "");
+    let resolved;
+    try { resolved = this.ownerForAccount(id); } catch { /* Unknown ownership fails closed. */ }
+    const owner = typeof resolved === "string" && resolved.trim() ? resolved : `unassigned:${id || "legacy:default"}`;
+    if (explicitOwner !== undefined && explicitOwner !== owner) throw new Error("logicalBotId does not match account owner");
+    return owner;
+  }
+
   load() {
     const baseDir = this.config().workspaceBaseDir;
-    fs.mkdirSync(baseDir, { recursive: true });
+    fs.mkdirSync(baseDir, { recursive: true, mode: 0o700 });
     for (const name of fs.readdirSync(baseDir)) {
       const filePath = path.join(baseDir, name, "task.json");
       if (!fs.existsSync(filePath)) continue;
       const task = readJson(filePath);
       if (!task?.id) continue;
+      let needsWrite = false;
+      if (!Object.hasOwn(task, "logicalBotId")) {
+        backupBeforeOwnerMigration(filePath);
+        task.logicalBotId = this.resolveLogicalOwner(task.accountId);
+        needsWrite = true;
+      }
+      let interrupted = false;
       if (["running", "planning", "reviewing", "delivering"].includes(task.status)) {
         task.status = "interrupted";
         task.interruptedAt = new Date().toISOString();
         task.lastError = "bridge restarted while task was active";
-        writeJsonAtomic(filePath, task);
-        appendJsonl(path.join(baseDir, name, "events.jsonl"), { at: task.interruptedAt, type: "interrupted", reason: task.lastError });
+        needsWrite = true;
+        interrupted = true;
       }
+      if (needsWrite) writeJsonAtomic(filePath, task);
+      if (interrupted) appendJsonl(path.join(baseDir, name, "events.jsonl"), { at: task.interruptedAt, type: "interrupted", reason: task.lastError });
       this.tasks.set(task.id, task);
     }
   }
@@ -116,6 +162,7 @@ export class TaskRuntime {
       conversationId: String(input.conversationId || ""),
       messageType: input.messageType || "group",
       accountId: String(input.accountId || ""),
+      logicalBotId: this.resolveLogicalOwner(input.accountId, input.logicalBotId),
       groupId: input.groupId ? String(input.groupId) : "",
       userId: String(input.userId || ""),
       senderName: input.senderName || input.userId || "",
@@ -140,7 +187,7 @@ export class TaskRuntime {
       lastError: "",
       review: null
     };
-    fs.mkdirSync(this.outputsDir(id), { recursive: true });
+    fs.mkdirSync(this.outputsDir(id), { recursive: true, mode: 0o700 });
     this.tasks.set(id, task);
     this.persist(task);
     this.event(task, "offered", { summary: task.summary, requestedTools: task.requestedTools, complexity: task.complexity, reasoningEffort: task.reasoningEffort });
@@ -157,22 +204,26 @@ export class TaskRuntime {
     appendJsonl(this.eventsPath(task.id), { at: new Date().toISOString(), type, ...detail });
   }
 
-  activeForConversation(conversationId) {
-    return Array.from(this.tasks.values()).find((task) => task.conversationId === String(conversationId) && ["offered", "queued", "planning", "running", "waiting_permission", "reviewing", "delivering", "interrupted"].includes(task.status));
+  activeForConversation(conversationId, { logicalBotId } = {}) {
+    return Array.from(this.tasks.values()).find((task) => task.conversationId === String(conversationId)
+      && (logicalBotId === undefined || taskOwnedBy(task, logicalBotId))
+      && ["offered", "queued", "planning", "running", "waiting_permission", "reviewing", "delivering", "interrupted"].includes(task.status));
   }
 
   get(taskId) {
     return this.tasks.get(String(taskId || "")) || null;
   }
 
-  list({ conversationId = "", limit = 100 } = {}) {
+  list({ conversationId = "", logicalBotId, limit = 100 } = {}) {
     return Array.from(this.tasks.values())
       .filter((task) => !conversationId || task.conversationId === String(conversationId))
+      .filter((task) => logicalBotId === undefined || taskOwnedBy(task, logicalBotId))
       .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
       .slice(0, Math.max(1, Number(limit || 100)));
   }
 
   canConfirm(task, actor = {}) {
+    if (!assignedOwner(task)) return { ok: false, owner: false, reason: "任务归属未分配，已隔离，不能执行。" };
     const cfg = this.config();
     const actorId = String(actor.userId || "");
     const owner = cfg.ownerUserIds.includes(actorId);
@@ -300,39 +351,56 @@ export class TaskRuntime {
 
   async pump() {
     const cfg = this.config();
-    while (this.running.size < cfg.maxConcurrentGlobal && this.queue.length) {
+    // Scan each queued item once so a busy logical lane cannot block a peer lane.
+    let remaining = this.queue.length;
+    while (this.running.size < cfg.maxConcurrentGlobal && this.queue.length && remaining-- > 0) {
       const id = this.queue.shift();
       const task = this.get(id);
-      if (!task || task.status !== "queued") continue;
-      const sameConversation = Array.from(this.running).map((runningId) => this.get(runningId)).filter((running) => running?.conversationId === task.conversationId).length;
+      if (!task || task.status !== "queued" || !assignedOwner(task)) continue;
+      const sameConversation = Array.from(this.running).map((runningId) => this.get(runningId))
+        .filter((running) => running?.conversationId === task.conversationId && taskOwnedBy(running, task.logicalBotId)).length;
       if (sameConversation >= cfg.maxConcurrentPerConversation) {
         this.queue.push(id);
-        break;
+        continue;
       }
       this.run(task).catch((err) => this.warn(`task runtime failed id=${task.id}: ${err.message}`));
     }
   }
 
+  async notifySafely(task, notice) {
+    try {
+      return await this.notify(task, notice);
+    } catch {
+      // Delivery is best-effort; a QQ outage must not fail a confirmed task.
+      try { this.warn(`task notice failed id=${task.id} type=${notice.type}`); } catch { /* logging is best-effort too */ }
+      try { this.event(task, "notice_failed", { noticeType: notice.type }); } catch { /* preserve task execution */ }
+      return false;
+    }
+  }
+
   async run(task) {
+    if (!assignedOwner(task)) return;
     const controller = new AbortController();
     this.controllers.set(task.id, controller);
     this.running.add(task.id);
-    task.status = "planning";
-    task.currentStage = "制定执行计划";
-    task.lastProgressAt = Date.now();
-    task.lastProgressText = "正在整理目标、工具和权限边界。";
-    task.startedAt ||= new Date().toISOString();
-    this.persist(task);
-    this.event(task, "started", { permissionTier: task.permissionTier, complexity: task.complexity, reasoningEffort: task.reasoningEffort });
-    if (!task.suppressStartNotice) await this.notify(task, { type: "started", text: `收到，任务 ${task.id} 开始执行。` });
-    const heartbeat = setInterval(() => {
-      if (!this.running.has(task.id)) return;
-      task.lastProgressAt = Date.now();
-      task.lastProgressText = `仍在执行：${task.currentStage || task.status}`;
-      this.persist(task);
-      this.notify(task, { type: "heartbeat", text: `任务 ${task.id} 还在执行，当前阶段：${task.status}。` }).catch(() => {});
-    }, this.config().progressHeartbeatMs);
+    let heartbeat;
     try {
+      task.status = "planning";
+      task.currentStage = "制定执行计划";
+      task.lastProgressAt = Date.now();
+      task.lastProgressText = "正在整理目标、工具和权限边界。";
+      task.startedAt ||= new Date().toISOString();
+      this.persist(task);
+      this.event(task, "started", { permissionTier: task.permissionTier, complexity: task.complexity, reasoningEffort: task.reasoningEffort });
+      if (!task.suppressStartNotice) await this.notifySafely(task, { type: "started", text: `收到，任务 ${task.id} 开始执行。` });
+      if (controller.signal.aborted || task.status === "cancelled") return;
+      heartbeat = setInterval(() => {
+        if (!this.running.has(task.id)) return;
+        task.lastProgressAt = Date.now();
+        task.lastProgressText = `仍在执行：${task.currentStage || task.status}`;
+        this.persist(task);
+        this.notifySafely(task, { type: "heartbeat", text: `任务 ${task.id} 还在执行，当前阶段：${task.status}。` });
+      }, this.config().progressHeartbeatMs);
       task.status = "running";
       task.currentStage = "执行任务";
       task.lastProgressAt = Date.now();
@@ -353,7 +421,7 @@ export class TaskRuntime {
         task.lastProgressText = "收到执行期间的新补充，正在合并到下一阶段。";
         this.persist(task);
         this.event(task, "supplement_pass_started", { pass: passes + 1, supplementCount: asArray(task.supplements).length });
-        await this.notify(task, { type: "progress", text: `任务 ${task.id} 收到新补充，正在合并到下一阶段。` });
+        await this.notifySafely(task, { type: "progress", text: `任务 ${task.id} 收到新补充，正在合并到下一阶段。` });
       } while (!controller.signal.aborted);
       if (task.status === "cancelled" || controller.signal.aborted) return;
       task.status = result?.waitingPermission ? "waiting_permission" : result?.ok === false ? "failed" : "completed";
@@ -367,7 +435,7 @@ export class TaskRuntime {
       task.completedAt = ["completed", "failed"].includes(task.status) ? new Date().toISOString() : "";
       this.persist(task);
       this.event(task, task.status, { summary: task.resultSummary, error: task.lastError });
-      await this.notify(task, {
+      await this.notifySafely(task, {
         type: task.status,
         text: task.status === "completed"
           ? `任务 ${task.id} 已完成。${task.resultSummary ? `\n${task.resultSummary}` : ""}`
@@ -386,7 +454,7 @@ export class TaskRuntime {
       task.completedAt = new Date().toISOString();
       this.persist(task);
       this.event(task, "failed", { error: task.lastError });
-      await this.notify(task, { type: "failed", text: `任务 ${task.id} 执行失败：${task.lastError}` });
+      await this.notifySafely(task, { type: "failed", text: `任务 ${task.id} 执行失败：${task.lastError}` });
     } finally {
       clearInterval(heartbeat);
       this.controllers.delete(task.id);
@@ -399,6 +467,7 @@ export class TaskRuntime {
 export function publicTask(task) {
   if (!task) return null;
   const copy = JSON.parse(JSON.stringify(task));
+  copy.logicalBotId = typeof task.logicalBotId === "string" ? task.logicalBotId : "";
   for (const grant of asArray(copy.grants)) {
     if (["read", "write"].includes(grant.type)) grant.target = path.basename(grant.target || "") || "已授权路径";
   }

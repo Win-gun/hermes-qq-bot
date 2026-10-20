@@ -5,12 +5,16 @@ import vm from "node:vm";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { accountGroup, accountItems, accountPolicy, accountScopeAllows, effectiveAccount, normalizeAccountRegistry, registryConfig } from "../src/account-registry.js";
-import { accountCanChat, accountCanOfferTask, accountTopology, configForAccountCapabilities } from "../src/bot-capabilities.js";
+import { accountCanChat, accountCanOfferTask, accountTopology, configForAccountCapabilities, accountKeywordMatches } from "../src/bot-capabilities.js";
 import { botCommandFeedback, botCommandText, groupCommandBots, routeBotCommand } from "../src/bot-command-routing.js";
 import { normalizeVoiceReplyMode, voiceReplyMode } from "../src/voice-mode.js";
 import { accountDeliveryDecision, GroupSendCoordinator } from "../src/account-delivery.js";
 import { ReplyCoordinator } from "../src/reply-coordinator.js";
+import { projectBehaviorSettings, normalizeBehaviorSelection } from "../src/behavior-settings.js";
 import { automationForAccount } from "../src/account-automation.js";
+import { AccountRuntime, logicalBotId, botConversationKey, botControlRevision } from "../src/account-runtime.js";
+import { replyDeliveryConfig } from "../src/reply-execution.js";
+import { reconcileMemoryInPlace } from "../src/memory-state.js";
 
 // Read source only. Never import/start main(), open sockets, spawn a service,
 // read live config/state, or persist anything. The complete real message callback
@@ -81,6 +85,8 @@ const realFunctions = [
   "asStringId", "asArray", "clampText", "safePathSegment", "now", "accountProtocol", "oneBotBinding", "oneBotBindingCurrent", "clearOneBotActionsForSocket",
   "groupMemory", "groupSettings", "normalizeBehaviorMode", "behaviorMode", "behaviorModeLabel", "behaviorModeDescription", "applyBehaviorMode", "socialPlannerConfig",
   "configuredAccountDefinitions", "accountFailoverConfig", "accountById", "configForReplyAccount", "configForGroupAccount",
+  "syncAccountKernel", "accountExecutionRevision", "accountRuntimeContext", "accountRuntimeContextCurrent", "accountRuntimeIdentityCurrent", "botStateKey",
+  "setDefaultTransport", "selectLogicalCarrier",
   "oneBotAccountState", "accountStateById", "configuredAccountBySelfId", "chooseUnboundStandbyAccount", "identifyOneBotAccount", "accountConnected",
   "accountIsSelected", "accountSelectedSnapshot", "connectedAccountForRole", "dispatchAccountAction",
   "parsePeerPingMessage", "accountActualQq", "acceptPeerPing", "sendPeerPing", "botAccountUserIds", "probeOneBotAccount",
@@ -104,6 +110,8 @@ function harness(config = fixtureConfig(), mutation = {}) {
   const forbidden = (name) => () => { throw new Error(`unmocked external boundary: ${name}`); };
   const context = vm.createContext({
     Date: FakeDate, structuredClone, randomBytes, AbortController,
+    logicalBotId, botConversationKey, botControlRevision, replyDeliveryConfig,
+    accountKernel: new AccountRuntime(config), kernelConfigRevision: 1, pendingReplyHandoffs: [],
     Math: Object.assign(Object.create(Math), { random: () => 0.5 }),
     accountGroup, accountItems, accountPolicy, accountScopeAllows, effectiveAccount, normalizeAccountRegistry, automationForAccount,
     accountDeliveryDecision, groupSendCoordinator: new GroupSendCoordinator({ minDelayMs: () => 0 }),
@@ -122,7 +130,12 @@ function harness(config = fixtureConfig(), mutation = {}) {
       members: async () => ({ qqs: context.roster }) },
     roster: [QQ[A], QQ[B], HUMAN],
     log: noop, debug: noop, warn: (message) => warnings.push(message), logIncomingMessage: noop,
-    saveMemory: noop, saveConfig: forbidden("saveConfig"),
+    mutateMemory: async (state, build) => {
+      const draft = structuredClone(state), result = build(draft);
+      assert(!result?.then, "transaction builders must remain synchronous");
+      reconcileMemoryInPlace(state, draft);
+      return result;
+    }, saveConfig: forbidden("saveConfig"),
     accountProbeSummary: (id) => context.accountProbeCache.get(id) || null,
     qrFileInfoForAccount: () => ({ exists: false }), accountWebuiInfoForAccount: () => ({}),
     selectedGroupAccount: (group) => group.memberIds[0],
@@ -131,9 +144,11 @@ function harness(config = fixtureConfig(), mutation = {}) {
     shouldHandleGroup: () => true, shouldHandlePrivate: () => true, isPrivateOwner: () => false,
     handleOwnerPrivateControlCommand: async () => false,
     taskRuntime: { get: () => null }, handleTaskControl: async () => false,
-    replyCoordinator: { observeMessage: () => ({ absorbed: false }), dropSenderJobs: noop, enqueue: (job) => jobs.push(job) },
+    replyCoordinator: { observeMessage: () => ({ absorbed: false }), dropSenderJobs: noop, enqueue: (job) => jobs.push(job),
+      refreshLogicalBot: noop, invalidateLogicalBot: noop },
     resolveQuotedMessages: async () => ({ refs: [], contexts: [], texts: [], audioMessages: [] }),
     extractImageRefs: () => [], normalizeImageRefIndexes: (refs) => refs, extractRecordRefs: () => [],
+    projectBehaviorSettings, normalizeBehaviorSelection, accountKeywordMatches,
     maybeDescribeImages: async () => [], appendImageDescriptions: (text) => text, redactSensitive: (text) => text,
     archiveConversationEvent: (event) => archived.push(event), archiveBotReply: noop,
     updateMemoryFromMessage: noop, addPendingMemoryMessage: noop, applyConversationFeedback: noop, summarizeOlderHistory: noop, maybeUpdateMemoryWithAI: noop,
@@ -158,6 +173,7 @@ function harness(config = fixtureConfig(), mutation = {}) {
     oneBotRequest: forbidden("OneBot request"), sleep: async () => {}, clearTimeout: noop,
     checkAdminStatusNotification: noop
   });
+  context.collectMemory = context.mutateMemory;
   for (const name of realFunctions) new vm.Script(mutation.functions?.[name] || functionSource(name), { filename: `bridge.js:${name}` }).runInContext(context);
   function socket() {
     const callbacks = new Map();
@@ -371,11 +387,22 @@ await test("4 actual enqueue gate: disabled/shadow planner, direct/implicit/acti
     if (kind === "active") {
       h.config.accounts.items.find((a) => a.id === B).features.proactive = true;
       h.config.behaviorModes.presets.normal.trigger = { activeReply: true, activeProbability: 1 };
+      h.config.trigger = { ...h.config.trigger, activeReply: true, activeProbability: 1 };
     }
-    await h.emit(B, kind === "keyword" ? "fixture-keyword" : "fixture question?", { mentions: kind === "at" ? [B] : [], private: kind === "private" });
+    await h.emit(B, kind === "keyword" ? "Beta" : "fixture question?", { mentions: kind === "at" ? [B] : [], private: kind === "private" });
     check.equal(h.jobs.length, 1, `${kind}: legitimate positive still queues`);
     check.equal(h.jobs[0].mode, kind);
     check.equal(h.jobs[0].accountId, B);
+  }
+});
+
+await test("real inbound names address only their independent logical bot", async () => {
+  for (const [text, expected, rename] of [["Beta 你在吗", B, false], ["fixture-keyword 你在吗", A, false], ["Alpha2 你在吗", B, true]]) {
+    const h = harness(); h.connect(A); h.connect(B);
+    if (rename) h.config.accounts.items.find((item) => item.id === B).displayName = "Alpha2";
+    await h.emit(A, text, { messageId: 900 });
+    await h.emit(B, text, { messageId: 900 });
+    check.deepEqual(h.jobs.map((job) => job.accountId), [expected], "a peer receiving the same event must not answer the addressed bot's name");
   }
 });
 
@@ -384,13 +411,14 @@ await test("account proactive feature gates random/social participation, not dir
     const h = harness(); h.connect(A); h.connect(B);
     h.config.socialPlanner = planner;
     h.config.behaviorModes.presets.normal.trigger = { activeReply: true, activeProbability: 1 };
+    h.config.trigger = { ...h.config.trigger, activeReply: true, activeProbability: 1 };
     h.c.discussionDecision = { matched: true, reason: "fixture relevant discussion" };
     h.c.socialDecision = { action: "reply", requestedAction: "reply", intent: "discussion", confidence: 0.9 };
     h.config.accounts.items.find((a) => a.id === A).features.proactive = true;
     await h.emit(B, "fixture ordinary discussion");
     check.equal(h.jobs.length, 0, `B proactive off: random/social discussion cannot enqueue (${JSON.stringify(planner)})`);
-    check.equal(h.c.lastActiveReplyAt.has(`${B}:${G}`), false, "blocked participation cannot consume B cooldown");
-    check.equal(h.c.lastActiveReplyAt.has(`${A}:${G}`), false, "B decision cannot affect A cooldown");
+    check.equal(h.c.lastActiveReplyAt.has(h.c.botStateKey(h.config, B, G)), false, "blocked participation cannot consume B cooldown");
+    check.equal(h.c.lastActiveReplyAt.has(h.c.botStateKey(h.config, A, G)), false, "B decision cannot affect A cooldown");
   }
   for (const intent of ["followup", "reaction"]) {
     const h = harness(); h.connect(B);
@@ -411,11 +439,44 @@ await test("account proactive feature gates random/social participation, not dir
   check.equal(direct.jobs[0].mode, "at");
 });
 
+await test("private control overlays do not leak between independent bots", async () => {
+  const h = harness(); h.connect(A); h.connect(B);
+  const conversation = `private:${HUMAN}`;
+  const a = h.c.configForReplyAccount(h.c.accountById(h.config, A));
+  const b = h.c.configForReplyAccount(h.c.accountById(h.config, B));
+  const before = h.c.accountExecutionRevision(B, conversation);
+  h.c.groupSettings(h.c.memory, conversation, a, { write: true, scoped: true }).voiceReplyMode = "off";
+  check.equal(h.c.groupSettings(h.c.memory, conversation, a).voiceReplyMode, "off");
+  check.equal(h.c.groupSettings(h.c.memory, conversation, b).voiceReplyMode, undefined);
+  check.equal(h.c.accountExecutionRevision(B, conversation), before);
+});
+
+await test("voice preset acknowledges its own committed control revision", async () => {
+  const h = harness(); h.connect(A);
+  h.config.voice = { ...h.config.voice, enabled: true,
+    tts: { enabled: true, model: "mimo-v2.5-tts", allowedVoices: ["bright"] } };
+  h.c.configRevision += 1;
+  let acknowledgements = 0;
+  h.c.oneBotRequest = async () => { acknowledgements += 1; return {}; };
+  new vm.Script(functionSource("handleVoiceCommand")).runInContext(h.c);
+  const event = { message_type: "private", user_id: HUMAN, __accountId: A };
+  const conversation = `private:${HUMAN}`;
+  const result = await h.c.handleVoiceCommand({ event, conversationId: conversation,
+    senderId: HUMAN, senderName: "fixture human", text: "/voice preset bright" });
+  check.equal(result, true);
+  check.equal(acknowledgements, 1);
+  const projected = h.c.configForReplyAccount(h.c.accountById(h.config, A));
+  check.equal(h.c.groupSettings(h.c.memory, conversation, projected).voicePreset, "bright");
+  const peer = h.c.configForReplyAccount(h.c.accountById(h.config, B));
+  check.equal(h.c.groupSettings(h.c.memory, conversation, peer).voicePreset, undefined);
+});
+
 await test("proactive capability changes invalidate queued active replies and planner wait", async () => {
   const h = harness(); h.connect(B);
   const beta = h.config.accounts.items.find((a) => a.id === B);
   beta.features.proactive = true;
   h.config.behaviorModes.presets.normal.trigger = { activeReply: true, activeProbability: 1 };
+  h.config.trigger = { ...h.config.trigger, activeReply: true, activeProbability: 1 };
   await h.emit(B);
   check.equal(h.jobs.length, 1);
   check.equal(h.jobs[0].mode, "active");
@@ -438,11 +499,16 @@ await test("proactive capability changes invalidate queued active replies and pl
   check.equal(wait.jobs.length, 0);
   check.equal(pending.isCurrent(), true);
   waitBeta.features.proactive = false;
+  wait.c.configRevision += 1;
   check.equal(pending.isCurrent(), false, "closing B capability invalidates delayed wait");
   waitBeta.features.proactive = true;
   wait.c.configRevision += 1;
-  check.equal(pending.isCurrent(), false, "config revision invalidates delayed wait");
-  wait.c.configRevision -= 1;
+  check.equal(pending.isCurrent(), false, "restoring the policy cannot revive a stale delayed wait");
+  await wait.emit(B);
+  check.equal(pending.isCurrent(), true, "a fresh wait captures the current owner policy");
+  wait.config.accounts.items.find((account) => account.id === A).style.systemPrompt += " unrelated peer edit";
+  wait.c.configRevision += 1;
+  check.equal(pending.isCurrent(), true, "editing A's style must not invalidate B's wait");
   const original = wait.c.oneBotAccounts.get(B).ws;
   wait.c.oneBotAccounts.get(B).ws = wait.socket();
   check.equal(pending.isCurrent(), false, "changed socket invalidates delayed wait");
@@ -629,7 +695,7 @@ await test("actual implicit algorithm does not treat B reply as A's follow-up", 
   const h = harness(); h.connect(A); h.connect(B);
   new vm.Script(functionSource("detectImplicitReplyToBot")).runInContext(h.c);
   const beta = h.c.configForReplyAccount(h.c.accountById(h.config, B));
-  h.c.recordBotMessage({ historyByGroup: h.c.historyByGroup, lastBotMessageByGroup: h.c.lastBotMessageByGroup,
+  await h.c.recordBotMessage({ historyByGroup: h.c.historyByGroup, lastBotMessageByGroup: h.c.lastBotMessageByGroup,
     groupId: G, text: "fixture Beta reply", config: beta, meta: { replyToUserId: HUMAN } });
   h.advance(1);
   await h.emit(A, "继续");
@@ -702,7 +768,9 @@ await test("seven in-memory reverted fixes are detected (no source writes)", asy
   six.config.accounts.items.find((a) => a.id === B).behaviorMode = "normal";
   six.c.groupMemory(six.c.memory, G).settings.botSettings = { [`account:${B}`]: { behaviorMode: "restrained" } };
   check.equal(six.c.configForGroupAccount(six.c.accountById(six.config, B), G).__behaviorMode, "normal", "mutant 6 account default overwrites group overlay");
-  const seven = harness(fixtureConfig(), mutateFunction("handleBotCommand", "scoped: Boolean(config.__activeAccountId)", "scoped: event.__botCommandTargeted === true"));
+  // The storage boundary now enforces ownership even if a caller omits scoped.
+  // Reverse that boundary itself, rather than a redundant call-site hint.
+  const seven = harness(fixtureConfig(), mutateFunction("groupSettings", "if (!id) return shared;", "if (!id || write) return shared;"));
   seven.connect(A); seven.c.roster = [QQ[A], HUMAN]; await seven.emit(A, "/bot quiet 10m");
   check.ok(seven.c.groupMemory(seven.c.memory, G).settings.quietUntil > seven.time(), "mutant 7 bare single-bot command writes shared quiet");
   check.equal(seven.c.isQuiet(seven.c.memory, G, seven.c.configForReplyAccount(seven.c.accountById(seven.config, B))), true, "mutant 7 later B inherits quiet");

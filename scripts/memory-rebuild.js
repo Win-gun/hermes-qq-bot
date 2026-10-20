@@ -5,6 +5,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureCanonicalMemory } from "../src/memory-integrity.js";
+import { MemoryRepository, memoryRevision, readMemorySnapshot } from "../src/memory-repository.js";
+import { buildMemoryRebuildProposal, applyMemoryRebuildProposal } from "../src/memory-rebuild-proposal.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const rootDir = path.resolve(path.dirname(__filename), "..");
@@ -30,6 +32,7 @@ function parseArgs(argv) {
     dryRun: true,
     check: false,
     noAi: false,
+    proposal: false,
     group: "",
     user: "",
     limit: 0,
@@ -50,6 +53,10 @@ function parseArgs(argv) {
     if (arg === "--check") {
       args.check = true;
       args.noAi = true;
+      continue;
+    }
+    if (arg === "--proposal") {
+      args.proposal = true;
       continue;
     }
     if (arg === "--no-ai") {
@@ -78,6 +85,7 @@ function parseArgs(argv) {
     }
     throw new Error(`Unknown argument: ${arg}`);
   }
+  if (args.proposal && args.apply) throw new Error("--proposal cannot be combined with --apply");
   return args;
 }
 
@@ -88,6 +96,7 @@ function printHelp() {
 Options:
   --dry-run       Run AI analysis and write only a report. This is the default.
   --apply         Back up data/memory.json, then write canonicalMemory back.
+  --proposal      Write a candidate for the running bridge; never write memory.
   --check         Validate config/memory and print the work plan; does not call AI.
   --no-ai         Use deterministic local cleanup only, useful for smoke tests.
   --group <id>    Rebuild only one group/session.
@@ -102,7 +111,7 @@ async function readJson(file) {
 }
 
 async function writeJson(file, value) {
-  await fs.writeFile(file, `${JSON.stringify(value, null, 2)}\n`);
+  await fs.writeFile(file, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
 }
 
 function timestamp() {
@@ -478,7 +487,7 @@ function summarizeReport(results, args) {
   }
   return {
     generatedAt: new Date().toISOString(),
-    mode: args.apply ? "apply" : args.check ? "check" : "dry-run",
+    mode: args.apply ? "apply" : args.proposal ? "proposal" : args.check ? "check" : "dry-run",
     usedAi: !args.noAi,
     scope: {
       group: args.group || "*",
@@ -515,7 +524,8 @@ async function main() {
   if (!existsSync(configPath)) throw new Error(`Missing config: ${configPath}`);
   if (!existsSync(memoryPath)) throw new Error(`Missing memory: ${memoryPath}`);
   const config = await readJson(configPath);
-  const memory = await readJson(memoryPath);
+  const memory = readMemorySnapshot(memoryPath);
+  const baseRevision = memoryRevision(memory);
   const workItems = buildWorkItems(memory, args);
 
   console.log(`[memory-rebuild] mode=${args.apply ? "apply" : args.check ? "check" : "dry-run"} users=${workItems.length} ai=${!args.noAi}`);
@@ -544,26 +554,39 @@ async function main() {
     const result = await rebuildOne(item, config, args);
     results.push(result);
     console.log(result.ok ? `ok merged=${result.mergedOrRemoved}` : `fallback error=${result.error.slice(0, 160)}`);
-    if (args.apply) {
-      item.user.canonicalMemory = result.canonical;
-      ensureCanonicalMemory(item.user, result.userId, {
-        at: result.canonical.rebuiltAt,
-        sourceConversationId: result.groupId
-      });
-      item.user.updatedAt = new Date().toISOString();
-    }
   }
 
   const report = summarizeReport(results, args);
-  await fs.mkdir(args.reportDir, { recursive: true });
+  await fs.mkdir(args.reportDir, { recursive: true, mode: 0o700 });
   const reportPath = path.join(args.reportDir, `memory-rebuild-report.${timestamp()}.json`);
   await writeJson(reportPath, report);
 
   let backupPath = "";
-  if (args.apply) {
-    backupPath = path.join(path.dirname(memoryPath), `memory.json.bak.${timestamp()}`);
-    await fs.copyFile(memoryPath, backupPath);
-    await writeJson(memoryPath, memory);
+  let proposalPath = "";
+  if (args.apply || args.proposal) {
+    const proposal = buildMemoryRebuildProposal(memory, results);
+    proposalPath = path.join(args.reportDir, "proposal.json");
+    await writeJson(proposalPath, proposal);
+    if (args.apply) {
+      const repository = new MemoryRepository({ filePath: memoryPath });
+      try {
+        // Acquire only for the short commit, not while calling models. A live
+        // bridge owns this lock, so offline apply refuses instead of racing it.
+        repository.acquireWriter();
+        const current = repository.load();
+        if (memoryRevision(current) !== baseRevision) {
+          const error = new Error("记忆已在重整期间更新；候选结果已保留，未覆盖现有数据");
+          error.code = "MEMORY_CONFLICT";
+          throw error;
+        }
+        const { nextMemory } = applyMemoryRebuildProposal(current, proposal);
+        backupPath = path.join(path.dirname(memoryPath), `memory.json.bak.${timestamp()}`);
+        await writeJson(backupPath, current);
+        repository.save(nextMemory, { expectedRevision: baseRevision });
+      } finally {
+        repository.close();
+      }
+    }
   }
 
   console.log(JSON.stringify({
@@ -571,6 +594,7 @@ async function main() {
     mode: report.mode,
     reportPath,
     backupPath,
+    proposalPath,
     totals: report.totals
   }, null, 2));
 }

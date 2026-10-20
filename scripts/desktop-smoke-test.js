@@ -107,6 +107,11 @@ try {
     throw new Error(`打包后的桥接服务未启动 (last fetch: ${lastFetchError}; response received: ${Boolean(health)})\n${diagnostics}\n${processOutput}`);
   }
   if (!health.instanceId) throw new Error("打包桥接未返回桌面应用实例标识");
+  if (health.memoryStorage?.background !== true || health.memoryStorage?.writable !== true
+    || health.memoryStorage?.recoveryRequired) throw new Error("打包桥接的后台记忆仓库未就绪");
+  const integrity = await fetch(`http://127.0.0.1:${controlPort}/api/memory/integrity`);
+  if (!integrity.ok) throw new Error("打包桥接的后台记忆检查不可用");
+  await integrity.json();
   if (externalHost && health.instanceId !== expectedInstanceId) throw new Error("桌面应用没有接入既有 WebUI 宿主");
   if (externalHost && hostChild.exitCode !== null) throw new Error("桌面应用中断了既有 WebUI 宿主");
   const logDeadline = Date.now() + 3000;

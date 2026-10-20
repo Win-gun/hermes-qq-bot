@@ -3,6 +3,9 @@ import { randomUUID } from "node:crypto";
 const clone = (value) => structuredClone(value);
 const object = (value) => value && typeof value === "object" && !Array.isArray(value);
 const ID = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
+// Account/group IDs also index older plain-object runtime maps. Reject these
+// at ingestion, not just API validation, before any inherited-key lookup.
+const RESERVED_IDS = new Set([...Object.getOwnPropertyNames(Object.prototype), "prototype"]);
 export const ACCOUNT_FEATURES = ["chat", "task", "proactive", "automation", "webSearch", "vision", "asr", "learning"];
 export const ACCOUNT_SEND_TYPES = ["text", "image", "record", "video", "file"];
 export const ACCOUNT_POLICY_KEYS = ["displayName", "selfName", "style", "styleProfileId", "promptOverride", "features", "sendTypes", "scope", "modelBindings", "voice", "behaviorMode"];
@@ -37,6 +40,7 @@ function legacyStyle(account, config) {
 
 function normalizeItem(raw, config, index, legacy = false) {
   const id = String(raw.id || (index === 0 ? "primary" : `standby-${index}`));
+  if (RESERVED_IDS.has(id)) throw new Error("账号 ID 不能使用原型保留名称");
   const mode = config.botFeatures?.accountModes?.[id] || config.botFeatures?.defaultMode || "all";
   const protocol = raw.protocol || "napcat";
   const displayName = String(raw.displayName || raw.name || (index === 0 ? config.persona?.displayName : "") || `机器人 ${index + 1}`);
@@ -88,6 +92,7 @@ export function normalizeAccountRegistry(config = {}, { strict = false } = {}) {
   if (!Array.isArray(failoverGroups)) throw new Error("接管组必须是数组");
   failoverGroups = failoverGroups.map((group) => {
     if (!object(group)) throw new Error("接管组必须是对象");
+    if (RESERVED_IDS.has(group.id)) throw new Error("接管组 ID 不能使用原型保留名称");
     const policySource = items.find((item) => item.id === group.policyAccountId);
     if (!policySource || !object(group.policy)) return group;
     const policy = { ...accountPolicy(policySource), ...group.policy };

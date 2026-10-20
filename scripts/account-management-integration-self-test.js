@@ -359,8 +359,9 @@ process.stdout.write("fixture text reply "+Date.now()+"\\n");
     assert.equal(status.connected, true, "paused status.connected");
     assert.equal(sockets.get(ids[5]).readyState, WebSocket.OPEN);
   });
-  await test("all five eligible bots answer ordinary trigger with no two-bot cap", async () => {
-    broadcast({ group: GROUP, messageId: "ordinary-five", text: "fixture-trigger 普通问题，请各自回答" });
+  await test("all five explicitly named eligible bots answer with no two-bot cap", async () => {
+    const names = (await current()).items.map((item) => item.displayName).join(" ");
+    broadcast({ group: GROUP, messageId: "ordinary-five", text: `${names} 普通问题，请各自回答` });
     await until(() => new Set(sent(GROUP).map((item) => item.id)).size >= 5, "five independent ordinary replies", 6500);
     assert.deepEqual([...new Set(sent(GROUP).map((item) => item.id))].sort(), ids.slice(0, 5));
   });
@@ -482,7 +483,8 @@ process.stdout.write("fixture text reply "+Date.now()+"\\n");
     assert.deepEqual(snapshot.statuses.filter((item) => item.active).map((item) => item.id).sort(), [...expected].sort(),
       `${marker}: elections must not collapse into one global active account`);
     const actionOffset = actions.length, promptOffset = hermesCalls().length;
-    broadcast({ group: GROUP, text: `fixture-trigger ${marker}`, messageId: marker });
+    const names = [...snapshot.items.map((item) => item.displayName), ...snapshot.failoverGroups.map((group) => group.policy.displayName)].join(" ");
+    broadcast({ group: GROUP, text: `${names} ${marker}`, messageId: marker });
     const newReplies = () => actions.slice(actionOffset).filter((item) => item.action === "send_group_msg" && String(item.params.group_id) === GROUP);
     await until(() => newReplies().length >= expected.length, `${marker}: all selected routes reply`, 6500);
     await pause(200);

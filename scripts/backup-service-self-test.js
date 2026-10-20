@@ -81,6 +81,7 @@ try {
   fs.writeFileSync(path.join(state, "config.json"), JSON.stringify(config));
   fs.writeFileSync(path.join(state, "data", "memory.json"), JSON.stringify({ groups: { 123: { users: { 42: { nickname: "测试" } } } } }));
   fs.writeFileSync(path.join(state, "data", "chat-archive", "groups", "123", "messages.jsonl"), '{"text":"hello"}\n');
+  fs.writeFileSync(path.join(state, "data", "chat-archive", "groups", "123", "search-index.json"), '{"disposable":"cache"}');
   fs.writeFileSync(path.join(state, "data", "tasks", "task_1", "outputs", "report.md"), "# report\n");
   fs.writeFileSync(path.join(hermesHome, ".env"), "DEEPSEEK_API_KEY=secret\n");
   fs.mkdirSync(path.join(hermesHome, "skills"), { recursive: true });
@@ -102,6 +103,7 @@ try {
   check(identityConfig.config.accounts.items[0].onebotWsUrl === "wss://example.invalid/onebot?keep=1", "safe backups must strip credentials embedded in OneBot URLs");
 
   const safe = await createBackup({ type: "safe", stateRoot: state, hermesHome, destinationDir: backups, appVersion: "test" });
+  check(!safe.manifest.files.some((item) => item.path.endsWith("/search-index.json")), "safe backups exclude regenerable archive search caches");
   check(fs.existsSync(safe.path), "safe backup must exist");
   const safeInfo = await inspectBackup({ path: safe.path });
   check(safeInfo.manifest.type === "safe" && !safeInfo.manifest.containsSensitiveInformation, "safe manifest flags must be correct");
@@ -114,6 +116,8 @@ try {
   check(restoredSafeConfig.ai.directApiKey === "", "safe restore must stay sanitized");
   check(restoredSafeConfig.taskMode.workspaceBaseDir === path.join(safeRestore, "data", "tasks"), `safe restore must rewrite state paths for the new computer (got ${restoredSafeConfig.taskMode.workspaceBaseDir})`);
   check(fs.existsSync(path.join(safeRestore, "data", "memory.json")), "safe restore must include memory");
+  check(fs.existsSync(path.join(safeRestore, "data", "chat-archive", "groups", "123", "messages.jsonl"))
+    && !fs.existsSync(path.join(safeRestore, "data", "chat-archive", "groups", "123", "search-index.json")), "restore preserves archive evidence without stale search cache");
   check(!fs.existsSync(path.join(safeRestore, "hermes", ".env")), "safe backup must exclude Hermes secret files");
   await rollbackRestore({ stateRoot: safeRestore, rollbackDir: safeResult.rollbackDir, installedTargets: safeResult.installedTargets });
   check(!fs.existsSync(path.join(safeRestore, "config.json")), "rollback must remove newly installed config when no previous config existed");
@@ -121,6 +125,7 @@ try {
   const progress = [];
   const full = await createBackup({ type: "full", password: "correct horse battery staple", includeLogs: true, stateRoot: state, hermesHome, logRoot, destinationDir: backups, appVersion: "test", onProgress: (item) => progress.push(item) });
   check(fs.existsSync(full.path), "full backup must exist");
+  check(!full.manifest.files.some((item) => item.path.endsWith("/search-index.json")), "full backups also exclude regenerable archive search caches");
   check(progress[0]?.stage === "copy" && progress.at(-1)?.percent === 98, "full backup must report bounded progress through file finalization");
   check(!full.manifest.files.some((item) => item.path.includes("external-skill") || item.path.includes("/lsp/")), "full backup must skip nonportable Hermes symlinks and generated LSP files");
   let wrongPasswordRejected = false;

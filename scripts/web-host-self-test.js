@@ -81,7 +81,7 @@ try {
   };
   fs.writeFileSync(path.join(state, "config.json"), JSON.stringify(config), { mode: 0o600 });
   fs.writeFileSync(path.join(state, ".setup-complete"), "", { mode: 0o600 });
-  fs.writeFileSync(path.join(state, "data", "memory.json"), "{}", { mode: 0o600 });
+  fs.writeFileSync(path.join(state, "data", "memory.json"), '{"groups":{}}', { mode: 0o600 });
   const env = { ...process.env, HOME: path.join(temp, "home"), HERMES_HOME: path.join(temp, "empty-hermes"), HERMES_QQ_LAUNCHCTL: "/usr/bin/false", HERMES_QQ_HOME: state, HERMES_QQ_BACKUP_ROOT: backups, HERMES_QQ_CONTROL_PORT: String(port) };
   host = spawn(process.execPath, [hostScript], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
   let stderr = "";
@@ -196,7 +196,7 @@ try {
   fs.mkdirSync(path.join(legacy, "napcat-fixture"));
   const migratedConfig = { ...config, ai: { command: "/usr/bin/true", args: [] } };
   fs.writeFileSync(path.join(legacy, "config.json"), JSON.stringify(migratedConfig));
-  fs.writeFileSync(path.join(legacy, "data", "memory.json"), JSON.stringify({ legacyFixture: "migrated" }));
+  fs.writeFileSync(path.join(legacy, "data", "memory.json"), JSON.stringify({ groups: {}, legacyFixture: "migrated" }));
   fs.writeFileSync(path.join(legacy, "napcat-fixture", "sentinel.txt"), "protocol fixture");
   const legacyInspect = await request(port, "/api/host/legacy/inspect", "POST", { path: legacy });
   check(legacyInspect.status === 200 && legacyInspect.data.root === legacy && legacyInspect.data.hasMemory && legacyInspect.data.hasArchive && legacyInspect.data.protocolDirectories?.includes("napcat-fixture") && !legacyInspect.data.configPath, `legacy inspect exposes only safe summary: ${JSON.stringify(legacyInspect)}`);
@@ -215,7 +215,7 @@ try {
   check((await request(port, "/health")).status === 200, "bridge resumes after legacy migration");
   const beforeFailedMigration = fs.readFileSync(path.join(state, "data", "memory.json"), "utf8");
   fs.writeFileSync(path.join(legacy, "config.json"), JSON.stringify({ ...migratedConfig, ai: { command: "/bin/sh", args: ["-c", "sleep 2; exit 1"] } }));
-  fs.writeFileSync(path.join(legacy, "data", "memory.json"), JSON.stringify({ legacyFixture: "should-roll-back" }));
+  fs.writeFileSync(path.join(legacy, "data", "memory.json"), JSON.stringify({ groups: {}, legacyFixture: "should-roll-back" }));
   const failedMigrationRequest = request(port, "/api/host/legacy/migrate", "POST", { path: legacy });
   await waitFor(async () => (await request(port, "/api/host/backup/status")).data.stage === "verify" ? true : null);
   check((await request(port, "/api/host/backup", "POST", { type: "safe" })).status === 409, "backup cannot overlap legacy migration");

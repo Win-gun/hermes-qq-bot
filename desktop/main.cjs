@@ -27,6 +27,7 @@ let externalHost = false;
 let externalHostRunning = false;
 let setupBridgeAllowed = false;
 let activeBackup = null;
+let activeLocalOperation = null;
 let lastBackupProgress = null;
 const DESKTOP_THEMES = new Set(["dark", "light", "system"]);
 let desktopTheme = "dark";
@@ -79,6 +80,26 @@ function publishBackupProgress(progress) {
   lastBackupProgress = next;
   if (activeBackup) activeBackup.progress = next;
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("backup:progress", next);
+}
+
+function localOperationHandler(kind, execute) {
+  return async (...args) => {
+    if (activeLocalOperation) {
+      const error = new Error("已有本机备份、恢复、迁移或启停操作正在进行，请稍后再试");
+      error.code = "HOST_BUSY";
+      throw error;
+    }
+    // An attached Web host owns its own transaction lock.
+    if (externalHost) return execute(...args, null);
+    const owner = { kind };
+    activeLocalOperation = owner;
+    try {
+      return await execute(...args, owner);
+    } finally {
+      if (activeBackup === owner) activeBackup = null;
+      if (activeLocalOperation === owner) activeLocalOperation = null;
+    }
+  };
 }
 
 function resourceRoot() {
@@ -481,12 +502,12 @@ function updateTrayMenu() {
     { label: "打开控制台", click: showWindow },
     { type: "separator" },
     { label: bridge || externalHostRunning ? "机器人运行中" : "机器人已停止", enabled: false },
-    { label: "启动", enabled: !bridge && !externalHostRunning, click: () => startManagedBridge().catch((error) => appendDesktopLog(`start failed: ${error.message}`)) },
-    { label: "停止", enabled: Boolean(bridge || externalHostRunning), click: () => stopBridge() },
-    { label: "重启", click: () => restartBridge() },
+    { label: "启动", enabled: !bridge && !externalHostRunning, click: () => localOperationHandler("bridge-start", startManagedBridge)().catch((error) => appendDesktopLog(`start failed: ${error.message}`)) },
+    { label: "停止", enabled: Boolean(bridge || externalHostRunning), click: () => localOperationHandler("bridge-stop", stopBridge)().catch((error) => appendDesktopLog(`stop failed: ${error.message}`)) },
+    { label: "重启", click: () => localOperationHandler("bridge-restart", restartBridge)().catch((error) => appendDesktopLog(`restart failed: ${error.message}`)) },
     { label: "查看日志", click: () => shell.openPath(logRoot()) },
     { type: "separator" },
-    { label: "退出并停止机器人", click: async () => { quitting = true; await stopBridge(); app.quit(); } }
+    { label: "退出并停止机器人", click: () => localOperationHandler("bridge-stop", async () => { quitting = true; await stopBridge(); app.quit(); })().catch((error) => appendDesktopLog(`quit failed: ${error.message}`)) }
   ]));
 }
 
@@ -573,18 +594,18 @@ function registerIpc() {
     }
     return { ok: true, accounts: results };
   });
-  handle("bot:start", async () => {
+  handle("bot:start", localOperationHandler("bridge-start", async () => {
     const result = await startManagedBridge();
     if (!result.ok) throw new Error(result.reason === "setup_required" ? "请先迁移现有项目或在首次设置中准备新账号" : `端口 ${result.port} 正被其他程序占用`);
     await waitForBridge();
     return result;
-  });
-  handle("bot:stop", () => stopBridge());
-  handle("bot:restart", async () => {
+  }));
+  handle("bot:stop", localOperationHandler("bridge-stop", () => stopBridge()));
+  handle("bot:restart", localOperationHandler("bridge-restart", async () => {
     const result = await restartBridge();
     if (!result.ok) throw new Error(result.reason === "setup_required" ? "请先迁移现有项目或在首次设置中准备新账号" : `端口 ${result.port} 正被其他程序占用`);
     const health = await waitForBridge(); return { ok: true, health };
-  });
+  }));
   handle("backup:choose-destination", async () => {
     if (externalHost) throw new Error("当前连接到 WebUI 宿主，请使用默认备份目录");
     const result = await dialog.showOpenDialog(mainWindow, { title: "选择备份保存目录", defaultPath: backupRoot(), properties: ["openDirectory", "createDirectory"] });
@@ -602,18 +623,18 @@ function registerIpc() {
     }
     return { canceled: false, path: selected };
   });
-  handle("backup:create", async (options) => {
+  handle("backup:create", localOperationHandler("backup", async (options, owner) => {
     if (externalHost) {
       if (options.destination && path.resolve(options.destination) !== backupRoot()) throw new Error("当前连接到 WebUI 宿主，请使用默认备份目录");
       return fetchJson(`${CONTROL_URL}/api/host/backup`, 30 * 60_000, "POST", { type: options.type, password: options.password || "", includeLogs: Boolean(options.includeLogs) });
     }
-    if (activeBackup) throw new Error("已有备份正在进行，请等待或取消后再试");
     const service = await backupModule();
     const type = options.type === "full" ? "full" : "safe";
     if (type === "full" && !String(options.password || "")) throw new Error("完整迁移备份必须设置密码");
     const controller = new AbortController();
     const wasRunning = Boolean(bridge);
-    activeBackup = { controller, progress: null, cancelable: true };
+    Object.assign(owner, { controller, progress: null, cancelable: true });
+    activeBackup = owner;
     publishBackupProgress({ type, status: "running", stage: "prepare", percent: 0, detail: type === "full" ? "准备暂停机器人并备份登录状态" : "准备复制用户数据" });
     let result;
     let error;
@@ -621,11 +642,11 @@ function registerIpc() {
       if (type === "full") await stopBridge();
       if (controller.signal.aborted) throw new service.BackupCancelledError();
       result = await service.createBackup({ type, password: options.password || "", includeLogs: type === "full" && Boolean(options.includeLogs), destinationDir: options.destination || backupRoot(), stateRoot: stateRoot(), hermesHome: hermesHome(), logRoot: logRoot(), appVersion: APP_VERSION, signal: controller.signal, onProgress: (progress) => publishBackupProgress({ type, status: "running", ...progress }) });
-      activeBackup.cancelable = false;
+      owner.cancelable = false;
     } catch (caught) {
       error = caught;
     } finally {
-      activeBackup.cancelable = false;
+      owner.cancelable = false;
       if (type === "full" && wasRunning) {
         publishBackupProgress({ type, status: "running", stage: "restart", percent: 99, detail: "恢复机器人连接" });
         bridgeIntentionalStop = false;
@@ -639,12 +660,11 @@ function registerIpc() {
         }
       }
       const cancelled = error?.name === "BackupCancelledError";
-      publishBackupProgress({ type, status: error ? (cancelled ? "cancelled" : "failed") : "completed", stage: error ? "finished" : "complete", percent: error ? activeBackup.progress?.percent || 0 : 100, detail: error ? (cancelled ? "备份已取消；机器人已恢复" : error.message) : "备份完成；机器人已恢复" });
-      activeBackup = null;
+      publishBackupProgress({ type, status: error ? (cancelled ? "cancelled" : "failed") : "completed", stage: error ? "finished" : "complete", percent: error ? owner.progress?.percent || 0 : 100, detail: error ? (cancelled ? "备份已取消；机器人已恢复" : error.message) : "备份完成；机器人已恢复" });
     }
     if (error) throw error;
     return result;
-  });
+  }));
   handle("backup:status", () => externalHost ? fetchJson(`${CONTROL_URL}/api/host/backup/status`, 2500) : activeBackup?.progress || lastBackupProgress);
   handle("backup:cancel", () => {
     if (externalHost) return fetchJson(`${CONTROL_URL}/api/host/backup/cancel`, 2500, "POST");
@@ -654,7 +674,7 @@ function registerIpc() {
     return { ok: true };
   });
   handle("backup:inspect", async (options) => (await backupModule()).inspectBackup(options));
-  handle("backup:restore", async (options) => {
+  handle("backup:restore", localOperationHandler("restore", async (options) => {
     if (externalHost) {
       const selected = path.resolve(options.path || "");
       if (!selected.startsWith(`${backupRoot()}${path.sep}`)) throw new Error("请先将迁移包导入默认备份目录");
@@ -705,24 +725,23 @@ function registerIpc() {
       startBridge();
       throw error;
     }
-  });
+  }));
   handle("backup:list", async () => externalHost
     ? (await fetchJson(`${CONTROL_URL}/api/host/backups`, 2500)).map((item) => ({ ...item, path: path.join(backupRoot(), item.name) }))
     : (await backupModule()).listLocalBackups(backupRoot()));
-  handle("backup:delete", async ({ path: file }) => externalHost
+  handle("backup:delete", localOperationHandler("backup-delete", async ({ path: file }) => externalHost
     ? fetchJson(`${CONTROL_URL}/api/host/backups/${encodeURIComponent(path.basename(file))}`, 2500, "DELETE")
-    : (await backupModule()).deleteLocalBackup(file, backupRoot()));
+    : (await backupModule()).deleteLocalBackup(file, backupRoot())));
   handle("legacy:select", async () => {
     const result = await dialog.showOpenDialog(mainWindow, { title: "选择现有 Hermes QQ Bot 项目", properties: ["openDirectory"] });
     if (result.canceled) return { canceled: true };
     const service = await backupModule();
     return { canceled: false, ...(service.inspectLegacyProject(result.filePaths[0])) };
   });
-  handle("legacy:migrate", async ({ path: legacyPath }) => {
-    if (setupComplete() && (externalHost || bridge)) {
+  handle("legacy:migrate", localOperationHandler("legacy-migrate", async ({ path: legacyPath }) => {
+    if (externalHost || (setupComplete() && bridge)) {
       return fetchJson(`${CONTROL_URL}/api/host/legacy/migrate`, 30 * 60_000, "POST", { path: legacyPath });
     }
-    if (externalHost) throw new Error("请先在 WebUI 中停止宿主并使用桌面应用的首次迁移流程");
     const service = await backupModule();
     service.inspectLegacyProject(legacyPath);
     await stopBridge();
@@ -775,7 +794,7 @@ function registerIpc() {
     } finally {
       if (!migrated && stoppedAgents.length === 0 && setupComplete()) { bridgeIntentionalStop = false; startBridgeWhenPortsFree(); }
     }
-  });
+  }));
   handle("setup:complete", async () => {
     if (app.isPackaged && app.getPath("exe").startsWith("/Volumes/")) throw new Error("请先把 App 拖入“应用程序”，再从应用程序目录打开并完成设置");
     await waitForBridge();

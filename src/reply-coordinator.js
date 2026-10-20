@@ -8,11 +8,15 @@ function unique(values) {
 }
 
 function sameAccount(left, right) {
-  return !left?.accountId || !right?.accountId || String(left.accountId) === String(right.accountId);
+  return String(left?.accountId || "") === String(right?.accountId || "");
 }
 
-function coveredKey(accountId, messageId) {
-  return `${String(accountId || "")}\u0000${String(messageId)}`;
+function laneKey(logicalBotId, conversationId) {
+  return JSON.stringify([logicalBotId, conversationId]);
+}
+
+function coveredKey(logicalBotId, conversationId, messageId) {
+  return JSON.stringify([logicalBotId, conversationId, String(messageId)]);
 }
 
 function modePriority(mode, direct = false) {
@@ -70,10 +74,11 @@ function mergeJobMessage(job, incoming) {
 }
 
 export class ReplyCoordinator {
-  constructor({ config, log = () => {}, warn = () => {} } = {}) {
+  constructor({ config, log = () => {}, warn = () => {}, ownerForAccount = (id) => id ? `account:${id}` : "legacy:default" } = {}) {
     this.getConfig = typeof config === "function" ? config : () => config || {};
     this.log = log;
     this.warn = warn;
+    this.ownerForAccount = ownerForAccount;
     this.states = new Map();
     this.covered = new Map();
     this.metrics = {
@@ -104,9 +109,15 @@ export class ReplyCoordinator {
     };
   }
 
-  state(conversationId) {
-    const key = String(conversationId || "unknown");
-    if (!this.states.has(key)) this.states.set(key, { conversationId: key, active: null, pending: [] });
+  logicalOwner(accountId = "", scope = {}) {
+    const explicit = typeof scope === "string" ? scope : scope?.logicalBotId;
+    return String(explicit || this.ownerForAccount(String(accountId || "")) || "legacy:default");
+  }
+
+  state(conversationId, logicalBotId = "legacy:default") {
+    const conversation = String(conversationId || "unknown");
+    const key = laneKey(logicalBotId, conversation);
+    if (!this.states.has(key)) this.states.set(key, { key, conversationId: conversation, logicalBotId, active: null, pending: [] });
     return this.states.get(key);
   }
 
@@ -115,15 +126,30 @@ export class ReplyCoordinator {
     for (const [id, expiresAt] of this.covered.entries()) if (expiresAt <= now) this.covered.delete(id);
   }
 
-  isCovered(messageIds, accountId = "") {
+  // Scope is { logicalBotId, conversationId }; old positional arguments remain valid.
+  isCovered(messageIds, accountId = "", scope = {}) {
     this.pruneCovered();
-    return unique(messageIds).some((id) => this.covered.has(coveredKey(accountId, id)));
+    const owner = this.logicalOwner(accountId, scope);
+    const ids = unique(messageIds);
+    if (scope?.conversationId != null) {
+      const conversation = String(scope.conversationId || "unknown");
+      return ids.some((id) => this.covered.has(coveredKey(owner, conversation, id)));
+    }
+    // Legacy callers did not supply a conversation; retain their owner-wide query.
+    // Enqueue always uses the full scope so equal IDs in different chats stay independent.
+    const wanted = new Set(ids);
+    for (const key of this.covered.keys()) {
+      const [coveredOwner, , id] = JSON.parse(key);
+      if (coveredOwner === owner && wanted.has(id)) return true;
+    }
+    return false;
   }
 
-  observeMessage({ conversationId, senderId, accountId = "", current, event, messageIds = [], direct = false } = {}) {
+  observeMessage({ conversationId, senderId, accountId = "", logicalBotId, current, event, messageIds = [], direct = false } = {}) {
     const cfg = this.config();
     if (!cfg.enabled || !cfg.liveEnabled) return { absorbed: false, contextUpdated: false };
-    const state = this.states.get(String(conversationId || "unknown"));
+    const owner = this.logicalOwner(accountId, { logicalBotId });
+    const state = this.states.get(laneKey(owner, String(conversationId || "unknown")));
     if (!state) return { absorbed: false, contextUpdated: false };
     const incoming = {
       senderId: String(senderId || ""), accountId: String(accountId || ""), current, currentMessages: [current], event,
@@ -131,7 +157,7 @@ export class ReplyCoordinator {
     };
     const now = Date.now();
     const mergeTarget = [state.active, ...state.pending].find((job) => (
-      job && !job.dropped && sameAccount(job, incoming) && String(job.senderId) === incoming.senderId && now - Number(job.updatedAt || job.createdAt || 0) <= cfg.windowMs
+      job && !job.dropped && !job.deliveryStarted && sameAccount(job, incoming) && String(job.senderId) === incoming.senderId && now - Number(job.updatedAt || job.createdAt || 0) <= cfg.windowMs
     ));
     if (mergeTarget) {
       if (direct && cfg.cancelProactiveOnDirect && ["active", "proactive", "delayed"].includes(mergeTarget.mode)) {
@@ -155,7 +181,7 @@ export class ReplyCoordinator {
       this.log(`reply coordinator merged conversation=${state.conversationId} sender=${incoming.senderId} messages=${mergeTarget.messageIds.length}`);
       return { absorbed: true, contextUpdated: true, jobId: mergeTarget.id };
     }
-    if (state.active && !state.active.dropped && sameAccount(state.active, incoming)) {
+    if (state.active && !state.active.dropped && !state.active.deliveryStarted && sameAccount(state.active, incoming)) {
       if (direct && cfg.cancelProactiveOnDirect && ["active", "proactive", "delayed"].includes(state.active.mode)) {
         this.cancelActive(state.active, "direct-message-preempted-proactive", { drop: true });
       } else if (messagesRelated(state.active, incoming)) {
@@ -172,22 +198,25 @@ export class ReplyCoordinator {
   }
 
   cancelActive(job, reason, { drop = false } = {}) {
-    if (!job) return;
+    if (!job || job.dropped || job.deliveryStarted || (!drop && job.controller?.signal.aborted)) return;
     job.cancelReason = reason;
     job.dropped = drop || job.dropped;
     this.metrics.cancelled += 1;
     if (drop) this.metrics.dropped += 1;
     this.metrics.lastCancellationReason = reason;
     this.metrics.lastCancellationAt = Date.now();
+    // Settle dropped callers even if execute ignores AbortSignal indefinitely.
+    if (drop) job.resolve?.({ ok: true, skipped: true, reason });
     job.controller?.abort(reason);
   }
 
-  dropSenderJobs(conversationId, senderId, reason = "direct-media-request", accountId = "") {
-    const state = this.states.get(String(conversationId || "unknown"));
+  dropSenderJobs(conversationId, senderId, reason = "direct-media-request", accountId = "", scope = {}) {
+    const owner = this.logicalOwner(accountId, scope);
+    const state = this.states.get(laneKey(owner, String(conversationId || "unknown")));
     if (!state) return 0;
     const sender = String(senderId || "");
     let dropped = 0;
-    if (state.active && !state.active.dropped && state.active.senderId === sender && sameAccount(state.active, { accountId })) {
+    if (state.active && !state.active.dropped && !state.active.deliveryStarted && state.active.senderId === sender && sameAccount(state.active, { accountId })) {
       this.cancelActive(state.active, reason, { drop: true });
       dropped += 1;
     }
@@ -199,7 +228,68 @@ export class ReplyCoordinator {
       dropped += 1;
       return false;
     });
+    this.cleanupState(state);
     return dropped;
+  }
+
+  cleanupState(state) {
+    if (!state.active && !state.pending.length && this.states.get(state.key) === state) this.states.delete(state.key);
+  }
+
+  refreshLogicalBot(logicalBotId, reason = "policy-updated") {
+    const owner = String(logicalBotId);
+    const counts = { refreshed: 0, dropped: 0, pending: 0 };
+    const cfg = this.config();
+    for (const state of this.states.values()) {
+      if (state.logicalBotId !== owner) continue;
+      counts.pending += state.pending.length;
+      const job = state.active;
+      if (!job || job.dropped || job.deliveryStarted) continue;
+      job.contextRevision += 1;
+      if (job.regenerationCount < cfg.maxRegenerations) {
+        this.cancelActive(job, reason, { drop: false });
+        counts.refreshed += 1;
+      } else {
+        this.cancelActive(job, reason, { drop: true });
+        counts.dropped += 1;
+      }
+    }
+    return counts;
+  }
+
+  invalidateLogicalBot(logicalBotId, reason = "logical-bot-invalidated", { recoverUnsent = false } = {}) {
+    const owner = String(logicalBotId);
+    const counts = { active: 0, pending: 0, dropped: 0 };
+    const intents = [];
+    const rememberIntent = (job) => {
+      if (!recoverUnsent || !job || job.dropped || job.deliveryStarted || job.preReplyStarted || job.preReplySent || !job.direct
+        || !["private", "at", "keyword"].includes(job.mode) || typeof job.rebaseRuntime !== "function"
+        || Number(job.ownerHandoffs || 0) >= 2) return;
+      intents.push({ accountId: job.accountId, senderId: job.senderId, conversationId: job.conversationId,
+        mode: job.mode, direct: true, currentMessages: [...job.currentMessages], messageIds: [...job.messageIds],
+        event: job.event, execute: job.execute, rebaseRuntime: job.rebaseRuntime,
+        ownerHandoffs: Number(job.ownerHandoffs || 0) + 1 });
+    };
+    for (const state of this.states.values()) {
+      if (state.logicalBotId !== owner) continue;
+      if (state.active && !state.active.dropped && !state.active.deliveryStarted) {
+        rememberIntent(state.active);
+        this.cancelActive(state.active, reason, { drop: true });
+        counts.active += 1;
+      }
+      for (const job of state.pending) {
+        if (job.dropped) continue;
+        rememberIntent(job);
+        job.dropped = true;
+        job.resolve?.({ ok: true, skipped: true, reason });
+        this.metrics.dropped += 1;
+        counts.pending += 1;
+      }
+      state.pending = [];
+      this.cleanupState(state);
+    }
+    counts.dropped = counts.active + counts.pending;
+    return recoverUnsent ? { ...counts, intents } : counts;
   }
 
   enqueue(input = {}) {
@@ -210,6 +300,7 @@ export class ReplyCoordinator {
       conversationId: String(input.conversationId || "unknown"),
       senderId: String(input.senderId || ""),
       accountId: String(input.accountId || ""),
+      logicalBotId: this.logicalOwner(input.accountId, input),
       mode: String(input.mode || "reply"),
       direct: input.direct === true,
       currentMessages: asArray(input.currentMessages || input.current),
@@ -222,10 +313,10 @@ export class ReplyCoordinator {
       dropped: false,
       preReplySent: false
     };
-    if (this.isCovered(job.messageIds, job.accountId)) return Promise.resolve({ ok: true, skipped: true, reason: "covered" });
-    const state = this.state(job.conversationId);
+    if (this.isCovered(job.messageIds, job.accountId, job)) return Promise.resolve({ ok: true, skipped: true, reason: "covered" });
+    const state = this.state(job.conversationId, job.logicalBotId);
     const existing = [state.active, ...state.pending].find((item) => (
-      item && !item.dropped && sameAccount(item, job) && item.senderId === job.senderId && Date.now() - Number(item.updatedAt || item.createdAt) <= cfg.windowMs
+      item && !item.dropped && !item.deliveryStarted && sameAccount(item, job) && item.senderId === job.senderId && Date.now() - Number(item.updatedAt || item.createdAt) <= cfg.windowMs
     ));
     if (existing && cfg.liveEnabled) {
       if (job.direct && cfg.cancelProactiveOnDirect && ["active", "proactive", "delayed"].includes(existing.mode)) {
@@ -270,19 +361,26 @@ export class ReplyCoordinator {
   }
 
   async pump(state) {
-    if (state.active || !state.pending.length) return;
+    if (state.active) return;
+    if (!state.pending.length) {
+      this.cleanupState(state);
+      return;
+    }
     const job = state.pending.shift();
     state.active = job;
     let outcome = { ok: true, skipped: true, reason: "dropped" };
     try {
       outcome = await this.runJob(job);
     } catch (err) {
-      this.warn(`reply coordinator failed conversation=${state.conversationId} job=${job.id}: ${err.message}`);
-      outcome = { ok: false, error: err.message };
+      if (job.dropped) outcome = { ok: true, skipped: true, reason: job.cancelReason || "dropped" };
+      else {
+        this.warn(`reply coordinator failed conversation=${state.conversationId} job=${job.id}: ${err.message}`);
+        outcome = { ok: false, error: err.message };
+      }
     } finally {
       state.active = null;
       job.resolve?.(outcome);
-      if (!state.pending.length) this.states.delete(state.conversationId);
+      if (!state.pending.length) this.cleanupState(state);
       else queueMicrotask(() => this.pump(state));
     }
   }
@@ -292,6 +390,7 @@ export class ReplyCoordinator {
     while (!job.dropped) {
       const settle = Math.max(0, Number(job.settleUntil || 0) - Date.now());
       if (settle) await new Promise((resolve) => setTimeout(resolve, settle));
+      if (job.dropped) break;
       const revision = Number(job.contextRevision || 0);
       const controller = new AbortController();
       job.controller = controller;
@@ -299,27 +398,35 @@ export class ReplyCoordinator {
       this.log(`reply coordinator start conversation=${job.conversationId} mode=${job.mode} sender=${job.senderId} regeneration=${job.regenerationCount}`);
       try {
         const result = await job.execute({ job, signal: controller.signal, revision, regeneration: job.regenerationCount });
-        if ((result?.retry || Number(job.contextRevision || 0) !== revision) && job.regenerationCount < cfg.maxRegenerations) {
+        if (job.deliveryStarted && result?.retry) return { ok: true, skipped: true, deliveryUnconfirmed: true, reason: "delivery-started-no-replay" };
+        if (job.dropped) return { ok: true, skipped: true, reason: job.cancelReason || "dropped" };
+        const stale = controller.signal.aborted || Number(job.contextRevision || 0) !== revision;
+        if ((result?.retry || stale) && job.regenerationCount < this.config().maxRegenerations) {
           job.regenerationCount += 1;
           this.metrics.regenerated += 1;
           job.settleUntil = Date.now() + cfg.settleMs;
           continue;
         }
+        if (stale) return { ok: true, skipped: true, reason: job.cancelReason || "stale-context" };
         if (result?.sent) {
+          job.deliveryStarted = true;
           this.metrics.sent += 1;
-          for (const id of unique(job.messageIds)) this.covered.set(coveredKey(job.accountId, id), Date.now() + Math.max(cfg.windowMs * 3, 60_000));
+          for (const id of unique(job.deliveryMessageIds || job.messageIds)) this.covered.set(coveredKey(job.logicalBotId, job.conversationId, id), Date.now() + Math.max(cfg.windowMs * 3, 60_000));
           if (cfg.minDelayMs) await new Promise((resolve) => setTimeout(resolve, cfg.minDelayMs));
+          // A completed send cannot be undone; never replay it after cancellation during spacing.
+          if (job.dropped || controller.signal.aborted) return { ok: true, skipped: true, reason: job.cancelReason || "dropped" };
         }
         return { ok: true, ...result, regenerationCount: job.regenerationCount };
       } catch (err) {
         if (controller.signal.aborted) {
           if (job.dropped) return { ok: true, skipped: true, reason: job.cancelReason || "dropped" };
-          if (job.regenerationCount < cfg.maxRegenerations) {
+          if (job.regenerationCount < this.config().maxRegenerations) {
             job.regenerationCount += 1;
             this.metrics.regenerated += 1;
             job.settleUntil = Date.now() + cfg.settleMs;
             continue;
           }
+          return { ok: true, skipped: true, reason: job.cancelReason || "stale-context" };
         }
         throw err;
       } finally {
@@ -336,6 +443,7 @@ export class ReplyCoordinator {
       pending += state.pending.length;
       if (state.active) active.push({
         conversationId: state.conversationId,
+        logicalBotId: state.logicalBotId,
         jobId: state.active.id,
         mode: state.active.mode,
         senderId: state.active.senderId,
@@ -349,6 +457,6 @@ export class ReplyCoordinator {
   }
 
   queuedConversationIds() {
-    return [...this.states.keys()];
+    return unique([...this.states.values()].map((state) => state.conversationId));
   }
 }

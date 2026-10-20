@@ -111,7 +111,7 @@ The bridge has a few important subsystems in `src/bridge.js`:
 
 - OneBot WebSocket listener.
 - Reply decision logic for mentions, keywords, implicit follow-ups, private chats, and proactive participation.
-- Per-group reply queue to avoid concurrent spam.
+- Per-logical-bot/conversation generation lanes, with a shared physical group send gate.
 - Hermes chat call path for normal replies.
 - Vision path for QQ images.
 - Controlled web search path.
@@ -121,17 +121,17 @@ The bridge has a few important subsystems in `src/bridge.js`:
 - Evidence-bound canonical memory keyed by QQ user ID, with conflict and supersession tracking.
 - Legacy reviewer configuration and historical metrics remain readable, but runtime reply review is disabled to avoid an extra model call.
 - Persistent background task runtime under `data/tasks/`, separated from the normal reply queue.
-- Multi-account routing/failover for primary and standby protocol clients.
+- Logical identity/routing authority in `src/account-runtime.js`; independent accounts and explicitly configured failover groups.
 - Local control API and admin page endpoints.
 
 When changing behavior, prefer updating the relevant config defaults and keeping the runtime configurable from the admin page where practical.
 
 ## Current model setup
 
-The intended setup is:
-
-- Daily chat: DeepSeek `deepseek-v4-flash` via Hermes, with reasoning effort enabled in Hermes config.
-- Image recognition: Xiaomi/MiMo `mimo-v2.5` via Hermes vision toolset.
+Read the selected `apiCenter` feature and per-account bindings. Provider/model
+names in old documents or legacy `ai` fields are not proof of the current route.
+Chat, task, vision, ASR, TTS and search bindings are separate. Do not switch a
+working model or increase chat reasoning while refactoring the core.
 
 Do not put API keys directly into source files, `config.example.json`, docs, logs, or final answers. The live system should use Hermes auth or environment variables. If a user pasted a key in conversation or a local config contains one, treat it as secret.
 
@@ -212,10 +212,19 @@ Default behavior:
 When editing this logic, preserve:
 
 - Strict quiet mode: `/bot quiet ...` must make the bot actually quiet.
-- Per-group reply queue and send delay.
+- Independent logical-bot generation and shared same-group send delay.
 - Reliable handling for direct `@` mentions and owner private commands.
 
 ## Memory rules
+
+Online memory is owned by the background repository worker. Never mutate the
+published `MemoryRuntime.value` root or call an offline writer from the bridge.
+Use `mutateMemory`/`MemoryRuntime.transact` with a synchronous latest-draft builder;
+do model/tool awaits outside it. Raw intake uses the bounded `MemoryIntake` lane.
+Resolve acceptance only after durable publication. Read compatibility defaults
+must not create persistent fields; failed/uncertain writes must not be silently
+retried. After any persistence await, recheck logical identity, applicable
+conversation-control revisions and quiet state before sending through OneBot.
 
 `data/memory.json` is live behavioral state, not disposable test data.
 
@@ -237,6 +246,17 @@ If implementing a full memory rebuild, provide a dry-run mode before writing bac
 
 Canonical memory is additive. Keep legacy fields intact and prefer `canonicalMemory.entries` only when entries are active, sufficiently confident, and bound to the same QQ user ID. Corrections must target memory IDs; never remove memories using fuzzy substring matching.
 
+Core source upgrade contracts and outstanding acceptance gates are tracked in
+`docs/CORE-UPGRADE.md`. The memory repository is the sole cooperating writer;
+read-only tools must not acquire its lock. AI extraction claims each batch
+durably before calling the model, and commits the patch and batch ACK together.
+Per-claim source IDs must belong to the actual sender and original event time.
+AI correction suggestions are proposals, not permission to change tombstones.
+Use `groupMemoryValues` for fact/topic prompt projections; raw compatibility
+arrays must not bypass confidence or correction gates. Durable memory is not a
+FIFO cache. Background archive search must not fall back to a synchronous cold
+index build on the reply thread.
+
 ## Task mode and reviewer rules
 
 - Formal tasks are stored under `data/tasks/<taskId>/` with `task.json`, `events.jsonl`, and `outputs/`.
@@ -246,7 +266,7 @@ Canonical memory is additive. Keep legacy fields intact and prefer `canonicalMem
 - The task runner brokers explicitly granted file reads/writes and omits general file and terminal toolsets. Keep macOS sandbox execution enabled unless a computer-control grant explicitly requires broader access.
 - On restart, active tasks become `interrupted`; do not automatically replay external actions.
 - Reviewer output is internal structured JSON. The admin page may show issue codes, timings, and counts, but never chain-of-thought or secret-bearing evidence.
-- Keep task and reviewer shadow mode enabled during initial rollout until logs show acceptable false-positive and latency rates.
+- Runtime reply review stays disabled. Do not reintroduce an extra model call.
 
 ## Admin console rules
 
@@ -286,14 +306,15 @@ Login status should be obvious when login is invalid. When login is valid, avoid
 
 ## Multi-account and SnowLuma notes
 
-The current intended primary and standby protocol clients are SnowLuma; NapCat remains supported as a legacy option. Read the actual `config.json` before operating either account.
+SnowLuma and legacy NapCat are supported per account. Read the selected registry
+and actual protocol configuration before operating a client.
 
 Current design expectations:
 
-- Primary account display name: `Eraser的小跟班`.
-- Standby account display name: `Eraser的小跟班2`.
-- When primary is healthy, standby should not participate in chat.
-- Failover should only occur when the active account is strongly unhealthy and the standby account is verified enough to send/receive.
+- Names and styles belong to accounts, never to the generic framework.
+- Independent accounts are peers and may make independent decisions to reply.
+- Only members of an explicit failover group share one logical identity. Only
+  its selected healthy carrier may send; strong health evidence is required for failover.
 - Avoid frequent account flapping. Prefer strong evidence from OneBot status, send checks, received messages, and peer/owner diagnostics.
 - Do not auto-refresh/restart both primary and standby protocol clients at the same time. QR refresh/restart logic should use global mutex/cooldown protection.
 
@@ -314,7 +335,10 @@ For SnowLuma login, prefer opening its WebUI. Do not assume its QR code file pat
 ## Feature modes, automation, learning, and voice
 
 - `botFeatures.defaultMode` and `botFeatures.accountModes` select `chat`, `task`, or `all`; `styleProfiles` holds named prompt presets without deleting the legacy prompt.
-- `accounts.topology` defaults to `failover`. `collaboration` and `function_split` are experimental and require isolated/live opt-in verification. An explicitly addressed account should answer through its own OneBot socket.
+- `accounts.items` and explicit `failoverGroups` define ownership. Legacy
+  `primary`, `standbys` and `accounts.topology` remain compatibility views, not a
+  second runtime authority. An addressed account uses its own eligible socket;
+  an independent peer cannot silently take over its persona, private log or tasks.
 - `automation.rules` are explicitly scoped by conversation; no implicit all-groups scheduling. Quiet mode suppresses scheduled and command-triggered group sends. A scheduled occurrence is claimed immediately before send to limit duplicates.
 - `learningMode` is opt-in per group or via an authorized `/bot learn` command; it may ask a limited number of genuine clarification questions.
 - Voice is disabled by default. `src/voice-service.js` uses MiMo ASR/TTS with `MIMO_API_KEY` (environment variable name only in config) or an explicitly selected Keychain credential, and `src/voice-onebot.js` handles OneBot record segments. Never save real API keys in examples or logs.

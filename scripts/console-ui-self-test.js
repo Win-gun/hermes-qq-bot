@@ -516,6 +516,287 @@ function adminFunction(name) {
   return businessScript.slice(start.index, end);
 }
 const plain = (value) => JSON.parse(JSON.stringify(value));
+
+// Execute the real global save/refresh/form-fill path with an in-memory HTTP
+// server. Deferred responses reproduce typing and cross-pane races without a
+// bridge, filesystem writes, credentials, or QQ traffic.
+function configUiRuntime() {
+  const nodes = new Map(), pending = [], reads = [], feedback = [];
+  const initial = {
+    revision: "r1", accounts: { version: 2, items: [{ id: "a" }, { id: "b" }],
+      primary: { id: "a" }, standbys: [{ id: "b", behaviorMode: "lively" }, { id: "c", behaviorMode: "restrained" }] },
+    behaviorModes: { default: "normal" }, trigger: { activeProbability: 0.12, activeCooldownMs: 120000 },
+    proactive: { enabled: true, probability: 0.25, intervalMs: 300000, cooldownMs: 900000 },
+    learningMode: { enabled: true, groupIds: [], minIntervalMs: 1800000, maxQuestionsPerDay: 3 },
+    voice: { enabled: false, tts: { model: "mimo-v2.5-tts", voice: "mimo_default", allowedVoices: ["mimo_default"] } },
+    taskMode: { maxTurns: 10 }, chatArchive: { baseDir: "data/offline-archive", enabled: true }
+  };
+  const scopeOf = (id) => {
+    if (/^(behaviorModes|trigger|proactive|socialPlanner|messageDebounce|responseQueue|learningMode)\./.test(id) || id === "webSearch.enabled") return "qa:behavior";
+    if (id.startsWith("taskMode.")) return "tasks";
+    if (id.startsWith("chatArchive.")) return "archive";
+    if (id.startsWith("vision.")) return "vision";
+    if (id.startsWith("voice.")) return "voice:behavior";
+    if (/^(prompt|styleProfiles)\./.test(id)) return "qa:persona";
+    if (id.startsWith("ai.")) return "qa:model";
+    if (id.startsWith("webSearch.")) return "qa:search";
+    return "account-status";
+  };
+  const node = (id = "", type = "text") => ({
+    id, type, value: "", checked: false, disabled: false, dataset: {}, options: [], textContent: "",
+    classList: { toggle() {}, add() {}, remove() {} }, setAttribute() {},
+    querySelector: () => null,
+    appendChild(option) { this.options.push(option); },
+    closest(selector) {
+      const scope = scopeOf(id);
+      if (selector === "[data-tab-panel]" && scope.includes(":")) return { dataset: { tabPanel: scope } };
+      if (selector === ".page") return { id: `page-${scope}` };
+      return null;
+    }
+  });
+  for (const match of html.matchAll(/<(?:input|select|textarea)\b([^>]*)>/gi)) {
+    const id = match[1].match(/\bid="([^"]+)"/)?.[1];
+    if (id) nodes.set(id, node(id, match[1].match(/\btype="([^"]+)"/)?.[1] || "text"));
+  }
+  const state = {
+    structuredClone, Headers, cfg: structuredClone(initial), server: structuredClone(initial),
+    activePage: "tasks", activeTabs: { qa: "behavior", voice: "behavior" }, dirty: false,
+    dirtyScopes: new Set(), conflictedScopes: new Set(), scopeFeedback: new Map(),
+    scopeEditVersions: new Map(), savingConfigScopes: new Set(), preservingDirtyFields: false,
+    promptDrafts: new Map(), routineState: { dirty: false }, automationAccounts: { drafts: new Map() },
+    apiCenterDirty: false, apiCenterConflicted: false, apiCenterSaved: {},
+    registryState: { items: structuredClone(initial.accounts.items), groups: [], drafts: new Map(),
+      operations: new Map(), contexts: {}, selected: "a", epoch: 0, revision: "r1", modelLoadedAt: 0 },
+    VOICE_PRESET_IDS: ["mimo_default"],
+    $: (id) => { if (!nodes.has(id)) nodes.set(id, node(id)); return nodes.get(id); },
+    document: { querySelectorAll: () => [], createElement: () => node() },
+    confirm: () => true, setBusy() {}, toast: (message) => feedback.push(message),
+    ensureAdminSession: async () => "offline-session", sensitiveApi: async () => ({ center: {} }),
+    registryItem: (id) => state.registryState.items.find((item) => item.id === (id || state.registryState.selected)),
+    rebaseRegistryDraft() {}, initializeAiProfiles() {}, initializeStyleProfiles() {}, renderAccountModeFields() {},
+    updateAccountTopologyHint() {}, renderActivityPresetState() {}, renderPromptEditor() {}, syncProtocolFields() {},
+    renderAutomationAccountState() {}, renderRoutineState() {}, renderRegistrySaveState() {}, renderRegistryLists() {},
+    renderRegistryEditor() {}, renderRegistryContexts() {}, renderApiAccountModels() {}, renderAutomationTargetPicker() {},
+    renderOverview() {}, renderLogs() {}, renderProtocolControls() {}, renderAll() {},
+    refreshRoutines: async () => {}, refreshAgentFeatures: async () => {}, fmtTime: () => "offline", fmtAgo: () => "offline",
+    beforeRead: null,
+    fetch: async (url, options = {}) => {
+      const method = options.method || "GET";
+      let body;
+      if (url === "/api/config" && method === "PATCH") {
+        return new Promise((resolve) => pending.push({ body: JSON.parse(options.body), resolve }));
+      }
+      assert.equal(method, "GET", `unexpected offline mutation ${method} ${url}`);
+      reads.push({ url, revision: state.cfg.revision });
+      if (state.beforeRead) await state.beforeRead(url);
+      if (url.startsWith("/api/config?")) body = structuredClone(state.server);
+      else if (url.startsWith("/api/accounts?")) body = { ok: true, revision: state.server.revision, items: structuredClone(state.server.accounts.items) };
+      else {
+        assert.match(url, /^\/api\/(?:status|memory|archive\/(?:status|conversations))\?/);
+        body = {};
+      }
+      return response(body);
+    }
+  };
+  const response = (body, status = 200) => ({ ok: status < 400, status, text: async () => JSON.stringify(body) });
+  const context = vm.createContext(state);
+  const constants = ["scopeNames", "saveScopeByButton"].map((name) => {
+    const source = businessScript.match(new RegExp(`    const ${name} = \\{[\\s\\S]*?\\n    \\};`))?.[0];
+    assert.ok(source, `missing admin constant ${name}`);
+    return source.replace(`const ${name}`, `globalThis.${name}`);
+  });
+  new vm.Script([...constants, ...["api", "currentScope", "scopeForElement", "setVal", "getVal", "renderSaveState", "markDirty",
+    "learningModePatch", "collectScopedPatch", "fillConfig", "refreshAll", "refreshAccountRegistry", "saveConfig"].map(adminFunction)].join("\n"))
+    .runInContext(context, { timeout: 1000 });
+  state.fillConfig();
+  const edit = (id, value, { mark = true } = {}) => {
+    const field = state.$(id);
+    if (field.type === "checkbox") field.checked = value;
+    else field.value = String(value);
+    if (mark) state.markDirty({ target: field });
+  };
+  const merge = (target, patch) => {
+    for (const [key, value] of Object.entries(patch)) {
+      if (key === "expectedRevision") continue;
+      if (value && typeof value === "object" && !Array.isArray(value)) merge(target[key] ||= {}, value);
+      else target[key] = structuredClone(value);
+    }
+  };
+  const commit = (index, revision, normalize = () => {}) => {
+    assert.equal(pending[index].body.expectedRevision, state.server.revision);
+    merge(state.server, pending[index].body); state.server.revision = revision; normalize(state.server);
+    return { config: structuredClone(state.server), restartRequired: false };
+  };
+  return { state, nodes, pending, reads, feedback, edit, commit,
+    reply: (index, body, status) => pending[index].resolve(response(body, status)) };
+}
+
+await group("global-save-inflight-same-and-cross-scope", async () => {
+  const t = configUiRuntime(), s = t.state;
+  t.edit("taskMode.maxTurns", 12);
+  const saving = s.saveConfig();
+  t.edit("taskMode.maxTurns", 13);
+  t.edit("chatArchive.baseDir", "unsaved/cross-scope");
+  s.promptDrafts.set("a", "unsaved account prompt"); s.markDirty("qa:persona");
+  s.apiCenterDirty = true; s.markDirty("api-center");
+  await s.refreshAll({ silent: true });
+  check("automatic refresh while PATCH is pending preserves same- and cross-scope drafts", () => {
+    assert.equal(s.getVal("taskMode.maxTurns"), 13);
+    assert.equal(s.getVal("chatArchive.baseDir"), "unsaved/cross-scope");
+    assert(s.savingConfigScopes.has("tasks")); assert(s.dirtyScopes.has("tasks"));
+    assert.equal(s.$("saveBtn").disabled, true);
+  });
+  t.reply(0, t.commit(0, "r2")); await saving;
+  check("successful global save acknowledges only the submitted snapshot", () => {
+    assert.equal(s.cfg.taskMode.maxTurns, 12); assert.equal(s.getVal("taskMode.maxTurns"), 13);
+    assert(s.dirtyScopes.has("tasks")); assert(s.dirtyScopes.has("archive")); assert(s.dirtyScopes.has("qa:persona"));
+    assert.equal(s.promptDrafts.get("a"), "unsaved account prompt");
+    assert(s.apiCenterDirty); assert(s.dirtyScopes.has("api-center"));
+    assert.match(s.scopeFeedback.get("tasks"), /后续修改仍未保存/);
+    assert.equal(s.savingConfigScopes.size, 0); assert.equal(s.$("saveBtn").disabled, false);
+    assert.deepEqual(Object.keys(t.pending[0].body), ["taskMode", "expectedRevision"]);
+  });
+  await s.refreshAll({ silent: true });
+  check("later automatic refresh also retains newly edited fields", () => assert.equal(s.getVal("taskMode.maxTurns"), 13));
+  const retry = s.saveConfig(); t.reply(1, t.commit(1, "r3")); await retry;
+  check("saving the later draft cleans only that scope", () => {
+    assert.equal(s.cfg.taskMode.maxTurns, 13); assert(!s.dirtyScopes.has("tasks"));
+    assert(s.dirtyScopes.has("archive")); assert(s.dirtyScopes.has("qa:persona")); assert(s.dirtyScopes.has("api-center"));
+  });
+});
+
+await group("global-save-clean-normalization-and-refresh-window", async () => {
+  const t = configUiRuntime(), s = t.state;
+  t.edit("taskMode.maxTurns", 15, { mark: false });
+  const saving = s.saveConfig();
+  t.edit("chatArchive.baseDir", "new other-region draft");
+  await s.refreshAll({ silent: true });
+  check("a clean-form save also protects its submission during refresh", () => {
+    assert.equal(s.getVal("taskMode.maxTurns"), 15); assert(s.dirtyScopes.has("tasks"));
+  });
+  t.reply(0, t.commit(0, "r2", (server) => { server.taskMode.maxTurns = 16; })); await saving;
+  check("unchanged submission becomes clean and accepts normalized server values", () => {
+    assert(!s.dirtyScopes.has("tasks")); assert.equal(s.getVal("taskMode.maxTurns"), 16);
+    assert.equal(s.getVal("chatArchive.baseDir"), "new other-region draft"); assert(s.dirtyScopes.has("archive"));
+  });
+  t.edit("taskMode.maxTurns", 17);
+  let release, reached;
+  const refreshing = new Promise(resolve => { reached = resolve; });
+  s.beforeRead = async (url) => { if (url.startsWith("/api/status?")) { reached(); await new Promise(resolve => { release = resolve; }); } };
+  const next = s.saveConfig(); t.reply(1, t.commit(1, "r3")); await refreshing;
+  // Also catch programmatic edits that do not dispatch a dirty event.
+  t.edit("taskMode.maxTurns", 18, { mark: false });
+  release(); await next;
+  check("edits during post-save refresh stay dirty even without a new input event", () => {
+    assert.equal(s.cfg.taskMode.maxTurns, 17); assert.equal(s.getVal("taskMode.maxTurns"), 18);
+    assert(s.dirtyScopes.has("tasks")); assert.equal(s.savingConfigScopes.size, 0);
+  });
+});
+
+await group("global-save-concurrent-scopes-and-stale-responses", async () => {
+  const t = configUiRuntime(), s = t.state;
+  t.edit("taskMode.maxTurns", 20);
+  const first = s.saveConfig();
+  await s.saveConfig();
+  check("duplicate saves of the same scope are not replayed", () => assert.equal(t.pending.length, 1));
+  const oldResponse = t.commit(0, "r2");
+  // The server committed A, but its response is delayed. An automatic refresh
+  // observes r2 and permits a legitimate second scope write using that revision.
+  await s.refreshAll({ silent: true });
+  s.activePage = "archive"; t.edit("chatArchive.baseDir", "saved concurrently");
+  const second = s.saveConfig(); t.reply(1, t.commit(1, "r3")); await second;
+  t.edit("chatArchive.baseDir", "edited after second save");
+  const readStart = t.reads.length;
+  t.reply(0, oldResponse); await first;
+  check("delayed whole-config response cannot roll back a newer scope's acknowledgement", () => {
+    assert.equal(t.reads[readStart].revision, "r3"); assert.equal(s.cfg.revision, "r3");
+    assert.equal(s.cfg.taskMode.maxTurns, 20); assert.equal(s.cfg.chatArchive.baseDir, "saved concurrently");
+    assert.equal(s.getVal("chatArchive.baseDir"), "edited after second save");
+    assert(s.dirtyScopes.has("archive")); assert(!s.dirtyScopes.has("tasks"));
+  });
+  const conflict = configUiRuntime(), c = conflict.state;
+  conflict.edit("taskMode.maxTurns", 21); const taskSave = c.saveConfig();
+  c.activePage = "archive"; conflict.edit("chatArchive.baseDir", "conflicting draft");
+  const archiveSave = c.saveConfig();
+  const rejected = assert.rejects(archiveSave, (error) => error.status === 409);
+  conflict.reply(0, conflict.commit(0, "r2")); await taskSave;
+  conflict.reply(1, { error: "stale revision" }, 409); await rejected;
+  check("concurrent optimistic-revision failure preserves the losing scope without a retry", () => {
+    assert.equal(conflict.pending.length, 2); assert(!c.dirtyScopes.has("tasks"));
+    assert(c.dirtyScopes.has("archive")); assert(c.conflictedScopes.has("archive"));
+    assert.equal(c.getVal("chatArchive.baseDir"), "conflicting draft"); assert.equal(c.savingConfigScopes.size, 0);
+  });
+});
+
+await group("global-save-failure-and-behavior-account-isolation", async () => {
+  for (const status of [500, 409]) {
+    const t = configUiRuntime(), s = t.state;
+    t.edit("taskMode.maxTurns", 22); const saving = s.saveConfig();
+    const rejected = assert.rejects(saving, (error) => error.status === status);
+    t.edit("taskMode.maxTurns", 23); t.edit("chatArchive.baseDir", "unrelated failure draft");
+    t.reply(0, { error: "offline save error" }, status); await rejected;
+    await s.refreshAll({ silent: true });
+    check(`HTTP ${status} retains submitted, later and unrelated drafts through refresh`, () => {
+      assert.equal(s.getVal("taskMode.maxTurns"), 23); assert.equal(s.getVal("chatArchive.baseDir"), "unrelated failure draft");
+      assert(s.dirtyScopes.has("tasks")); assert(s.dirtyScopes.has("archive"));
+      assert.equal(s.conflictedScopes.has("tasks"), status === 409); assert.equal(t.pending.length, 1);
+      assert.equal(s.savingConfigScopes.size, 0);
+    });
+  }
+  const t = configUiRuntime(), s = t.state;
+  s.activePage = "qa";
+  t.edit("behaviorModes.default", "restrained");
+  t.edit("accounts.standbys.0.behaviorMode", "normal", { mark: false });
+  const accounts = structuredClone(s.server.accounts);
+  const saving = s.saveConfig();
+  check("Q&A behavior PATCH never submits an account or standby array", () => {
+    assert(!("accounts" in t.pending[0].body));
+    assert.equal(t.pending[0].body.behaviorModes.default, "restrained");
+  });
+  t.reply(0, t.commit(0, "r2")); await saving;
+  check("global behavior save preserves independent account modes and registry entry", () => {
+    assert.deepEqual(s.server.accounts, accounts); assert(!s.dirtyScopes.has("qa:behavior"));
+    assert.match(html, /各账号（包括账号 2）的独立发言档位请到「账号功能 → 基本」设置/);
+    assert.match(adminFunction("registryTabKeys"), /"identity"\s*\?\s*\["displayName", "selfName", "qq", "behaviorMode"\]/);
+    assert.match(adminFunction("mountAccountRegistry"), /\["standbyBehaviorCard", "legacyNapcatTools"/);
+  });
+  t.edit("behaviorModes.default", "lively");
+  const next = s.saveConfig();
+  t.edit("learningMode.maxQuestionsPerDay", 0, { mark: false });
+  t.reply(1, t.commit(1, "r3")); await next;
+  check("newly invalid behavior drafts are retained, not treated as a failed successful write", () => {
+    assert.equal(s.cfg.learningMode.maxQuestionsPerDay, 3); assert.equal(s.getVal("learningMode.maxQuestionsPerDay"), 0);
+    assert(s.dirtyScopes.has("qa:behavior")); assert.match(s.scopeFeedback.get("qa:behavior"), /后续修改仍未保存/);
+  });
+});
+
+await group("global-save-post-write-sync-failure", async () => {
+  const t = configUiRuntime(), s = t.state;
+  t.edit("taskMode.maxTurns", 24); const saving = s.saveConfig();
+  const rejected = assert.rejects(saving, /offline refresh failure/);
+  s.beforeRead = async () => { throw new Error("offline refresh failure"); };
+  t.reply(0, t.commit(0, "r2")); await rejected;
+  check("a failed follow-up read preserves the draft and distinguishes an already committed write", () => {
+    assert.equal(s.cfg.taskMode.maxTurns, 24); assert.equal(s.getVal("taskMode.maxTurns"), 24);
+    assert(s.dirtyScopes.has("tasks")); assert.match(s.scopeFeedback.get("tasks"), /已提交，但刷新失败/);
+    assert.equal(t.pending.length, 1); assert.equal(s.savingConfigScopes.size, 0);
+  });
+  const stale = configUiRuntime(), c = stale.state;
+  stale.edit("taskMode.maxTurns", 25); const delayed = c.saveConfig();
+  const delayedRejected = assert.rejects(delayed, /最新配置未能同步/);
+  const newerResponse = stale.commit(0, "r3");
+  // A different pane has read a revision between this write's expected and
+  // returned revisions. Do not accept its old read as the save acknowledgement.
+  c.cfg.revision = "r2";
+  c.beforeRead = async (url) => { if (url.startsWith("/api/accounts?")) throw new Error("offline registry failure"); };
+  stale.reply(0, newerResponse); await delayedRejected;
+  check("failed registry reconciliation cannot clean a scope using a mismatched snapshot", () => {
+    assert.equal(c.cfg.revision, "r2"); assert.equal(c.getVal("taskMode.maxTurns"), 25);
+    assert(c.dirtyScopes.has("tasks")); assert.match(c.scopeFeedback.get("tasks"), /已提交，但刷新失败/);
+    assert.equal(stale.pending.length, 1);
+  });
+});
+
 const sampleCenter = () => ({
   connections: [
     { id: "c1", name: "Connection", provider: "custom", baseUrl: "", apiKeyEnv: "TEST_KEY" },

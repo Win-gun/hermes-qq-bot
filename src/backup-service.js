@@ -9,6 +9,7 @@ import * as defaultVoiceSecretStore from "./voice-secret-store.js";
 import * as defaultApiSecretStore from "./api-secret-store.js";
 import { isValidApiSecretRef } from "./api-secret-store.js";
 import { accountItems, registryConfig } from "./account-registry.js";
+import { readMemorySnapshot } from "./memory-repository.js";
 
 export const BACKUP_MAGIC = Buffer.from("HERMESQQBACKUP1\n", "utf8");
 export const BACKUP_FORMAT_VERSION = 1;
@@ -551,7 +552,26 @@ async function copyBackupPayload({ stateRoot, hermesHome, logRoot, includeLogs, 
     }
   }
   const dataTarget = path.join(payloadDir, "state", "data");
-  for (const name of DATA_COMPONENTS) await copyPathForBackup(path.join(stateRoot, "data", name), path.join(dataTarget, name), { signal });
+  for (const name of DATA_COMPONENTS) {
+    if (name === "memory.json") {
+      const source = path.join(stateRoot, "data", name);
+      if (fs.existsSync(source) || fs.existsSync(`${source}.journal.jsonl`)
+        || fs.existsSync(path.join(`${source}.writer`, "initialized"))) {
+        checkCancelled(signal);
+        ensureDir(dataTarget);
+        // Materialize a coherent recovered snapshot, never a lock or an
+        // incomplete journal. Old backup formats still contain memory.json.
+        writeJson(path.join(dataTarget, name), readMemorySnapshot(source));
+      }
+      continue;
+    }
+    await copyPathForBackup(path.join(stateRoot, "data", name), path.join(dataTarget, name), {
+    signal,
+    // Full-history search postings are regenerable caches, not user evidence.
+    // Keep raw JSONL, summaries and the existing lightweight archive metadata.
+    ...(name === "chat-archive" ? { filter: (source) => !/^search-index\.json(?:\.[a-f0-9-]+\.tmp)?$/i.test(path.basename(source)) } : {})
+    });
+  }
   if (sensitive) {
     for (const name of fs.existsSync(stateRoot) ? fs.readdirSync(stateRoot) : []) {
       if (!shouldCopyProtocolHost(name)) continue;

@@ -47,11 +47,12 @@ export function routeBotCommand(text, bots) {
   const reporter = bots.find((bot) => bot.available);
   const list = bots.map((bot) => `/bot ${bot.alias} → ${bot.name}${bot.qq ? `（QQ ${bot.qq}）` : ""}${bot.available ? "" : "（暂不可用）"}`).join("\n");
   const help = `本群有 ${bots.length} 个机器人，请指定要控制的机器人：\n${list}\n例如：/bot a status、/bot b voice mixed。`;
-  if (selector && !target) return { accountId: reporter?.id, notice: `未找到机器人「${token}」。\n${help}` };
-  if (target && !target.available) return { accountId: reporter?.id, notice: `机器人 ${target.alias}「${target.name}」暂不可用，未执行指令。\n${list}` };
-  if (!target && bots.length > 1) return { accountId: reporter?.id, notice: help };
+  if (selector && !target) return { accountId: reporter?.id, logicalBotId: reporter?.key, notice: `未找到机器人「${token}」。\n${help}` };
+  if (target && !target.available) return { accountId: reporter?.id, logicalBotId: reporter?.key, notice: `机器人 ${target.alias}「${target.name}」暂不可用，未执行指令。\n${list}` };
+  if (!target && bots.length > 1) return { accountId: reporter?.id, logicalBotId: reporter?.key, notice: help };
   const selected = target || bots[0];
-  return { accountId: selected?.id, text: `/bot ${target ? args.slice(1).join(" ") || "help" : args.join(" ") || "help"}`, targeted: Boolean(target), alias: target?.alias || "" };
+  return { accountId: selected?.id, logicalBotId: selected?.key,
+    text: `/bot ${target ? args.slice(1).join(" ") || "help" : args.join(" ") || "help"}`, targeted: Boolean(target), alias: target?.alias || "" };
 }
 
 export function botCommandFeedback(text, event) {

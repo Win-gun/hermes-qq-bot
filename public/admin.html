@@ -606,7 +606,7 @@
               <button id="presetLively" class="secondary">活跃版</button>
             </div>
             <p id="activityPresetState" class="hint mt-12" role="status" aria-live="polite">正在加载活跃度设置…</p>
-            <div class="hint mt-12">按钮和默认模式下拉框都会填入对应预设，点击本页保存按钮后才生效。这里修改全局默认，单独指定档位的账号或群仍使用自己的设置。</div>
+            <div class="hint mt-12">按钮和默认模式下拉框都会填入对应预设，点击本页保存按钮后才生效。这里仅修改公共问答行为；各账号（包括账号 2）的独立发言档位请到「账号功能 → 基本」设置，群档位仍使用自己的设置。</div>
             <div class="form-grid mt-16">
               <div class="field">
                 <label for="behaviorModes.default">默认模式</label>
@@ -1215,6 +1215,8 @@
     let refreshTimer = null;
     let dirty = false;
     const dirtyScopes = new Set();
+    const scopeEditVersions = new Map();
+    const savingConfigScopes = new Set();
     const conflictedScopes = new Set();
     const scopeFeedback = new Map();
     let activePage = "overview";
@@ -1396,7 +1398,7 @@
       const scope = currentScope();
       const editable = Boolean(scopeNames[scope]) && scope !== "api-center";
       $("saveBtn").classList.toggle("hidden", !editable || (scope === "account-status" && !dirtyScopes.has(scope) && !$("accountConnectionDetails")?.open));
-      $("saveBtn").disabled = !editable || !cfg;
+      $("saveBtn").disabled = !editable || !cfg || savingConfigScopes.has(scope);
       if (scope === "automation") {
         const draft = automationAccounts.drafts.get(automationAccounts.selected);
         $("saveBtn").disabled = !draft?.loaded || draft.busy || draft.routine.busy;
@@ -1416,6 +1418,7 @@
       const scope = typeof eventOrScope === "string" ? eventOrScope : eventOrScope?.target ? scopeForElement(eventOrScope.target) : currentScope();
       if (!scopeNames[scope]) return;
       dirtyScopes.add(scope);
+      scopeEditVersions.set(scope, (scopeEditVersions.get(scope) || 0) + 1);
       if (scope === "automation" && eventOrScope?.target?.id !== "automationAccountSelect") {
         const draft = automationAccounts.drafts.get(automationAccounts.selected);
         if (draft) { draft.dirty = true; draft.enabled = getVal("automation.enabled"); draft.editVersion++; }
@@ -2086,7 +2089,8 @@
       if (scope === "qa:model") return aiProfilesPatch();
       if (scope === "qa:persona") return promptEditorPatch();
       if (scope === "qa:behavior") return {
-        ...(standby.length ? { accounts: { standbys: standby.map((account, index) => index === 0 ? { id: account.id, behaviorMode: getVal("accounts.standbys.0.behaviorMode") } : { id: account.id }) } } : {}),
+        // Per-account modes belong to the registry's basic editor, never the
+        // hidden legacy account-2 control or a whole standby-array write.
         learningMode: learningModePatch(),
         webSearch: { enabled: getVal("webSearch.enabled") },
         behaviorModes: { default: getVal("behaviorModes.default") },
@@ -2543,7 +2547,7 @@
     }
 
     async function rebuildMemoryIntegrity(apply = false) {
-      if (apply && !confirm("将先备份 memory.json，再运行 AI 记忆重整。过程可能持续较久，确认继续？")) return;
+      if (apply && !confirm("将生成重整候选，校验通过后备份并提交。期间目标记忆若有更新，会保留候选并提示冲突，不覆盖新消息。过程可能较久，确认继续？")) return;
       const buttonId = apply ? "memoryApplyBtn" : "memoryDryRunBtn";
       setBusy(buttonId, true, apply ? "重整中..." : "检查中...");
       try {
@@ -3155,44 +3159,66 @@
       const scope = saveScopeByButton[buttonId] || currentScope();
       if (scope === "automation") return saveAccountAutomation(buttonId);
       if (!cfg) { toast("配置尚未加载，暂不能保存", "bad"); return; }
+      if (savingConfigScopes.has(scope)) return;
       if (conflictedScopes.has(scope) && !confirm("配置曾在其他窗口更新。已保留你的草稿；确认在最新配置基础上保存此区域的修改？")) return;
+      savingConfigScopes.add(scope);
+      // Even a save without a preceding input event must protect the form from
+      // automatic refresh until both the write and its follow-up read finish.
+      dirtyScopes.add(scope);
       setBusy(buttonId, true, "保存中...");
       scopeFeedback.set(scope, "正在保存此区域…"); renderSaveState();
+      let submitted = false;
       try {
-        const patch = collectScopedPatch(scope);
+        const snapshot = JSON.stringify(collectScopedPatch(scope));
+        const editVersion = scopeEditVersions.get(scope) || 0;
+        const expectedRevision = cfg.revision;
         const res = await api("/api/config", {
           method: "PATCH",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ ...patch, expectedRevision: cfg.revision })
+          body: JSON.stringify({ ...JSON.parse(snapshot), expectedRevision })
         });
-        cfg = res.config || cfg;
-        dirtyScopes.delete(scope);
+        submitted = true;
+        // Another pane may already have acknowledged/read a newer revision.
+        // Never replace that snapshot with this delayed whole-config response.
+        if (res.config && (cfg.revision === expectedRevision || cfg.revision === res.config.revision)) cfg = res.config;
+        await refreshAll({ silent: true, selfSavedScope: scope });
+        if (registryState.error && cfg.revision !== res.config?.revision) throw new Error("最新配置未能同步，请保留草稿后刷新");
+        let unchanged = (scopeEditVersions.get(scope) || 0) === editVersion;
+        if (unchanged) {
+          try { unchanged = JSON.stringify(collectScopedPatch(scope)) === snapshot; }
+          catch { unchanged = false; } // A newly invalid draft is still a draft.
+        }
+        if (unchanged) dirtyScopes.delete(scope);
         conflictedScopes.delete(scope);
+        // Only the submitted, unchanged scope becomes clean. fillConfig keeps
+        // every other dirty scope (and any edits made in flight) untouched.
+        fillConfig({ preserveDirty: true });
         if (scope === "qa:behavior") renderActivityPresetState();
-        if (scope === "qa:persona") { promptDrafts.clear(); renderPromptEditor(); }
         renderSaveState();
-        const message = `${scopeNames[scope] || "配置"}已保存${res.restartRequired ? "；部分项需重启" : "并热生效"}`;
+        const message = `${scopeNames[scope] || "配置"}已保存${res.restartRequired ? "；部分项需重启" : "并热生效"}${unchanged ? "" : "；后续修改仍未保存"}`;
         scopeFeedback.set(scope, message);
         if (scope === "account-functions") $("accountFunctionsFeedback").textContent = message;
         if (!dirty) $("saveState").textContent = message;
         toast(message);
-        await refreshAll({ silent: true });
         if (focusAccounts) {
           $("opsResult").textContent = accountConfigEffectText(cfg, statusData?.health || {});
           renderAccounts();
           renderOverview();
         }
       } catch (err) {
-        if (/配置.*(更新|变化)|409/.test(err.message)) conflictedScopes.add(scope);
-        scopeFeedback.set(scope, `保存失败：${err.message}；草稿未丢失。`);
+        if (err.status === 409 || /配置.*(更新|变化)|409/.test(err.message)) conflictedScopes.add(scope);
+        const failure = submitted ? "已提交，但刷新失败" : "保存失败";
+        scopeFeedback.set(scope, `${failure}：${err.message}；草稿未丢失。`);
         if (scope === "account-functions") $("accountFunctionsFeedback").textContent = `未保存：${err.message}`;
-        toast(`保存失败：${err.message}`, "bad");
-        $("saveState").textContent = `${scopeNames[scope] || "当前页面"}保存失败：${err.message}`;
-        $("opsResult").textContent = `保存失败：${err.message}`;
+        toast(`${failure}：${err.message}`, "bad");
+        $("saveState").textContent = `${scopeNames[scope] || "当前页面"}${failure}：${err.message}`;
+        $("opsResult").textContent = `${failure}：${err.message}`;
         renderSaveState();
         throw err;
       } finally {
+        savingConfigScopes.delete(scope);
         setBusy(buttonId, false);
+        renderSaveState();
       }
     }
 

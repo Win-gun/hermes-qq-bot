@@ -14,3 +14,19 @@ condition = "AND"
 regexTarget = "secret"
 paths = ['''(^|/)scripts/backup-service-self-test\.js$''']
 regexes = ['''^(ec021717-671a-4c86-9ca0-c44265deee81|91b65f87-976e-4e74-9d8b-8fae04fe992c)$''']
+
+# Fixed, non-credential cache-policy labels and redaction sentinels. Scope both
+# file AND exact value; never exclude test directories or genuine credentials.
+[[rules.allowlists]]
+description = "Archive test cache identity and deliberately synthetic redaction keys"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''(^|/)scripts/(archive-context-self-test|archive-search-service-self-test)\.js$''']
+regexes = ['''^(bounded-reject-v1|safe-policy-v1|SyntheticKey765)$''']
+
+[[rules.allowlists]]
+description = "Fixed archive privacy sentinel, not an authentication credential"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''(^|/)scripts/core-audit-regression-self-test\.js$''']
+regexes = ['''^fixture-secret-1234$''']

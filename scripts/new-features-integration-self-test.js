@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import net from "node:net";
 import vm from "node:vm";
 import WebSocket from "ws";
 import { accountGroup, effectiveAccount, registryConfig } from "../src/account-registry.js";
+import { logicalBotId } from "../src/account-runtime.js";
 
 // Read-only, in-memory check of the task transport selector. A paused creation
 // account must not suppress its logical group's healthy replacement, but a
@@ -20,7 +21,7 @@ const deliveryConfig = registryConfig({ accounts: { version: 2,
   failoverGroups: [{ id: "delivery-group", memberIds: ["creator", "replacement"], policyAccountId: "creator", policy: {} }] } });
 const replacementSocket = { readyState: 1 };
 const taskDelivery = vm.runInNewContext(`${bridgeSource.slice(deliveryStart, deliveryEnd)}\ntaskDeliveryAccount;`, {
-  config: deliveryConfig, accountById: effectiveAccount, accountGroup,
+  config: deliveryConfig, accountById: effectiveAccount, accountGroup, logicalBotId,
   accountTopology: () => deliveryConfig.accounts.topology, activeAccountId: "creator",
   selectedGroupAccount: () => "replacement", accountConnected: (id) => id === "replacement",
   oneBotAccounts: new Map([["replacement", { ws: replacementSocket }]])
@@ -43,6 +44,9 @@ async function unusedPort() {
 
 let child;
 try {
+  mkdirSync(join(home, "bin"), { recursive: true });
+  mkdirSync(join(home, "tmp"), { recursive: true });
+  writeFileSync(join(home, "bin", "docker"), `#!${process.execPath}\nprocess.exit(1);\n`, { mode: 0o700 });
   const config = JSON.parse(readFileSync(join(root, "config.example.json"), "utf8"));
   const fakeHermes = join(home, "fake-hermes.sh");
   const promptCapture = join(home, "captured-prompts.txt");
@@ -92,7 +96,9 @@ printf '隔离测试回复\\n'
   let output = "";
   child = spawn(process.execPath, [join(root, "src/bridge.js")], {
     cwd: root,
-    env: { ...process.env, HERMES_QQ_HOME: home, HERMES_QQ_RESOURCE_ROOT: root,
+    env: { HOME: home, TMPDIR: join(home, "tmp"), LANG: "en_US.UTF-8", HERMES_HOME: join(home, "hermes"),
+      PATH: `${join(home, "bin")}:${dirname(process.execPath)}:/usr/bin:/bin`,
+      HERMES_QQ_HOME: home, HERMES_QQ_RESOURCE_ROOT: root, HERMES_QQ_LOG_DIR: join(home, "logs"),
       HERMES_QQ_TEST_PROMPT_CAPTURE: promptCapture, HERMES_QQ_TEST_SLOW_ONCE: slowOnce,
       HERMES_QQ_TEST_SLOW_ENTERED: slowEntered },
     stdio: ["ignore", "pipe", "pipe"]
@@ -303,6 +309,11 @@ printf '隔离测试回复\\n'
   assert.equal(captured.length, 2, "mode switch must discard the old draft and regenerate once");
   assert.match(captured[0], /账号平级，不存在主备接管/);
   assert.match(captured[1], /当前运行方式：主备接管/);
+  assert.ok(!captured[1].includes("只发给甲的私聊") && !captured[1].includes("只发给乙的私聊"),
+    "the fresh identity must not inherit either old independent private history");
+  const newPrivateArchive = join(home, "data", "chat-archive", "private", "10001", "messages.jsonl");
+  for (let attempt = 0; attempt < 100 && !existsSync(newPrivateArchive); attempt++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.ok(existsSync(newPrivateArchive), "the rebased answer must archive in its new private namespace");
 
   // P1 regression: automation rules use public conversation IDs, while private
   // history uses account/group-scoped IDs. Even rules=[] previously threw in

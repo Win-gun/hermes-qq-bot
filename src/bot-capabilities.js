@@ -1,6 +1,7 @@
 import { accountGroup, accountItems, effectiveAccount, registryConfig } from "./account-registry.js";
 import { applyApiCenterBindings, normalizeApiCenter } from "./api-center.js";
 import { automationForAccount } from "./account-automation.js";
+import { projectBehaviorSettings } from "./behavior-settings.js";
 
 const BOT_MODES = new Set(["chat", "task", "all"]);
 const TOPOLOGIES = new Set(["failover", "collaboration", "function_split"]);
@@ -21,6 +22,52 @@ export function accountTopology(config = {}) {
 const defaultAccountId = (config) => config.__activeAccountId || accountItems(config)[0]?.id || "primary";
 const participates = (account) => Boolean(account && account.enabled !== false && account.protocolEnabled !== false && !account.archived);
 
+function selfMemoryMap(gm, key) {
+  if (!Object.hasOwn(gm, key) || !gm[key] || typeof gm[key] !== "object" || Array.isArray(gm[key])) gm[key] = Object.create(null);
+  return gm[key];
+}
+
+function ownSelfSlot(map, id) {
+  if (!Object.hasOwn(map, id) || !map[id] || typeof map[id] !== "object" || Array.isArray(map[id])) {
+    Object.defineProperty(map, id, { value: {}, writable: true, enumerable: true, configurable: true });
+  }
+  return map[id];
+}
+
+const legacyPrimaryId = (config) => config.accounts?.legacyPrimaryId
+  || (config.accounts?.version === 2 ? "primary" : (config.accounts?.primary?.id || "primary"));
+
+function accountBotNames(config, account, legacyNames) {
+  const group = accountGroup(config, account.id);
+  const members = group ? accountItems(config).filter((item) => group.memberIds.includes(item.id)) : [];
+  const inheritsLegacy = account.id === legacyPrimaryId(config)
+    || group?.legacySelfMemory || group?.memberIds.includes(legacyPrimaryId(config));
+  return [...new Set([account.displayName, ...members.map((item) => item.displayName), ...(inheritsLegacy ? legacyNames : [])]
+    .filter((name) => typeof name === "string" && name.trim()).map((name) => name.trim()))];
+}
+
+// Only a longer peer name covering this particular occurrence disambiguates
+// it. Separate mentions still match both bots; equal names intentionally match
+// both because plain text cannot distinguish them (use a QQ @ mention).
+export function accountKeywordMatches(text, config = {}) {
+  const lower = String(text || "").toLowerCase();
+  const names = (Array.isArray(config.botNames) ? config.botNames : [])
+    .filter((name) => typeof name === "string" && name.trim()).map((name) => name.trim().toLowerCase());
+  const peers = (Array.isArray(config.__peerBotNames) ? config.__peerBotNames : [])
+    .filter((name) => typeof name === "string" && name.trim()).map((name) => name.trim().toLowerCase());
+  return names.some((name) => {
+    for (let offset = lower.indexOf(name); offset >= 0; offset = lower.indexOf(name, offset + 1)) {
+      const covered = peers.some((peer) => {
+        if (peer.length <= name.length) return false;
+        const start = lower.lastIndexOf(peer, offset);
+        return start >= 0 && offset + name.length <= start + peer.length;
+      });
+      if (!covered) return true;
+    }
+    return false;
+  });
+}
+
 // Group facts/member profiles remain shared. Identity is shared only inside an
 // explicit failover group (including one derived from legacy config).
 export function botSelfSlot(gm, config = {}) {
@@ -28,17 +75,14 @@ export function botSelfSlot(gm, config = {}) {
   const group = accountGroup(config, accountId);
   if (group?.legacySelfMemory) return (gm.botSelf ||= {});
   if (group) {
-    gm.botSelfByGroup ||= {};
-    return (gm.botSelfByGroup[group.id] ||= {});
+    return ownSelfSlot(selfMemoryMap(gm, "botSelfByGroup"), group.id);
   }
-  gm.botSelfByAccount ||= {};
-  if (gm.botSelfByAccount[accountId]) return gm.botSelfByAccount[accountId];
+  const map = selfMemoryMap(gm, "botSelfByAccount");
+  if (Object.hasOwn(map, accountId)) return ownSelfSlot(map, accountId);
   // Preserve the original independent primary's slot; arbitrary new stable IDs
   // must not claim old self memory merely because they moved to index zero.
-  const legacyPrimaryId = config.accounts?.legacyPrimaryId
-    || (config.accounts?.version === 2 ? "primary" : (config.accounts?.primary?.id || "primary"));
-  if (accountId === legacyPrimaryId) return (gm.botSelf ||= {});
-  return (gm.botSelfByAccount[accountId] ||= {});
+  if (accountId === legacyPrimaryId(config)) return (gm.botSelf ||= {});
+  return ownSelfSlot(map, accountId);
 }
 
 export function botModeForAccount(config = {}, accountId = defaultAccountId(config)) {
@@ -143,18 +187,16 @@ export function configForAccountCapabilities(config = {}, accountId = defaultAcc
   const center = normalizeApiCenter(config);
   // Materialize all legacy styles before projecting this account's prompt;
   // otherwise a later projection could inherit the previous bot's text.
-  const next = registryConfig(config);
+  let next = registryConfig(config);
   next.__activeAccountId = accountId;
   next.__activeAccountDisplayName = account.displayName;
   next.__activeAccountSelfName = account.selfName || account.displayName;
   applyApiCenterBindings(next, center, accountId);
   if (account.behaviorMode) {
+    // Project before changing the selected default: root values belong to the
+    // original saved mode, not this account's newly selected mode.
+    next = projectBehaviorSettings(next, account.behaviorMode);
     next.behaviorModes = { ...(next.behaviorModes || {}), default: account.behaviorMode };
-    next.__behaviorMode = account.behaviorMode;
-    const preset = next.behaviorModes.presets?.[account.behaviorMode] || {};
-    for (const key of ["trigger", "discussionParticipation", "proactive", "reply", "implicitReply", "socialPlanner"]) {
-      next[key] = { ...(next[key] || {}), ...(preset[key] || {}) };
-    }
   }
   const participating = participates(account);
   const feature = (key) => participating && account.features?.[key] === true;
@@ -172,6 +214,14 @@ export function configForAccountCapabilities(config = {}, accountId = defaultAcc
     asr: { ...(voice.asr || {}), enabled: enabled && feature("asr") },
     tts: { ...(voice.tts || {}), ...(account.voice?.preset ? { voice: account.voice.preset } : {}) } };
   next.persona = { ...(next.persona || {}), displayName: account.displayName, selfName: account.selfName || account.displayName };
+  // Keep the original alias source on detached projections so projecting a
+  // second account cannot inherit the previous account's wake words.
+  next.__legacyBotNames = [...(Array.isArray(config.__legacyBotNames) ? config.__legacyBotNames : Array.isArray(config.botNames) ? config.botNames : [])];
+  next.botNames = accountBotNames(config, account, next.__legacyBotNames);
+  const group = accountGroup(config, accountId);
+  next.__peerBotNames = [...new Set(accountItems(config)
+    .filter((item) => item.id !== accountId && !group?.memberIds.includes(item.id))
+    .flatMap((item) => accountBotNames(config, effectiveAccount(config, item.id), next.__legacyBotNames)))];
   if (account.styleProfileId) next.styleProfiles = { ...(next.styleProfiles || {}), activeId: account.styleProfileId };
   next.prompt = { ...(next.prompt || {}), system: systemPromptForAccount(config, accountId) };
   return next;

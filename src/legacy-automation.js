@@ -31,6 +31,27 @@ function pick(value, fields) {
 
 const text = (value, fallback = "") => typeof value === "string" && value ? value : fallback;
 
+const oldScheduleKey = (schedule) => String((own(schedule, "legacyLedgerKey") && schedule.legacyLedgerKey)
+  || schedule.name || schedule.mode || schedule.time || "daily");
+
+// Pass the complete schedule array from the same runtime projection. Retain
+// explicit frozen keys and unambiguous old keys for existing dailySent records;
+// duplicate names/modes need time plus occurrence, not the shared mode alone.
+export function dailyScheduleLedgerKey(schedule, schedules = [schedule]) {
+  if (own(schedule, "legacyLedgerKey") && schedule.legacyLedgerKey) return String(schedule.legacyLedgerKey);
+  const base = oldScheduleKey(schedule);
+  const siblings = schedules.filter((item) => oldScheduleKey(item) === base);
+  // Raw legacy entries may already have IDs, but the old executor ignored
+  // them. Prefer its unambiguous key even then, or an occupied day re-sends.
+  if (siblings.length < 2 && !own(Object.prototype, base) && base !== "prototype") return base;
+  if (own(schedule, "id") && typeof schedule.id === "string" && schedule.id) return `daily:id:${JSON.stringify(schedule.id)}`;
+  const index = schedules.indexOf(schedule);
+  if (index < 0) throw new TypeError("schedule must belong to its schedule array");
+  const time = String(schedule.time || "");
+  const occurrence = schedules.slice(0, index).filter((item) => oldScheduleKey(item) === base && String(item.time || "") === time).length;
+  return `daily:${JSON.stringify([base, time, occurrence])}`;
+}
+
 function syncProjection(config) {
   for (const [source, legacy] of [["daily", "dailyMessages"], ["hourly", "hourlyChat"]]) {
     if (own(config.automation.routines, source)) config[legacy] = clone(config.automation.routines[source]);
@@ -201,9 +222,10 @@ export function patchAutomationRoutines(current, input) {
           if (typeof edit.time !== "string" || !/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(edit.time)) {
             throw new TypeError("time must be HH:mm (00:00-23:59)");
           }
-          // Time-only legacy schedules use their original time as the dailySent
-          // key. Freeze it before editing so a new time cannot send twice today.
-          schedule.legacyLedgerKey ||= String(schedule.name || schedule.mode || schedule.time || "daily");
+          // Freeze every sibling before changing time: moving one duplicate
+          // must not renumber another duplicate into its already-claimed key.
+          const ledgerKeys = target.schedules.map((entry) => dailyScheduleLedgerKey(entry, target.schedules));
+          for (const [index, entry] of target.schedules.entries()) entry.legacyLedgerKey ||= ledgerKeys[index];
           schedule.time = edit.time;
         }
         if (own(edit, "prompt")) schedule.prompt = prompt(edit.prompt);
