@@ -114,6 +114,34 @@ try {
   check(deniedCenter.status === 403, "cross-origin API center update is blocked");
   const staleCenter = await request(port, "/api/api-center", "PATCH", { revision: "stale", center: center.data.center }, voiceHeaders);
   check(staleCenter.status === 409, "same-origin API center update reaches revision guard");
+  const verification = await request(port, "/api/memory/verification", "GET", undefined, voiceHeaders);
+  check(verification.status === 200 && verification.data.ok, "memory verification read is proxied with session");
+  check((await request(port, "/api/memory/verification")).status === 403, "memory verification read still requires session");
+  for (const route of ["/api/memory/verification/resolve", "/api/memory/verification/review"]) {
+    const body = { conversationId: "810101", caseId: "fixture-missing", expectedRevision: "fixture-stale", action: "update" };
+    check((await request(port, route, "POST", body, voiceHeaders)).status === 409,
+      `same-origin ${route} reaches case lookup, not an Origin rejection`);
+    check((await request(port, route, "POST", body, { ...voiceHeaders, Origin: "http://example.com" })).status === 403,
+      `cross-origin ${route} is blocked before forwarding`);
+    check((await request(port, route, "POST", body, { Origin: voiceHeaders.Origin })).status === 403,
+      `${route} still requires the independent bridge session`);
+  }
+  const protectedPatch = { memory: { verification: { enabled: true, shadowMode: true } } };
+  const originalConfigBytes = fs.readFileSync(path.join(state, "config.json"));
+  check((await request(port, "/api/config", "PATCH", protectedPatch, voiceHeaders)).status === 409,
+    "protected config without revision reaches CAS guard through public host");
+  check((await request(port, "/api/config", "PATCH", protectedPatch, { ...voiceHeaders, Origin: "http://example.com" })).status === 403,
+    "cross-origin protected config remains rejected");
+  check((await request(port, "/api/config", "PATCH", protectedPatch, { Origin: voiceHeaders.Origin })).status === 403,
+    "protected config still requires admin session");
+  check(fs.readFileSync(path.join(state, "config.json")).equals(originalConfigBytes),
+    "denied memory configuration requests leave exact fixture config bytes intact");
+  const configRevision = (await request(port, "/api/config")).data.revision;
+  const savedMemory = await request(port, "/api/config", "PATCH", { ...protectedPatch, expectedRevision: configRevision }, voiceHeaders);
+  check(savedMemory.status === 200 && savedMemory.data.ok, "authorized memory config save works through App/Web host proxy");
+  const savedVerification = await request(port, "/api/memory/verification", "GET", undefined, voiceHeaders);
+  check(savedVerification.data.settings.enabled === true && savedVerification.data.settings.shadowMode === true,
+    "protected memory config is effective without live notification sends");
   for (const route of ["/api/accounts/primary", "/api/account-groups/fixture-missing", "/api/automation/accounts/primary"]) {
     const body = { expectedRevision: "fixture-stale", patch: {}, group: {}, routines: {} };
     const allowed = await request(port, route, "PATCH", body, voiceHeaders);

@@ -240,7 +240,9 @@ export function createAsyncMemoryExtractionScheduler({
         };
         let size = 1; // pinned recovery/retry does not consult a new setting
         if (!before.batch) {
-          try { size = typeof batchSize === "function" ? synchronous(batchSize) : batchSize; }
+          // Optional arguments are the current, transaction-local admitted
+          // inputs. A contextual window must not size a claim from a stale root.
+          try { size = typeof batchSize === "function" ? synchronous(batchSize, id, before.messages.map(row => row.input)) : batchSize; }
           catch { throw error("MEMORY_JOB_BATCH_SIZE_INVALID"); }
           if (!positive(size)) throw error("MEMORY_JOB_BATCH_SIZE_INVALID");
         }

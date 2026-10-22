@@ -627,7 +627,15 @@ function configUiRuntime() {
     merge(state.server, pending[index].body); state.server.revision = revision; normalize(state.server);
     return { config: structuredClone(state.server), restartRequired: false };
   };
-  return { state, nodes, pending, reads, feedback, edit, commit,
+  const waitForPatch = async (index) => {
+    // Advance only the in-memory promise chain until the real fetch boundary.
+    // Authentication may add awaits; a bounded drain fails if no PATCH arrives,
+    // rather than sleeping or masking a missing/early-settled request.
+    for (let turn = 0; turn < 200 && !pending[index]; turn++) await Promise.resolve();
+    assert.ok(pending[index], `config PATCH ${index} did not reach the network/authority boundary`);
+    return pending[index];
+  };
+  return { state, nodes, pending, reads, feedback, edit, commit, waitForPatch,
     reply: (index, body, status) => pending[index].resolve(response(body, status)) };
 }
 
@@ -646,7 +654,7 @@ await group("global-save-inflight-same-and-cross-scope", async () => {
     assert(s.savingConfigScopes.has("tasks")); assert(s.dirtyScopes.has("tasks"));
     assert.equal(s.$("saveBtn").disabled, true);
   });
-  t.reply(0, t.commit(0, "r2")); await saving;
+  await t.waitForPatch(0); t.reply(0, t.commit(0, "r2")); await saving;
   check("successful global save acknowledges only the submitted snapshot", () => {
     assert.equal(s.cfg.taskMode.maxTurns, 12); assert.equal(s.getVal("taskMode.maxTurns"), 13);
     assert(s.dirtyScopes.has("tasks")); assert(s.dirtyScopes.has("archive")); assert(s.dirtyScopes.has("qa:persona"));
@@ -658,7 +666,7 @@ await group("global-save-inflight-same-and-cross-scope", async () => {
   });
   await s.refreshAll({ silent: true });
   check("later automatic refresh also retains newly edited fields", () => assert.equal(s.getVal("taskMode.maxTurns"), 13));
-  const retry = s.saveConfig(); t.reply(1, t.commit(1, "r3")); await retry;
+  const retry = s.saveConfig(); await t.waitForPatch(1); t.reply(1, t.commit(1, "r3")); await retry;
   check("saving the later draft cleans only that scope", () => {
     assert.equal(s.cfg.taskMode.maxTurns, 13); assert(!s.dirtyScopes.has("tasks"));
     assert(s.dirtyScopes.has("archive")); assert(s.dirtyScopes.has("qa:persona")); assert(s.dirtyScopes.has("api-center"));
@@ -674,7 +682,7 @@ await group("global-save-clean-normalization-and-refresh-window", async () => {
   check("a clean-form save also protects its submission during refresh", () => {
     assert.equal(s.getVal("taskMode.maxTurns"), 15); assert(s.dirtyScopes.has("tasks"));
   });
-  t.reply(0, t.commit(0, "r2", (server) => { server.taskMode.maxTurns = 16; })); await saving;
+  await t.waitForPatch(0); t.reply(0, t.commit(0, "r2", (server) => { server.taskMode.maxTurns = 16; })); await saving;
   check("unchanged submission becomes clean and accepts normalized server values", () => {
     assert(!s.dirtyScopes.has("tasks")); assert.equal(s.getVal("taskMode.maxTurns"), 16);
     assert.equal(s.getVal("chatArchive.baseDir"), "new other-region draft"); assert(s.dirtyScopes.has("archive"));
@@ -683,7 +691,7 @@ await group("global-save-clean-normalization-and-refresh-window", async () => {
   let release, reached;
   const refreshing = new Promise(resolve => { reached = resolve; });
   s.beforeRead = async (url) => { if (url.startsWith("/api/status?")) { reached(); await new Promise(resolve => { release = resolve; }); } };
-  const next = s.saveConfig(); t.reply(1, t.commit(1, "r3")); await refreshing;
+  const next = s.saveConfig(); await t.waitForPatch(1); t.reply(1, t.commit(1, "r3")); await refreshing;
   // Also catch programmatic edits that do not dispatch a dirty event.
   t.edit("taskMode.maxTurns", 18, { mark: false });
   release(); await next;
@@ -698,13 +706,14 @@ await group("global-save-concurrent-scopes-and-stale-responses", async () => {
   t.edit("taskMode.maxTurns", 20);
   const first = s.saveConfig();
   await s.saveConfig();
+  await t.waitForPatch(0);
   check("duplicate saves of the same scope are not replayed", () => assert.equal(t.pending.length, 1));
   const oldResponse = t.commit(0, "r2");
   // The server committed A, but its response is delayed. An automatic refresh
   // observes r2 and permits a legitimate second scope write using that revision.
   await s.refreshAll({ silent: true });
   s.activePage = "archive"; t.edit("chatArchive.baseDir", "saved concurrently");
-  const second = s.saveConfig(); t.reply(1, t.commit(1, "r3")); await second;
+  const second = s.saveConfig(); await t.waitForPatch(1); t.reply(1, t.commit(1, "r3")); await second;
   t.edit("chatArchive.baseDir", "edited after second save");
   const readStart = t.reads.length;
   t.reply(0, oldResponse); await first;
@@ -719,6 +728,7 @@ await group("global-save-concurrent-scopes-and-stale-responses", async () => {
   c.activePage = "archive"; conflict.edit("chatArchive.baseDir", "conflicting draft");
   const archiveSave = c.saveConfig();
   const rejected = assert.rejects(archiveSave, (error) => error.status === 409);
+  await Promise.all([conflict.waitForPatch(0), conflict.waitForPatch(1)]);
   conflict.reply(0, conflict.commit(0, "r2")); await taskSave;
   conflict.reply(1, { error: "stale revision" }, 409); await rejected;
   check("concurrent optimistic-revision failure preserves the losing scope without a retry", () => {
@@ -734,7 +744,7 @@ await group("global-save-failure-and-behavior-account-isolation", async () => {
     t.edit("taskMode.maxTurns", 22); const saving = s.saveConfig();
     const rejected = assert.rejects(saving, (error) => error.status === status);
     t.edit("taskMode.maxTurns", 23); t.edit("chatArchive.baseDir", "unrelated failure draft");
-    t.reply(0, { error: "offline save error" }, status); await rejected;
+    await t.waitForPatch(0); t.reply(0, { error: "offline save error" }, status); await rejected;
     await s.refreshAll({ silent: true });
     check(`HTTP ${status} retains submitted, later and unrelated drafts through refresh`, () => {
       assert.equal(s.getVal("taskMode.maxTurns"), 23); assert.equal(s.getVal("chatArchive.baseDir"), "unrelated failure draft");
@@ -749,6 +759,7 @@ await group("global-save-failure-and-behavior-account-isolation", async () => {
   t.edit("accounts.standbys.0.behaviorMode", "normal", { mark: false });
   const accounts = structuredClone(s.server.accounts);
   const saving = s.saveConfig();
+  await t.waitForPatch(0);
   check("Q&A behavior PATCH never submits an account or standby array", () => {
     assert(!("accounts" in t.pending[0].body));
     assert.equal(t.pending[0].body.behaviorModes.default, "restrained");
@@ -763,7 +774,7 @@ await group("global-save-failure-and-behavior-account-isolation", async () => {
   t.edit("behaviorModes.default", "lively");
   const next = s.saveConfig();
   t.edit("learningMode.maxQuestionsPerDay", 0, { mark: false });
-  t.reply(1, t.commit(1, "r3")); await next;
+  await t.waitForPatch(1); t.reply(1, t.commit(1, "r3")); await next;
   check("newly invalid behavior drafts are retained, not treated as a failed successful write", () => {
     assert.equal(s.cfg.learningMode.maxQuestionsPerDay, 3); assert.equal(s.getVal("learningMode.maxQuestionsPerDay"), 0);
     assert(s.dirtyScopes.has("qa:behavior")); assert.match(s.scopeFeedback.get("qa:behavior"), /后续修改仍未保存/);
@@ -775,7 +786,7 @@ await group("global-save-post-write-sync-failure", async () => {
   t.edit("taskMode.maxTurns", 24); const saving = s.saveConfig();
   const rejected = assert.rejects(saving, /offline refresh failure/);
   s.beforeRead = async () => { throw new Error("offline refresh failure"); };
-  t.reply(0, t.commit(0, "r2")); await rejected;
+  await t.waitForPatch(0); t.reply(0, t.commit(0, "r2")); await rejected;
   check("a failed follow-up read preserves the draft and distinguishes an already committed write", () => {
     assert.equal(s.cfg.taskMode.maxTurns, 24); assert.equal(s.getVal("taskMode.maxTurns"), 24);
     assert(s.dirtyScopes.has("tasks")); assert.match(s.scopeFeedback.get("tasks"), /已提交，但刷新失败/);
@@ -784,6 +795,7 @@ await group("global-save-post-write-sync-failure", async () => {
   const stale = configUiRuntime(), c = stale.state;
   stale.edit("taskMode.maxTurns", 25); const delayed = c.saveConfig();
   const delayedRejected = assert.rejects(delayed, /最新配置未能同步/);
+  await stale.waitForPatch(0);
   const newerResponse = stale.commit(0, "r3");
   // A different pane has read a revision between this write's expected and
   // returned revisions. Do not accept its old read as the save acknowledgement.

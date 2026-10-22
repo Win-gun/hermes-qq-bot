@@ -331,6 +331,25 @@
     "promptMaxUsers": 12,
     "maxExtractLength": 80,
     "privacyFilter": true,
+    "verification": {
+      "enabled": true,
+      "shadowMode": true,
+      "adminUserIds": [],
+      "groupAdminUserIds": {},
+      "notificationAccountIds": {},
+      "perGroupDailyLimit": 3,
+      "cooldownMs": 86400000,
+      "deferAfterMs": 604800000
+    },
+    "learning": {
+      "enabled": true,
+      "minBatchMessages": 4,
+      "maxBatchMessages": 16,
+      "settleMs": 5000,
+      "maxWaitMs": 120000,
+      "maxMessageChars": 4000,
+      "maxBatchChars": 12000
+    },
     "integrity": {
       "enabled": true,
       "minStableConfidence": 0.65,

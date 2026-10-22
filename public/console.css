@@ -281,6 +281,16 @@ details > .card { border: 0; padding: 0; background: transparent; }
 
 /* Lists and inspection spaces: do not truncate user-generated identifiers. */
 .memory-layout { display: grid; grid-template-columns: minmax(240px, 304px) minmax(0, 1fr); gap: 16px; }
+.verification-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 16px; }
+.verification-workspace { align-items: start; padding-top: 16px; border-top: 1px solid var(--line); }
+.verification-detail { min-width: 0; }
+.verification-detail h4, .verification-evidence pre { margin-top: 0; }
+.verification-evidence > section { min-width: 0; padding-top: 12px; border-top: 1px solid var(--line); }
+.verification-evidence pre { color: var(--text); }
+.verification-workspace .list-item { width: 100%; text-align: left; }
+.verification-settings { min-width: 0; margin: 16px 0; padding: 0; border: 0; }
+#verificationCondition { min-height: 80px; }
+@media (max-width: 1100px) { .grid.two.verification-evidence { grid-template-columns: 1fr; } }
 .list { display: grid; gap: 8px; align-content: start; max-height: 560px; overflow: auto; overscroll-behavior: contain; }
 .list-item { padding: 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: var(--bg); cursor: pointer; overflow-wrap: anywhere; }
 .list-item:hover, .list-item.active { border-color: var(--accent); background: var(--accent-subtle); }

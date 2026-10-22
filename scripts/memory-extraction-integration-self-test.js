@@ -229,6 +229,7 @@ setTimeout(()=>{clearInterval(timer);fail("HELD_MODEL_TIMEOUT");},25000).unref()
   config.observability = { ...config.observability, logIncomingMessages: false, logSkippedMessages: false };
   config.trigger = { ...config.trigger, activeReply: false, replyToKeywords: false };
   config.memory = { ...config.memory, enabled: true,
+    learning: { enabled: false }, // Legacy two-message/pinned-batch contract; coherent windows have their own integration suite.
     aiExtraction: { ...config.memory.aiExtraction, enabled: true, everyMessages: 2 } };
   config.accounts = { version: 2, topology: "function_split", failoverGroups: [],
     diagnostics: { peerPingEnabled: false, probeIntervalMs: 600000 }, items: [{ id: "fixture", qq: "91001",

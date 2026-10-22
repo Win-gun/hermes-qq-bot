@@ -201,6 +201,39 @@ function correctionReadable(entry, options) {
     || baseStatus(entry, confidenceValue(options.minStableConfidence) ?? 0.65, options.requireEvidence !== false) === "active";
 }
 
+// Verification holds are orthogonal to confidence/status. A pending semantic
+// dispute must not leak through either canonical or raw compatibility reads.
+function verificationHeld(entry) {
+  return asArray(entry.verificationHoldCaseIds).length > 0;
+}
+
+function adminReplacement(replacement, original) {
+  return original.status === "superseded" && original.correctionAction === "supersede"
+    && replacement.source === "admin-verification" && replacement.subjectUserId === original.subjectUserId
+    && replacement.kind === original.kind && normalizedKey(replacement.value) === normalizedKey(original.value)
+    && asArray(replacement.verificationReplaces).includes(original.id)
+    && replacement.verificationResolutionCaseId === original.correctionVerificationCaseId
+    && asArray(replacement.adminProvenance).some(p => p?.type === "ADMIN" && p.caseId === original.correctionVerificationCaseId);
+}
+
+function conditionedCoexistence(a, b) {
+  return a.source === "admin-verification" && b.source === "admin-verification"
+    && typeof a.condition === "string" && a.condition.trim() && typeof b.condition === "string" && b.condition.trim()
+    && a.verificationResolutionCaseId && a.verificationResolutionCaseId === b.verificationResolutionCaseId
+    && [a, b].every(e => asArray(e.adminProvenance).some(p => p?.type === "ADMIN"
+      && p.action === "coexist" && p.caseId === e.verificationResolutionCaseId));
+}
+
+function conditionReadable(entry) {
+  return entry.condition === undefined || entry.condition === null || entry.condition === ""
+    || (typeof entry.condition === "string" && !!entry.condition.trim());
+}
+
+function displayMemoryValue(entry) {
+  const condition = typeof entry.condition === "string" ? cleanText(entry.condition) : "";
+  return condition ? `${entry.value}（适用条件：${condition}；当前是否满足条件未核验）` : entry.value;
+}
+
 function resolveConflicts(canonical, subjectUserId, key, minStable, requireEvidence) {
   if (!key) return 0;
   const members = canonical.entries.filter((entry) => entryBelongs(entry, subjectUserId)
@@ -446,6 +479,10 @@ export function legacyMemoryValues(user, field, values, options = {}) {
   const minConfidence = confidenceValue(options.minConfidence ?? options.promptMinConfidence) ?? 0.55;
   const candidates = values === undefined
     ? [...legacyFieldValues(stored, canonicalField), ...legacyFieldValues(user, canonicalField)] : asArray(values);
+  // Explicit admin versions may have no raw mirror (case-only candidates).
+  // They are not new legacy evidence and must still pass the shared read gates.
+  candidates.push(...entries.filter(e => entryBelongs(e, subject) && e.kind === kind
+    && e.source === "admin-verification" && asArray(e.adminProvenance).some(p => p?.type === "ADMIN")).map(e => e.value));
   const seen = new Set();
   const result = [];
   for (const raw of candidates) {
@@ -454,21 +491,25 @@ export function legacyMemoryValues(user, field, values, options = {}) {
     const id = memoryId(subject, kind, value);
     if (seen.has(id)) continue;
     seen.add(id);
-    const matches = entries.filter((entry) => entry?.id === id
+    const matching = entries.filter((entry) => entry?.id === id
       || (entry?.kind === kind && normalizedKey(entry.value) === normalizedKey(value)));
+    // Keep terminal originals as history. Only their precise admin successor
+    // can replace a superseded projection; rejected memories remain a veto.
+    const matches = matching.filter(original => !matching.some(replacement => replacement !== original && adminReplacement(replacement, original)));
     if (!matches.length || matches.some((entry) => {
       const confidence = confidenceValue(entry.confidence);
       const compatibilityOnly = entry.source === "legacy-canonical" && !evidenceKeys(entry).length
         && Number(entry.evidenceConfirmations || 0) === 0 && !entry.correctedAt && !entry.explicitAt && !entry.selfExplicitAt;
       return !entryBelongs(entry, subject) || entry.kind !== kind || entry.status !== "active"
-        || terminalCorrection(entry) || !correctionReadable(entry, options) || confidence === null
+        || verificationHeld(entry) || terminalCorrection(entry) || !conditionReadable(entry) || !correctionReadable(entry, options) || confidence === null
         || (!compatibilityOnly && confirmationConfidence(entry) < minConfidence);
     })) continue;
     const key = contradictionKey(kind, value);
-    if (key && entries.some((entry) => entryBelongs(entry, subject) && !terminalCorrection(entry)
+    if (key && entries.some((entry) => entryBelongs(entry, subject) && !terminalCorrection(entry) && !verificationHeld(entry)
       && ["active", "tentative", "disputed"].includes(entry.status)
-      && contradictionKey(entry.kind, entry.value) === key && polarity(entry.value) !== polarity(value))) continue;
-    result.push(value);
+      && contradictionKey(entry.kind, entry.value) === key && polarity(entry.value) !== polarity(value)
+      && !matches.every(match => conditionedCoexistence(match, entry)))) continue;
+    result.push(...new Set(matches.map(displayMemoryValue)));
   }
   return result;
 }
@@ -484,7 +525,8 @@ export function legacyMemoryFallbackAllowed(user, options = {}) {
   if (asArray(canonical.conflicts).length) return false;
   const entries = asArray(canonical.entries);
   if (entries.some((entry) => !entryBelongs(entry, subject) || entry.status !== "active"
-    || entry.correctedAt || entry.source !== "legacy-canonical" || evidenceKeys(entry).length
+    || verificationHeld(entry) || entry.correctedAt || entry.source !== "legacy-canonical" || evidenceKeys(entry).length
+    || (entry.condition !== undefined && entry.condition !== null && entry.condition !== "")
     || confidenceValue(entry.confidence) === null)) return false;
   if (entries.some((entry) => entries.some((other) => contradictionKey(entry.kind, entry.value)
     && contradictionKey(entry.kind, entry.value) === contradictionKey(other.kind, other.value)
@@ -508,8 +550,8 @@ export function canonicalActiveEntries(user, options = {}) {
   const canonical = readCanonical(user, subject);
   const minConfidence = confidenceValue(options.minConfidence) ?? 0.55;
   return asArray(canonical.entries).filter(entry => entryBelongs(entry, subject) && entry.status === "active"
-    && !terminalCorrection(entry) && correctionReadable(entry, options) && confidenceValue(entry.confidence) !== null
-    && confirmationConfidence(entry) >= minConfidence).map(entry => ({ ...entry, confidence: confirmationConfidence(entry) }));
+    && !verificationHeld(entry) && !terminalCorrection(entry) && conditionReadable(entry) && correctionReadable(entry, options) && confidenceValue(entry.confidence) !== null
+    && confirmationConfidence(entry) >= minConfidence).map(entry => ({ ...entry, confidence: confirmationConfidence(entry), displayValue: displayMemoryValue(entry) }));
 }
 
 export function canonicalPromptLines(user, options = {}) {
@@ -518,7 +560,7 @@ export function canonicalPromptLines(user, options = {}) {
   for (const entry of canonicalActiveEntries(user, options)) {
     const field = KIND_FIELD[entry.kind] || entry.kind;
     if (!grouped.has(field)) grouped.set(field, []);
-    grouped.get(field).push(entry.value);
+    grouped.get(field).push(entry.displayValue);
   }
   return limit ? Array.from(grouped.entries()).map(([field, values]) => `${field}:${values.slice(-limit).join("、")}`) : [];
 }

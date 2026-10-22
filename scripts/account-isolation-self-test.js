@@ -94,7 +94,7 @@ const realFunctions = [
   "conversationIdFromEvent", "conversationLabelFromEvent", "oneBotMessageToText", "messageMentionsSelf", "stripSelfMention", "stripBotAddressing", "escapeRegExp", "hasKeyword",
   "stableMessageFingerprint", "accountScopedInboundKey", "claimConversationMessage", "messageTiming", "extractReplyMessageIds",
   "messageDebounceConfig", "isLikelyIncompleteInput", "shouldWaitForMoreInput", "flushDebouncedMessage", "enqueueDebouncedMessage", "pendingDebouncedContext", "orderedHistory", "mergeReplyCurrents",
-  "quietUntil", "isQuiet", "repairInvalidQuietUntil", "parseDurationMs", "formatDuration", "isGroupAdmin", "handleBotCommand",
+  "quietUntil", "isQuiet", "repairInvalidQuietUntil", "parseDurationMs", "formatDuration", "isGroupAdmin", "handleBotCommand", "handleMemoryVerificationCommand",
   "sameLogicalAccount", "recordBotMessage", "lastBotMessageForAccount", "sendGroupMessage", "lastNonBotMessage", "lastNonBotMessagesSince", "scoreImplicitReplyAgainstBotMessage", "isMediaOnlyText"
 ];
 

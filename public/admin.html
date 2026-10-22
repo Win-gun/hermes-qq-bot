@@ -831,6 +831,63 @@
       </section>
 
       <section id="page-memory" class="page">
+        <section id="memoryVerification" class="card" aria-labelledby="verificationHeading">
+          <div class="row space-between">
+            <h3 id="verificationHeading" class="heading-inline">待核实</h3>
+            <button id="verificationRefresh" class="secondary" type="button">刷新并核对（保留草稿）</button>
+          </div>
+          <p class="hint">先比较新旧证据，再确认处理。此处不发送测试消息；“不确定”会暂缓处理。</p>
+          <div class="form-grid verification-filters">
+            <div class="field"><label for="verificationGroup">群号 / 会话</label><input id="verificationGroup" placeholder="留空为全部；群号或 group:群号" /></div>
+            <div class="field"><label for="verificationStatus">处理状态</label><select id="verificationStatus"><option value="pending">待核实</option><option value="deferred">已暂缓</option><option value="resolved">已处理</option><option value="">全部状态</option></select></div>
+            <div class="field"><label for="verificationPerson">当事人 QQ</label><input id="verificationPerson" type="search" placeholder="在已加载记录中筛选 QQ" /></div>
+          </div>
+          <p id="verificationCounts" class="hint" aria-live="polite">待核实 — · 已暂缓 — · 已处理 —</p>
+          <p id="verificationPartialNotice" class="hint">群号与状态在服务端筛选；当事人 QQ 仅筛选当前已加载页，不代表全部记录。</p>
+          <div class="row"><button id="verificationPrevious" class="secondary" type="button" disabled>上一页</button><span id="verificationPageState" class="hint" role="status" aria-live="polite">尚未加载</span><button id="verificationNext" class="secondary" type="button" disabled>下一页</button></div>
+          <p id="verificationState" class="hint" role="status" aria-live="polite">进入记忆页后加载核实记录。</p>
+          <div class="memory-layout verification-workspace">
+            <div id="verificationList" class="list" aria-label="核实记录列表"></div>
+            <div class="verification-detail">
+              <div id="verificationEvidence">选择一条记录，查看新旧证据。</div>
+              <div id="verificationDecision" class="settings-block" hidden>
+                <div class="field"><label for="verificationAction">处理方式</label><select id="verificationAction"><option value="">请选择处理方式</option><option value="update">更新为新记忆</option><option value="coexist">按条件并存</option><option value="new_invalid">新记忆无效</option><option value="old_invalid">旧记忆无效</option><option value="unsure">不确定，暂缓处理</option></select></div>
+                <div id="verificationConditionField" class="field" hidden><label for="verificationCondition">并存条件（必填）</label><textarea id="verificationCondition" maxlength="1000" placeholder="说明各自适用的时间、场景或条件"></textarea></div>
+                <p id="verificationDecisionState" class="hint" role="status" aria-live="polite"></p>
+                <div class="row"><button id="verificationReview" class="secondary" type="button" hidden>已核对最新证据，保留处理草稿</button><button id="verificationSubmit" type="button" disabled>确认处理</button></div>
+              </div>
+            </div>
+          </div>
+          <details class="panel-details settings-block">
+            <summary>核实设置 · 观察与通知</summary>
+            <p class="hint">独立保存本区设置。默认先观察；只有明确选择“通知”并保存，才允许通知。管理员 QQ 必须明确填写，不推测 QQ 群管理员。</p>
+            <fieldset id="verificationSettingsFields" class="verification-settings" disabled>
+              <legend class="sr-only">记忆核实设置</legend>
+              <label class="switch-row" for="verificationLearningEnabled">
+                <span><strong>按完整讨论学习</strong><span>开启改变后台提取与选取，不修改原记忆；核实默认只记录，不发送通知。</span></span>
+                <input id="verificationLearningEnabled" type="checkbox" aria-describedby="verificationLearningSummary" />
+              </label>
+              <p id="verificationLearningSummary" class="hint" role="status">后台学习参数尚未加载。</p>
+              <div class="form-grid">
+                <div class="field"><label for="verificationMode">运行方式</label><select id="verificationMode"><option value="off">停用</option><option value="observe">仅观察，不通知</option><option value="notify">启用通知（主动选择）</option></select></div>
+                <div class="field"><label for="verificationAdmins">管理员 QQ（每行一个）</label><textarea id="verificationAdmins" placeholder="明确填写有权核实的 QQ"></textarea></div>
+              </div>
+              <details class="panel-details">
+                <summary>高级 · 按群管理员、通知账号与频率</summary>
+                <div class="form-grid settings-block">
+                  <div class="field"><label for="verificationGroupAdmins">按群管理员（JSON 对象）</label><textarea id="verificationGroupAdmins" placeholder='{"数字群号":["管理员QQ"]}'></textarea></div>
+                  <div class="field"><label for="verificationAccounts">通知账号映射（JSON 对象）</label><textarea id="verificationAccounts" placeholder='按服务端已有映射填写；不猜测账号'></textarea></div>
+                  <div class="field"><label for="verificationDailyLimit">每群每日上限</label><input id="verificationDailyLimit" type="number" min="0" max="1000" step="1" /></div>
+                  <div class="field"><label for="verificationCooldown">通知冷却（毫秒）</label><input id="verificationCooldown" type="number" min="0" max="31536000000" step="1" /></div>
+                  <div class="field"><label for="verificationDeferAfter">自动暂缓等待（毫秒）</label><input id="verificationDeferAfter" type="number" min="0" max="31536000000" step="1" /></div>
+                </div>
+              </details>
+            </fieldset>
+            <p id="verificationSettingsState" class="hint" role="status" aria-live="polite">设置尚未加载。</p>
+            <div class="row"><button id="verificationSettingsReview" class="secondary" type="button" hidden>已核对远端设置，保留本地草稿</button><button id="verificationSettingsSave" type="button" disabled>保存核实设置</button></div>
+            <pre id="verificationRemoteSettings" hidden></pre>
+          </details>
+        </section>
         <div class="memory-layout">
           <div class="card">
             <h3>记忆群列表 <span id="memoryCount" class="pill">0</span></h3>
@@ -1241,6 +1298,9 @@
     let automationRulesDraft = [];
     let selectedAutomationRuleIndex = -1;
     const automationAccounts = { selected: "", drafts: new Map() };
+    const verificationState = { cases: [], selected: "", drafts: new Map(), loaded: false, loading: false, error: "", request: 0, busy: false,
+      offset: 0, filterKey: "", pagination: null, truncated: 0,
+      settings: null, learningSettings: null, settingsDirty: false, settingsConflict: false, settingsBusy: false, settingsVersion: 0, configRevision: null };
     const desktopApi = window.hermesQQ || null;
     let browserHostAvailable = false;
     let hostProgressTimer = null;
@@ -1273,12 +1333,14 @@
     }
 
     async function api(path, opts = {}) {
+      const method = String(opts.method || "GET").toUpperCase();
       const accountAdmin = /^\/api\/(?:accounts|account-groups)(?:[/?]|$)/.test(path);
-      if (accountAdmin) {
+      const configAdmin = method === "PATCH" && /^\/api\/config(?:[?]|$)/.test(path);
+      const sessionAdmin = accountAdmin || configAdmin;
+      if (sessionAdmin) {
         const headers = new Headers(opts.headers || {});
-        headers.set("x-hermes-qq-admin", await ensureAdminSession());
-        const method = String(opts.method || "GET").toUpperCase();
-        if (!["GET", "HEAD"].includes(method)) headers.set("content-type", "application/json");
+        if (!headers.has("x-hermes-qq-admin")) headers.set("x-hermes-qq-admin", await ensureAdminSession());
+        if (!["GET", "HEAD"].includes(method) && !headers.has("content-type")) headers.set("content-type", "application/json");
         opts = { ...opts, headers, ...(!["GET", "HEAD"].includes(method) && opts.body === undefined ? { body: "{}" } : {}) };
       }
       const res = await fetch(path, opts);
@@ -1287,7 +1349,7 @@
       try { body = text ? JSON.parse(text) : {}; }
       catch { body = { ok: false, error: text }; }
       if (!res.ok) {
-        if (accountAdmin && res.status === 403) adminSessionToken = ""; // Do not replay a mutation.
+        if (sessionAdmin && res.status === 403) adminSessionToken = ""; // Do not replay a mutation.
         const error = new Error(body.error || res.statusText || `HTTP ${res.status}`);
         error.status = res.status;
         throw error;
@@ -1391,8 +1453,10 @@
     }
 
     function renderSaveState() {
-      dirty = dirtyScopes.size > 0 || routineState.dirty;
+      const verificationDirty = typeof verificationState !== "undefined" && verificationState.settingsDirty;
+      dirty = dirtyScopes.size > 0 || routineState.dirty || verificationDirty;
       const unsaved = [...dirtyScopes].map((scope) => scopeNames[scope] || scope);
+      if (verificationDirty) unsaved.push("核实设置（在待核实区域单独保存）");
       if (routineState.dirty) unsaved.push("原有例行规则");
       $("saveState").textContent = !cfg ? "配置未加载" : dirty ? `未保存：${unsaved.join("、")}` : "已同步";
       const scope = currentScope();
@@ -1408,7 +1472,7 @@
         : scopeFeedback.get(scope) || (dirtyScopes.has(scope) ? "此区域有未保存修改；刷新不会覆盖草稿。" : "当前区域已同步。");
       for (const button of document.querySelectorAll("#nav [data-page], [data-tabs] [data-tab]")) {
         const scope = button.dataset.tab ? `${button.closest("[data-tabs]").dataset.tabs}:${button.dataset.tab}` : button.dataset.page;
-        button.classList.toggle("has-unsaved", dirtyScopes.has(scope) || (scope === "automation" && routineState.dirty) || (["qa", "voice"].includes(scope) && [...dirtyScopes].some((item) => item.startsWith(`${scope}:`))));
+        button.classList.toggle("has-unsaved", dirtyScopes.has(scope) || (scope === "memory" && verificationDirty) || (scope === "automation" && routineState.dirty) || (["qa", "voice"].includes(scope) && [...dirtyScopes].some((item) => item.startsWith(`${scope}:`))));
       }
       renderRegistrySaveState();
       if (routineState.dirty && !$("saveState").textContent.includes("原有例行规则")) $("saveState").textContent += " · 原有例行规则未保存";
@@ -2544,6 +2608,320 @@
       } else {
         preview.textContent = "此文件不支持在线预览，或文本超过 1 MB；请使用左侧下载按钮。";
       }
+    }
+
+    function verificationKey(item) {
+      return JSON.stringify([item.conversationId, item.id]);
+    }
+
+    function verificationSelected() {
+      return verificationState.cases.find(item => verificationKey(item) === verificationState.selected);
+    }
+
+    function verificationDraft(item) {
+      const key = verificationKey(item);
+      if (!verificationState.drafts.has(key)) verificationState.drafts.set(key, { action: "", condition: "", revision: item.revision, baseRevision: item.revision, conflict: false, needsRefresh: false });
+      return verificationState.drafts.get(key);
+    }
+
+    function verificationText(value) {
+      return value == null ? "未提供" : typeof value === "string" ? value : JSON.stringify(value);
+    }
+
+    function verificationSentTime(value) {
+      if (value == null || value === "") return "未提供原消息发送时间";
+      const numeric = typeof value === "number" || /^\d+(?:\.\d+)?$/.test(String(value));
+      const time = numeric ? Number(value) * (Number(value) < 1e12 ? 1000 : 1) : value;
+      const date = new Date(time);
+      return Number.isNaN(date.getTime()) ? `发送时间无法解析：${String(value)}` : `${date.toLocaleString("zh-CN", { hour12: false })} · ${date.toISOString()}`;
+    }
+
+    function verificationNode(tag, text, className = "") {
+      const node = document.createElement(tag); node.textContent = text; node.className = className; return node;
+    }
+
+    function renderVerificationEvidence(item) {
+      const host = $("verificationEvidence"); host.replaceChildren();
+      if (!item) { host.textContent = "选择一条记录，查看新旧证据。切换筛选不会删除处理草稿。"; return; }
+      host.append(verificationNode("h4", `${/^\d+$/.test(String(item.subjectUserId)) ? "当事人 QQ" : "记忆对象"} ${item.subjectUserId} · ${item.conversationId}`));
+      const classification = item.classification;
+      const label = typeof classification === "object" && classification ? classification.label || classification.type || classification.kind : classification;
+      const classes = { contradiction: ["内容冲突", "同一对象的新旧内容被标记为互相矛盾，需核对原始证据"], change: ["可能发生变化", "可能是不同时间的事实或偏好变化，不能直接认定旧记忆错误"], condition: ["可能按条件并存", "可能对应不同场景或条件，需明确各自适用范围"], identity_ambiguous: ["对象归属不明", "证据中的身份或指代不清，不能直接归入同一人"] };
+      const reason = item.classifierReason || item.classificationReason || item.reason || classification?.reason;
+      host.append(verificationNode("p", `分类：${classes[label]?.[0] || verificationText(label)}；判断原因：${reason ? verificationText(reason) : classes[label] ? `${classes[label][1]}（分类含义；服务端未提供更细原因）` : "服务端未提供判断原因"}。分类仅供核实参考。`, "hint"));
+      host.append(verificationNode("p", `记录 ${item.id} · 修订 ${item.revision} · 建案时间：${verificationSentTime(item.createdAt)}（不是证据发送时间）`, "hint"));
+      const evidence = verificationNode("div", "", "grid two verification-evidence");
+      for (const [title, memory, extra] of [["旧记忆", item.oldMemory, item.oldEvidence], ["新记忆", item.newMemory, item.newEvidence]]) {
+        const part = verificationNode("section", ""); part.setAttribute("aria-label", `${title}证据`);
+        part.append(verificationNode("h4", title));
+        part.append(verificationNode("pre", verificationText(memory?.value)));
+        const times = memory?.evidence?.sourceMessageTimes || memory?.sourceMessageTimes;
+        if (memory?.sentAt || !times || !Object.keys(times).length) part.append(verificationNode("p", `原消息发送时间：${verificationSentTime(memory?.sentAt)}`, "hint"));
+        if (times && typeof times === "object") {
+          for (const sourceId of memory?.sourceMessageIds || memory?.evidence?.sourceMessageIds || []) part.append(verificationNode("p", `消息 ${sourceId} · 实际发送时间：${verificationSentTime(times[sourceId])}`, "hint"));
+        }
+        part.append(verificationNode("p", `记忆 ID：${verificationText(memory?.id)}；来源消息 ID：${verificationText(memory?.sourceMessageIds)}`, "hint"));
+        const source = memory?.sourceMessages || extra;
+        if (source != null) part.append(verificationNode("pre", verificationText(source)));
+        evidence.append(part);
+      }
+      host.append(evidence);
+    }
+
+    function renderVerificationDecision() {
+      const state = verificationState, item = verificationSelected(), draft = item && verificationDraft(item);
+      $("verificationDecision").hidden = !item;
+      if (!item) return;
+      const editable = ["pending", "deferred"].includes(item.status), busy = state.busy || state.settingsBusy || state.loading;
+      $("verificationAction").disabled = busy || !editable;
+      $("verificationCondition").disabled = busy || !editable;
+      $("verificationCondition").required = draft.action === "coexist";
+      $("verificationConditionField").hidden = draft.action !== "coexist";
+      $("verificationSubmit").disabled = busy || Boolean(state.error) || !editable || item.stale === true || item.revision == null || draft.conflict || !draft.action || (draft.action === "coexist" && !draft.condition.trim());
+      $("verificationSubmit").textContent = state.busy ? "处理中…" : "确认处理";
+      $("verificationReview").hidden = (!draft.conflict && item.stale !== true) || draft.needsRefresh || state.loading || Boolean(state.error) || !editable;
+      $("verificationReview").disabled = busy;
+      $("verificationReview").textContent = state.reviewing ? "复核中…" : "已核对最新证据，保留处理草稿";
+      $("verificationDecisionState").textContent = !editable ? "此记录已处理，只读展示。" : item.stale === true ? "证据快照已过期，暂不能处理。请先核对当前证据，再点击“已核对最新证据”保存复核；复核不会自动处理记忆。" : draft.conflict
+        ? draft.needsRefresh ? "版本冲突：选择和草稿已保留。请先刷新，再核对最新证据；不会自动重试。" : "最新证据已加载，请重新核对。确认保留草稿后，才能再次提交。"
+        : draft.action === "coexist" && !draft.condition.trim() ? "请填写两条记忆各自适用的条件。" : "只提交当前记录的处理方式，不修改其他记忆或设置。";
+    }
+
+    function renderVerificationList() {
+      const state = verificationState, person = $("verificationPerson").value.trim();
+      const host = $("verificationList"); host.replaceChildren(); host.setAttribute("aria-busy", String(state.loading));
+      const items = state.cases.filter(item => !person || String(item.subjectUserId).includes(person));
+      const labels = { pending: "待核实", deferred: "已暂缓", resolved: "已处理" };
+      for (const item of items) {
+        const key = verificationKey(item), button = verificationNode("button", "", "list-item secondary");
+        button.type = "button"; button.disabled = state.busy || state.loading; button.setAttribute("aria-pressed", String(key === state.selected));
+        button.classList.toggle("active", key === state.selected);
+        button.append(verificationNode("strong", `QQ ${item.subjectUserId} · ${labels[item.status] || item.status}`));
+        button.append(verificationNode("span", `${item.conversationId} · ${verificationText(item.newMemory?.value)}`, "hint"));
+        button.addEventListener("click", () => {
+          state.selected = key; renderVerificationList(); renderVerificationEvidence(item);
+          const draft = verificationDraft(item); $("verificationAction").value = draft.action; $("verificationCondition").value = draft.condition;
+          renderVerificationDecision();
+        });
+        host.append(button);
+      }
+      if (!items.length) host.append(verificationNode("p", state.loading ? "正在加载核实记录…" : state.error ? "加载失败。请刷新重试，不能据此判断没有待核实项。" : !state.loaded ? "尚未加载。" : "当前页没有匹配记录。当事人仅筛选本页，可切换页面或服务端筛选继续查找。", "hint"));
+      for (const id of ["verificationGroup", "verificationStatus", "verificationRefresh"]) $(id).disabled = state.busy || state.settingsBusy;
+      const blocked = state.loading || state.busy || state.settingsBusy || Boolean(state.error) || !state.loaded;
+      $("verificationPrevious").disabled = blocked || !state.pagination || state.pagination.offset === 0;
+      $("verificationNext").disabled = blocked || !state.pagination?.hasMore;
+      $("verificationPageState").textContent = state.loading ? "正在加载…" : state.error ? "加载失败，请刷新重试" : !state.loaded ? "尚未加载" : state.cases.length ? `第 ${(state.pagination?.offset ?? 0) + 1}–${(state.pagination?.offset ?? 0) + state.cases.length} 条 · 本页 ${items.length} 条匹配` : "本页没有记录";
+      const partial = state.truncated > 0 || state.pagination?.hasMore || state.pagination?.offset > 0;
+      $("verificationPartialNotice").textContent = `${state.error ? "加载失败，列表如有内容为上次结果。" : partial ? `部分加载：本页 ${state.cases.length} 条${state.truncated > 0 ? `，后续还有 ${state.truncated} 条` : ""}。${state.pagination ? "可翻页查看。" : "服务端未提供分页信息，请收窄群号/状态筛选或刷新重试。"}` : ""}群号与状态在服务端筛选；当事人 QQ 仅筛选当前已加载页，不代表全部记录。`;
+    }
+
+    function fillVerificationSettings(settings, learningSettings) {
+      $("verificationLearningEnabled").checked = learningSettings?.enabled === true;
+      $("verificationMode").value = !settings.enabled ? "off" : settings.shadowMode !== false ? "observe" : "notify";
+      $("verificationAdmins").value = (settings.adminUserIds || []).join("\n");
+      $("verificationGroupAdmins").value = JSON.stringify(settings.groupAdminUserIds || {}, null, 2);
+      $("verificationAccounts").value = JSON.stringify(settings.notificationAccountIds || {}, null, 2);
+      for (const [id, key] of [["verificationDailyLimit", "perGroupDailyLimit"], ["verificationCooldown", "cooldownMs"], ["verificationDeferAfter", "deferAfterMs"]]) $(id).value = settings[key] ?? "";
+    }
+
+    function renderVerificationSettings() {
+      const state = verificationState;
+      $("verificationSettingsFields").disabled = !state.settings || state.settingsBusy;
+      $("verificationSettingsSave").disabled = !state.settings || !state.settingsDirty || state.settingsBusy || state.busy || state.loading || state.settingsConflict || Boolean(state.error) || state.configRevision == null;
+      $("verificationSettingsSave").textContent = state.settingsBusy ? "保存中…" : "保存核实设置";
+      $("verificationSettingsReview").hidden = !state.settingsConflict || state.settingsNeedsRefresh || state.loading || Boolean(state.error);
+      $("verificationSettingsReview").disabled = state.settingsBusy;
+      $("verificationRemoteSettings").hidden = !state.settingsConflict || !state.settings;
+      $("verificationRemoteSettings").textContent = state.settingsConflict ? `最新远端设置（仅供核对；本地草稿未被替换）：\n${JSON.stringify({ verification: state.settings, learning: state.learningSettings }, null, 2)}` : "";
+      const learning = state.learningSettings;
+      const wait = Number.isFinite(learning?.maxWaitMs) && learning.maxWaitMs > 0 ? learning.maxWaitMs / 60000 : null;
+      const chars = Number.isSafeInteger(learning?.maxMessageChars) && learning.maxMessageChars > 0 ? learning.maxMessageChars : null;
+      $("verificationLearningSummary").textContent = !learning ? "后台学习参数尚未加载。" : `当前后台参数：最长聚合等待${wait == null ? "未提供" : wait >= 1 ? `${Number(wait.toFixed(2))} 分钟` : `${Math.round(wait * 60)} 秒`}（不含提取耗时）；单条消息上限 ${chars ?? "未提供"} 字符。不保证每条消息都提取为长期记忆；不会因本开关自动删除已有记忆，原始聊天按存档设置保留。`;
+      renderSaveState();
+    }
+
+    async function refreshMemoryVerification({ completedNotice = "", offset } = {}) {
+      const state = verificationState;
+      if (state.busy || state.settingsBusy) return;
+      const conversation = $("verificationGroup").value.trim(), status = $("verificationStatus").value;
+      const filterKey = JSON.stringify([conversation, status]);
+      const requestedOffset = filterKey !== state.filterKey ? 0 : Number.isSafeInteger(offset) && offset >= 0 ? offset : state.offset;
+      state.filterKey = filterKey; state.offset = requestedOffset;
+      const request = ++state.request;
+      state.loading = true; state.error = "";
+      $("verificationState").textContent = "正在加载核实记录…已有选择和草稿保留。";
+      renderVerificationList(); renderVerificationDecision(); renderVerificationSettings();
+      try {
+        const result = await sensitiveApi(`/api/memory/verification?conversation_id=${encodeURIComponent(conversation)}&status=${encodeURIComponent(status)}&offset=${requestedOffset}&limit=200`, "GET");
+        if (request !== state.request) return;
+        if (result.ok !== true || !Array.isArray(result.cases) || !result.settings || typeof result.learningSettings?.enabled !== "boolean" || result.configRevision == null ||
+          !["pending", "deferred", "resolved"].every(key => Number.isFinite(result.totals?.[key])) ||
+          result.cases.some(item => !item || item.id == null || !item.conversationId || item.subjectUserId == null || item.revision == null)) throw new Error(result.error || "核实接口响应不完整");
+        const page = result.pagination;
+        if ((result.totals.truncated != null && (!Number.isSafeInteger(result.totals.truncated) || result.totals.truncated < 0)) ||
+          (page && (page.offset !== requestedOffset || !Number.isSafeInteger(page.limit) || page.limit < 1 || page.limit > 200 || result.cases.length > page.limit || typeof page.hasMore !== "boolean" ||
+            (result.totals.truncated != null && page.hasMore !== (result.totals.truncated > 0)) ||
+            (page.hasMore && (!result.cases.length || !Number.isSafeInteger(page.nextOffset) || page.nextOffset !== page.offset + result.cases.length))))) throw new Error("核实分页响应不完整或页码不一致");
+        state.pagination = page ? structuredClone(page) : null; state.truncated = result.totals.truncated || 0;
+        state.cases = result.cases; state.loaded = true;
+        for (const item of state.cases) {
+          const draft = state.drafts.get(verificationKey(item));
+          if (draft) { if (draft.revision !== item.revision) draft.conflict = true; draft.needsRefresh = false; }
+        }
+        if (state.settingsDirty && state.configRevision !== result.configRevision) state.settingsConflict = true;
+        state.settings = structuredClone(result.settings); state.learningSettings = structuredClone(result.learningSettings); state.configRevision = result.configRevision; state.settingsNeedsRefresh = false;
+        if (!state.settingsDirty) fillVerificationSettings(state.settings, state.learningSettings);
+        $("verificationCounts").textContent = `待核实 ${result.totals.pending} · 已暂缓 ${result.totals.deferred} · 已处理 ${result.totals.resolved}（服务端统计；当事人筛选仅影响本地列表）`;
+        $("verificationState").textContent = completedNotice || (state.selected && !verificationSelected() ? "当前页或筛选未包含原选中记录。选择和草稿已保留；可翻页或切换筛选后继续核对。" : "已加载当前页。选择记录查看证据，刷新不会自动提交。");
+        $("verificationSettingsState").textContent = state.settingsConflict ? "配置修订已变化。草稿已保留，请核对下方远端设置后再确认。" : state.settingsDirty ? "本区有未保存设置；刷新保留草稿。" : "设置已同步；修改后需单独保存核实设置。";
+        renderVerificationEvidence(verificationSelected());
+        const item = verificationSelected();
+        if (item) { const draft = verificationDraft(item); $("verificationAction").value = draft.action; $("verificationCondition").value = draft.condition; }
+      } catch (error) {
+        if (request !== state.request) return;
+        state.error = error.message;
+        $("verificationCounts").textContent = "统计暂不可用（如有列表，为上次加载结果）";
+        $("verificationState").textContent = `${completedNotice ? `${completedNotice}列表刷新失败` : "加载失败"}：${error.message}。已有记录和草稿保留；请刷新重试。`;
+      } finally {
+        if (request === state.request) { state.loading = false; renderVerificationList(); renderVerificationDecision(); renderVerificationSettings(); }
+      }
+    }
+
+    async function resolveMemoryVerification() {
+      const state = verificationState, item = verificationSelected();
+      if (!item || state.busy || state.settingsBusy || state.loading || state.error || item.stale === true || !["pending", "deferred"].includes(item.status)) return;
+      const draft = verificationDraft(item), actions = ["update", "coexist", "new_invalid", "old_invalid", "unsure"];
+      if (draft.conflict || item.revision == null || !actions.includes(draft.action) || (draft.action === "coexist" && !draft.condition.trim())) return;
+      const body = { conversationId: item.conversationId, caseId: item.id, expectedRevision: draft.revision, action: draft.action,
+        ...(draft.action === "coexist" ? { condition: draft.condition.trim() } : {}) };
+      state.busy = true; renderVerificationList(); renderVerificationDecision(); renderVerificationSettings();
+      let saved = false;
+      try {
+        const result = await sensitiveApi("/api/memory/verification/resolve", "POST", body);
+        if (result.ok !== true) throw new Error(result.error || "处理未确认成功");
+        ++state.request; state.drafts.delete(verificationKey(item));
+        if (state.selected === verificationKey(item)) { state.selected = ""; renderVerificationEvidence(null); }
+        item.status = body.action === "unsure" ? "deferred" : "resolved"; saved = true;
+        $("verificationState").textContent = body.action === "unsure" ? "已暂缓处理。" : "处理已确认。";
+      } catch (error) {
+        if (error.status === 409) { draft.conflict = true; draft.needsRefresh = true; }
+        $("verificationState").textContent = `处理失败：${error.message}。选择和草稿已保留；${error.status === 409 ? "请刷新并重新核对证据。" : "结果未确认，不会自动重试；请先刷新核对。"}`;
+        // An uncertain network result may have committed: require a read before retry.
+        if (error.status !== 409) { draft.conflict = true; draft.needsRefresh = true; }
+      } finally {
+        state.busy = false; renderVerificationList(); renderVerificationDecision(); renderVerificationSettings();
+      }
+      if (saved) await refreshMemoryVerification({ completedNotice: body.action === "unsure" ? "已暂缓，记录移至“已暂缓”。" : "已处理，记录移至“已处理”。" });
+    }
+
+    async function reviewMemoryVerification() {
+      const state = verificationState, item = verificationSelected();
+      if (!item || state.busy || state.settingsBusy || state.loading || state.error || !["pending", "deferred"].includes(item.status)) return;
+      const draft = verificationDraft(item);
+      if (draft.needsRefresh || item.revision == null) return;
+      if (item.stale !== true) {
+        draft.revision = item.revision; draft.baseRevision = item.revision; draft.conflict = false;
+        renderVerificationDecision(); return;
+      }
+      const key = verificationKey(item), expectedRevision = item.revision;
+      state.busy = true; state.reviewing = true;
+      renderVerificationList(); renderVerificationDecision(); renderVerificationSettings();
+      try {
+        const result = await sensitiveApi("/api/memory/verification/review", "POST", { conversationId: item.conversationId, caseId: item.id, expectedRevision });
+        const reviewed = result.case;
+        if (result.ok !== true || !reviewed || verificationKey(reviewed) !== key || reviewed.subjectUserId !== item.subjectUserId || reviewed.revision == null || reviewed.stale !== false || !["pending", "deferred"].includes(reviewed.status)) throw new Error(result.error || "复核结果不完整或证据仍已过期");
+        ++state.request;
+        state.cases = state.cases.map(current => verificationKey(current) === key ? reviewed : current);
+        draft.revision = reviewed.revision; draft.baseRevision = reviewed.revision; draft.conflict = false; draft.needsRefresh = false;
+        if (state.selected === key) renderVerificationEvidence(reviewed);
+        $("verificationState").textContent = "复核已保存；处理草稿保留。请再次确认处理，不会自动提交决定。";
+      } catch (error) {
+        draft.conflict = true; draft.needsRefresh = true;
+        $("verificationState").textContent = `复核失败：${error.message}。选择和草稿保留；请刷新并重新核对，不会自动重试。`;
+      } finally {
+        state.busy = false; state.reviewing = false;
+        renderVerificationList(); renderVerificationDecision(); renderVerificationSettings();
+      }
+    }
+
+    function collectVerificationSettings() {
+      const ids = text => [...new Set(text.split(/[\s,，]+/).filter(Boolean))];
+      const admins = ids($("verificationAdmins").value);
+      if (admins.some(id => !/^\d{5,20}$/.test(id))) throw new Error("管理员 QQ 须为 5–20 位数字，每行一个");
+      const object = (id, label) => {
+        let value; try { value = JSON.parse($(id).value || "{}"); } catch { throw new Error(`${label}必须是有效 JSON 对象`); }
+        if (!value || Array.isArray(value) || typeof value !== "object" || Object.keys(value).some(key => ["__proto__", "constructor", "prototype"].includes(key))) throw new Error(`${label}必须是 JSON 对象`);
+        return value;
+      };
+      const groupAdmins = object("verificationGroupAdmins", "按群管理员");
+      if (Object.entries(groupAdmins).some(([group, values]) => !/^\d{5,20}$/.test(group) || !Array.isArray(values) || values.some(id => !/^\d{5,20}$/.test(String(id))))) throw new Error("按群管理员须为原始数字群号到 QQ 数组的映射，不带 group: 前缀");
+      const accounts = object("verificationAccounts", "通知账号映射");
+      const accountId = value => typeof value === "string" && value.length > 0 && value.length <= 256 && !/\s/.test(value);
+      if (Object.entries(accounts).some(([key, value]) => !accountId(key) || (Array.isArray(value) ? value.some(id => !accountId(id)) : !accountId(value)))) throw new Error("通知账号映射的值须为账号 ID 或账号 ID 数组");
+      const mode = $("verificationMode").value;
+      if (!["off", "observe", "notify"].includes(mode)) throw new Error("请选择有效运行方式");
+      if (mode === "notify" && !admins.length && !Object.values(groupAdmins).some(values => values.length)) throw new Error("通知前必须明确填写至少一位管理员 QQ");
+      const patch = { enabled: mode !== "off", shadowMode: mode !== "notify", adminUserIds: admins, groupAdminUserIds: groupAdmins, notificationAccountIds: accounts };
+      for (const [id, key] of [["verificationDailyLimit", "perGroupDailyLimit"], ["verificationCooldown", "cooldownMs"], ["verificationDeferAfter", "deferAfterMs"]]) {
+        const value = $(id).value.trim(), number = Number(value);
+        if (!value || !Number.isSafeInteger(number) || number < 0 || number > (key === "perGroupDailyLimit" ? 1000 : 31536000000)) throw new Error("每日上限须为 0–1000；等待时间须为 0–31536000000 毫秒的整数");
+        patch[key] = number;
+      }
+      return patch;
+    }
+
+    async function saveVerificationSettings() {
+      const state = verificationState;
+      if (!state.settings || !state.settingsDirty || state.settingsBusy || state.busy || state.loading || state.error || state.settingsConflict || state.configRevision == null) return;
+      let patch;
+      try { patch = collectVerificationSettings(); } catch (error) { $("verificationSettingsState").textContent = `未保存：${error.message}。草稿保留。`; return; }
+      const version = state.settingsVersion, expectedRevision = state.configRevision;
+      state.settingsBusy = true; renderVerificationSettings(); renderVerificationList(); renderVerificationDecision();
+      try {
+        const result = await sensitiveApi("/api/config", "PATCH", { expectedRevision, memory: { verification: patch, learning: { enabled: $("verificationLearningEnabled").checked } } });
+        if (result.ok !== true) throw new Error(result.error || "设置保存未确认成功");
+        ++state.request;
+        if (state.settingsVersion === version) state.settingsDirty = false;
+        // Do not replace cfg or other panes with a delayed whole-config response.
+        // The shared API helper invalidates registry reads; our next GET is authoritative.
+        $("verificationSettingsState").textContent = "核实设置已保存；未发送任何测试消息。";
+      } catch (error) {
+        state.settingsConflict = true; state.settingsNeedsRefresh = true;
+        $("verificationSettingsState").textContent = `保存失败：${error.message}。草稿保留；请刷新并核对配置${error.status === 409 ? "修订冲突" : "与实际保存结果"}。不会自动重试。`;
+      } finally { state.settingsBusy = false; renderVerificationSettings(); renderVerificationList(); renderVerificationDecision(); }
+      if (!state.settingsConflict) await refreshMemoryVerification();
+    }
+
+    function wireMemoryVerification() {
+      $("verificationRefresh").addEventListener("click", refreshMemoryVerification);
+      $("verificationPrevious").addEventListener("click", () => {
+        const state = verificationState;
+        if (state.pagination && !state.loading && !state.error) return refreshMemoryVerification({ offset: Math.max(0, state.pagination.offset - state.pagination.limit) });
+      });
+      $("verificationNext").addEventListener("click", () => {
+        const state = verificationState;
+        if (state.pagination?.hasMore && !state.loading && !state.error) return refreshMemoryVerification({ offset: state.pagination.nextOffset });
+      });
+      for (const id of ["verificationGroup", "verificationStatus"]) $(id).addEventListener("change", refreshMemoryVerification);
+      $("verificationPerson").addEventListener("input", renderVerificationList);
+      for (const id of ["verificationAction", "verificationCondition"]) $(id).addEventListener(id === "verificationAction" ? "change" : "input", () => {
+        const item = verificationSelected(); if (!item || verificationState.busy) return;
+        const draft = verificationDraft(item); draft.action = $("verificationAction").value; draft.condition = $("verificationCondition").value; renderVerificationDecision();
+      });
+      $("verificationReview").addEventListener("click", reviewMemoryVerification);
+      $("verificationSubmit").addEventListener("click", resolveMemoryVerification);
+      $("verificationSettingsFields").addEventListener("input", () => {
+        verificationState.settingsDirty = true; verificationState.settingsVersion++;
+        $("verificationSettingsState").textContent = "本区有未保存设置；刷新和切页保留草稿。仅“保存核实设置”提交本区修改。"; renderVerificationSettings();
+      });
+      $("verificationSettingsReview").addEventListener("click", () => {
+        const state = verificationState; if (state.settingsNeedsRefresh || state.loading || state.settingsBusy || state.error) return;
+        state.settingsConflict = false; $("verificationSettingsState").textContent = "已核对最新远端设置；本地草稿仍待保存。"; renderVerificationSettings();
+      });
+      $("verificationSettingsSave").addEventListener("click", saveVerificationSettings);
+      window.addEventListener("beforeunload", event => {
+        if (verificationState.settingsDirty || verificationState.settingsBusy || verificationState.busy || [...verificationState.drafts.values()].some(draft => draft.action || draft.condition)) { event.preventDefault(); event.returnValue = ""; }
+      });
     }
 
     async function rebuildMemoryIntegrity(apply = false) {
@@ -4174,6 +4552,7 @@
       if (name === "backup") refreshDesktopBackup().catch((error) => toast(error.message, "bad"));
       if (name === "voice") refreshVoiceSecretStatus().catch(() => {});
       if (name === "automation") refreshRoutines().catch(() => {});
+      if (name === "memory") refreshMemoryVerification();
       if (name === "api-center" && (!apiCenterDraft || (!apiCenterDirty && Date.now() - apiCenterLastLoaded > 15000))) refreshApiCenter().catch((error) => { $("apiCenterState").textContent = `加载失败：${error.message}`; });
     }
 
@@ -4282,7 +4661,7 @@
       for (const btn of document.querySelectorAll("[data-tabs] [data-tab]")) btn.addEventListener("click", () => switchTab(btn.closest("[data-tabs]").dataset.tabs, btn.dataset.tab));
       for (const btn of document.querySelectorAll("[data-jump]")) btn.addEventListener("click", () => switchPage(btn.dataset.jump));
       for (const el of document.querySelectorAll("input, textarea, select")) {
-        if (el.closest("#page-api-center, #routinePanel") || el.matches("[data-console-theme]")) continue;
+        if (el.closest("#page-api-center, #routinePanel, #memoryVerification") || el.matches("[data-console-theme]")) continue;
         if (el.id === "automationAccountSelect" || el.id === "memorySearch" || el.id === "memoryDetailSearch" || el.id === "archiveSearch" || el.id === "send.groupSelect" || el.id === "modelPreset" || el.id === "aiProfileSelect" || el.id === "styleProfileSelect" || el.id === "promptAccountSelect" || el.id === "voiceSecretInput" || el.id.startsWith("send.") || el.id.startsWith("backup") || el.id.startsWith("desktop")) continue;
         el.addEventListener("input", markDirty);
         el.addEventListener("change", markDirty);
@@ -5543,6 +5922,7 @@
 
     mountAdminPanels();
     wireEvents();
+    wireMemoryVerification();
     mountAccountRegistry();
     refreshAll().catch(async (error) => {
       showFatalError(`桥接暂不可用：${error.message}。备份与迁移页仍可用于启动或恢复服务。`);

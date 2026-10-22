@@ -246,6 +246,18 @@ If implementing a full memory rebuild, provide a dry-run mode before writing bac
 
 Canonical memory is additive. Keep legacy fields intact and prefer `canonicalMemory.entries` only when entries are active, sufficiently confident, and bound to the same QQ user ID. Corrections must target memory IDs; never remove memories using fuzzy substring matching.
 
+Memory verification/learning contracts are in `docs/MEMORY-VERIFICATION.md`.
+`memory.verification` defaults to observation-only: no private sends or new
+verification holds until explicitly enabled. Group reviewers are explicit QQ
+IDs, not every QQ group admin; private chat evidence must not be forwarded.
+Resolve/review decisions require an authenticated actor and the exact current
+case revision inside the repository transaction. Terminal originals stay intact;
+new administrator-backed versions do not become the subject's self-evidence.
+Notifications claim durably before wire and never replay uncertain attempts.
+Old configs opt into coherent extraction via `memory.learning.enabled`; retain
+original IDs/times and never ACK sources omitted from a model's pinned batch.
+Run `npm run test:memory-verification` along with affected memory/account tests.
+
 Core source upgrade contracts and outstanding acceptance gates are tracked in
 `docs/CORE-UPGRADE.md`. The memory repository is the sole cooperating writer;
 read-only tools must not acquire its lock. AI extraction claims each batch

@@ -299,6 +299,7 @@ setTimeout(()=>process.exit(4),55000);
   config.observability = { ...config.observability, logIncomingMessages: true, logSkippedMessages: false };
   config.trigger = { ...config.trigger, activeReply: false, replyToKeywords: false };
   config.memory = { ...config.memory, enabled: true,
+    learning: { enabled: false }, // Keep the established latency workload identical across versions.
     aiExtraction: { ...config.memory.aiExtraction, enabled: true, everyMessages: 4 } };
   config.accounts = { version: 2, topology: "function_split", failoverGroups: [],
     diagnostics: { peerPingEnabled: false, probeIntervalMs: 600000 }, items: [{ id: "fixture", qq: "91001",

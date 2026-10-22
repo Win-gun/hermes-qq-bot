@@ -503,10 +503,12 @@ function proxy(req, res) {
   if (!child || !childPort) return reply(res, 503, { ok: false, error: "bridge_stopped" });
   const headers = { ...req.headers, host: `127.0.0.1:${childPort}` };
   // The public host validates the browser Origin before proxying. The bridge
-  // independently checks its own loopback origin for credential mutations.
+  // independently checks its own loopback origin for protected mutations.
   if (req.headers.origin && (/^\/api\/voice\/(?:credential|test)(?:\?|$)/.test(req.url || "")
     || /^\/api\/api-center(?:\/|\?|$)/.test(req.url || "")
     || /^\/api\/(?:accounts|account-groups|tasks)(?:\/|\?|$)/.test(req.url || "")
+    || /^\/api\/config(?:\?|$)/.test(req.url || "")
+    || /^\/api\/memory\/verification(?:\/|\?|$)/.test(req.url || "")
     || /^\/api\/automation\/(?:routines|accounts(?:\/[^/?]+)?)(?:\?|$)/.test(req.url || ""))) {
     headers.origin = `http://127.0.0.1:${childPort}`;
   }
