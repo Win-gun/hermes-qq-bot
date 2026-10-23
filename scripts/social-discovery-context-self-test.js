@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { discoveryMaterialPrompt, discoveryUsedIds } from "../src/social-discovery-context.js";
+import { discoveryMaterialPrompt, discoveryUsedIds, discoveryPlanEvidence } from "../src/social-discovery-context.js";
 import { sanitizeChatReply } from "../src/reply-safety.js";
 import { createSocialAgentRuntime } from "../src/social-agent-runtime.js";
 
@@ -15,6 +15,11 @@ assert.deepEqual(discoveryUsedIds("摄像头把人拍成了表情包", materials
 assert.equal(sanitizeChatReply("回复 [[DISCOVERY_USED:discovery:one]]"), "回复");
 assert.equal(sanitizeChatReply("回复 [[DISCOVERY_USED:\ndiscovery:one]]"), "回复");
 assert.equal(sanitizeChatReply("回复 [[DISCOVERY_USED:unfinished"), "回复");
+const rawBubbles = ["普通开场白", "材料内容 [[DISCOVERY_USED:discovery:one]]"];
+const plan = { messages: rawBubbles.map(content => ({ type: "text", content: sanitizeChatReply(content) })) };
+assert.deepEqual(discoveryPlanEvidence(rawBubbles, plan, materials), [[], ["discovery:one"]]);
+assert.deepEqual(discoveryPlanEvidence(JSON.stringify({ messages: rawBubbles.map(content => ({ type: "text", content })) }), plan, materials), [[], ["discovery:one"]]);
+assert.deepEqual(discoveryPlanEvidence(rawBubbles, { messages: [{ type: "text", content: "已被替换的输出" }] }, materials), [[]]);
 
 // Trusted background wakes reuse the actual social planner, not a second reply
 // queue or a fabricated human message. They cannot ACK or modify old evidence.

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { socialAgentConfig } from "./social-agent-state.js";
 import { validateDiscoveryPolicy } from "./social-discovery-state.js";
+import { validateSocialExperiencePolicy } from "./social-experience-policy.js";
 
 // Validate writes before normalizing. In particular, never coerce enable flags
 // or silently broaden a malformed scope into a working autonomous policy.
@@ -25,9 +26,10 @@ const ID = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
 const RESERVED_IDS = new Set([...Object.getOwnPropertyNames(Object.prototype), "prototype"]);
 export const ACCOUNT_FEATURES = ["chat", "task", "proactive", "automation", "webSearch", "vision", "asr", "learning"];
 export const ACCOUNT_SEND_TYPES = ["text", "image", "record", "video", "file"];
-export const ACCOUNT_POLICY_KEYS = ["displayName", "selfName", "style", "styleProfileId", "promptOverride", "features", "sendTypes", "scope", "modelBindings", "voice", "behaviorMode", "socialAgent"];
+export const ACCOUNT_POLICY_KEYS = ["displayName", "selfName", "style", "styleProfileId", "promptOverride", "features", "sendTypes", "scope", "modelBindings", "voice", "behaviorMode", "socialAgent", "socialExperience"];
 const ITEM_KEYS = new Set(["id", "qq", "displayName", "selfName", "style", "styleProfileId", "promptOverride", "enabled", "protocolEnabled", "archived", "managed", "protocol", "onebotPath", "onebotWsUrl", "napcatContainer", "protocolContainer", "webuiPort", "noVncPort", "vncPort", "snowlumaImage", "snowlumaVolumes", "behaviorMode", "features", "sendTypes", "scope", "modelBindings", "voice"]);
 ITEM_KEYS.add("socialAgent");
+ITEM_KEYS.add("socialExperience");
 const bools = (keys, values, fallback) => Object.fromEntries(keys.map((key) => [key, values?.[key] ?? fallback]));
 const featureDefaults = (config, mode = "all") => ({ chat: mode !== "task", task: mode !== "chat",
   proactive: config.proactive?.enabled !== false, automation: config.automation?.enabled === true,
@@ -87,7 +89,8 @@ function normalizeItem(raw, config, index, legacy = false) {
     scope: { groups: true, private: true, groupMode: "all", groupIds: [], ...(raw.scope || {}) },
     modelBindings: { chat: "", task: "", vision: "", asr: "", tts: "", search: "", ...(raw.modelBindings || {}) },
     voice: { mode: "inherit", preset: "", ...(raw.voice || {}) },
-    socialAgent: validateSocialAgentPolicy(raw.socialAgent ?? {})
+    socialAgent: validateSocialAgentPolicy(raw.socialAgent ?? {}),
+    ...(raw.socialExperience === undefined ? {} : { socialExperience: validateSocialExperiencePolicy(raw.socialExperience) })
   };
 }
 
@@ -227,6 +230,7 @@ export function registryConfig(config = {}, { strict = false } = {}) {
 // Explicit canonical style wins if a client supplies both representations.
 export function mergeAccountPatch(account, patch, config = {}) {
   if (patch?.socialAgent !== undefined) validateSocialAgentPolicy(patch.socialAgent);
+  if (patch?.socialExperience !== undefined) validateSocialExperiencePolicy(patch.socialExperience);
   if (!object(patch) || Object.keys(patch).some((key) => !ITEM_KEYS.has(key)) || (patch.id && patch.id !== account.id)) throw new Error("账号设置字段无效");
   for (const key of ["enabled", "protocolEnabled", "archived", "managed"]) {
     if (patch[key] !== undefined && typeof patch[key] !== "boolean") throw new Error(`账号 ${key} 必须是开关`);

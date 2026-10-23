@@ -13,9 +13,14 @@ import { BackgroundMemoryRepository } from "./memory-repository-service.js";
 import { MemoryRuntime } from "./memory-runtime.js";
 import { MemoryIntake } from "./memory-intake.js";
 import { socialAgentConfig, socialExperienceId, ingestSocialMessage, getSocialSnapshot, markSocialRead, applySocialContinuity, appendSocialExperience, socialContinuityPrompt, setSocialConsent, socialContactAllowed, claimSocialContact, settleSocialContact } from "./social-agent-state.js";
+import { socialExperienceFor } from "./social-experience-policy.js";
+import { evaluateConversationTurn } from "./conversation-turn-manager.js";
+import { parseReplyPlan, replyPlanPrompt, fromSocialMessages } from "./reply-plan.js";
+import { executeReplyPlan } from "./expression-renderer.js";
+import { ExpressionDiagnostics } from "./social-expression-diagnostics.js";
 import { createSocialAgentRuntime } from "./social-agent-runtime.js";
 import { createSocialDiscoveryRuntime } from "./social-discovery-runtime.js";
-import { discoveryMaterialPrompt, discoveryUsedIds } from "./social-discovery-context.js";
+import { discoveryMaterialPrompt, discoveryUsedIds, discoveryPlanEvidence } from "./social-discovery-context.js";
 import { normalizeDiscoveryPolicy, validateDiscoveryPolicy, discoveryWindowAllowed, discoveryStatus,
   listDiscoveryItems, retrieveDiscoveryItems, feedbackDiscoveryItem, markDiscoveryUsed,
   beginDiscoveryRound, claimDiscoveryShare, settleDiscoveryShare, recoverDiscoveryState } from "./social-discovery-state.js";
@@ -205,6 +210,7 @@ const dockerRuntime = {
 // Per-user private message cooldown tracker (userId -> last send timestamp)
 const privateMessageCooldowns = new Map();
 const messageDebounceRuntime = new Map();
+const expressionDiagnostics = new ExpressionDiagnostics();
 const socialDecisionRuntime = {
   recent: []
 };
@@ -1487,6 +1493,7 @@ function updateBotSelfMemoryFromMessage(memory, groupId, text, config, meta = {}
     at: now(),
     accountId: config.__activeAccountId || config.accounts?.primary?.id || "primary",
     source: meta.source || "bot",
+    ...(meta.messageId != null ? { messageId: String(meta.messageId), messageIds: [String(meta.messageId)] } : {}),
     replyToSender: meta.replyToSender || ""
   };
   bot.recentMessages.push(item);
@@ -4324,7 +4331,7 @@ function archiveBotReply({ event, config, memory, text = "", meta: replyMeta = {
     const record = {
       type: "bot_reply",
       conversationId: archiveMeta.conversationId,
-      messageId: "",
+      messageId: replyMeta.messageId == null ? "" : asStringId(replyMeta.messageId),
       messageType: event?.message_type || "",
       time: new Date(sentAtMs).toISOString(),
       sentAt: new Date(sentAtMs).toISOString(),
@@ -5754,6 +5761,47 @@ function sendGroupMessage(ws, event, text, config, { reply = false } = {}) {
   return oneBotSend(ws, "send_group_msg", { group_id: event.group_id, message }, binding);
 }
 
+async function deliverChatExpression({ plan, job, signal, config, event, ws, binding, request, onConfirmed }) {
+  const controller = new AbortController();
+  const abort = () => controller.abort(signal.reason);
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  job.expressionSending = true;
+  job.stopRemaining = reason => controller.abort(reason);
+  const policy = socialExperienceFor(config, event.message_type === "private" ? `private:${event.user_id}` : String(event.group_id));
+  const guard = () => {
+    if (controller.signal.aborted || job.dropped || (binding.isCurrent && !binding.isCurrent()))
+      throw new Error("EXPRESSION_CANCELLED");
+  };
+  try {
+    const outcome = await executeReplyPlan(plan, {
+      signal: controller.signal, beforeEach: guard,
+      minIntervalMs: policy.expression.minIntervalMs, maxIntervalMs: policy.expression.maxIntervalMs,
+      sendText: async (content, { quoteId }) => {
+        const message = [
+          ...(quoteId ? [{ type: "reply", data: { id: quoteId } }] : []),
+          { type: "text", data: { text: content } }
+        ];
+        const isPrivate = event.message_type === "private";
+        const ack = await request(ws, isPrivate ? "send_private_msg" : "send_group_msg", {
+          [isPrivate ? "user_id" : "group_id"]: isPrivate ? event.user_id : event.group_id, message
+        }, { timeoutMs: 20000, binding: { ...binding, isCurrent: () => !controller.signal.aborted && (!binding.isCurrent || binding.isCurrent()) } });
+        if (ack?.message_id == null) return {};
+        return { messageId: String(ack.message_id) };
+      },
+      onReceipt: async receipt => { if (receipt.status === "sent") await onConfirmed(receipt); }
+    });
+    expressionDiagnostics.record("plans", config.__runtimeContext?.logicalBotId || config.__activeAccountId,
+      { confirmed: outcome.receipts.filter(row => row.status === "sent").length,
+        messageCount: plan.messages.length, partial: outcome.partial, uncertain: outcome.uncertain });
+    return { ...outcome, sent: outcome.sent > 0 };
+  } finally {
+    signal.removeEventListener("abort", abort);
+    job.expressionSending = false;
+    delete job.stopRemaining;
+  }
+}
+
 function splitLongMessage(text, maxLength = 1200) {
   const max = Math.max(200, Number(maxLength || 1200));
   const chunks = [];
@@ -6223,14 +6271,25 @@ async function enqueueDebouncedMessage({ event, conversationId, senderId, accoun
   const cfg = messageDebounceConfig(config);
   const timing = messageTiming(event, { receivedAt: event?.__receivedAt || Date.now() });
   const singleMessage = { event, text, rawText, senderName, at: timing.sentAtMs, ...timing };
-  if (!cfg.enabled) return { skip: false, event, text, rawText, messages: [singleMessage], count: 1, reason: "disabled" };
-  const decision = shouldWaitForMoreInput({ text, mentioned, isPrivate, config });
-  if (!decision.wait) return { skip: false, event, text, rawText, messages: [singleMessage], count: 1, reason: decision.reason };
+  const experience = config.socialExperience?.enabled === true ? socialExperienceFor(config, conversationId) : null;
+  const adaptiveEnabled = experience?.active && experience.turn.enabled && !experience.shadowMode;
+  if (!cfg.enabled && !adaptiveEnabled) return { skip: false, event, text, rawText, messages: [singleMessage], count: 1, reason: "disabled" };
+  let decision = shouldWaitForMoreInput({ text, mentioned, isPrivate, config });
+  if (!decision.wait && !adaptiveEnabled) return { skip: false, event, text, rawText, messages: [singleMessage], count: 1, reason: decision.reason };
   const context = config.__runtimeContext;
   const ownerId = context?.logicalBotId || logicalBotId(config, accountId) || `account:${accountId || "unknown"}`;
   const key = JSON.stringify([ownerId, conversationId || "unknown", senderId || "unknown", context?.routeEpoch || 0, context?.sessionId || ""]);
   const now = Date.now();
   const existing = messageDebounceRuntime.get(key) || { seq: 0, messages: [], createdAt: now };
+  if (experience?.active && experience.turn.enabled) {
+    const turn = evaluateConversationTurn({ text, mentioned, isPrivate,
+      elapsedMs: 0, messageCount: existing.messages.length + 1,
+      gaps: existing.messages.length ? [Math.max(0, now - existing.updatedAt)] : [],
+      sentAtMs: existing.createdAt, now, policy: experience });
+    expressionDiagnostics.record("turns", ownerId, { waitMs: turn.suggestedWaitMs,
+      messageCount: existing.messages.length + 1, reason: turn.reason, shadow: experience.shadowMode });
+    if (!experience.shadowMode) decision = { wait: true, waitMs: turn.suggestedWaitMs, reason: turn.reason };
+  }
   const seq = existing.seq + 1;
   const messages = [
     ...existing.messages,
@@ -6247,7 +6306,10 @@ async function enqueueDebouncedMessage({ event, conversationId, senderId, accoun
     reason: decision.reason
   };
   messageDebounceRuntime.set(key, pending);
-  const waitMs = Math.min(cfg.maxWaitMs, Math.max(cfg.minWaitMs, Number(decision.waitMs || cfg.baseWaitMs)));
+  const adaptive = experience?.active && experience.turn.enabled && !experience.shadowMode;
+  const waitMs = adaptive ? Math.max(0, Math.min(experience.turn.maxWaitMs,
+    experience.turn.maxTurnMs - Math.max(0, now - existing.createdAt), Number(decision.waitMs ?? 0)))
+    : Math.min(cfg.maxWaitMs, Math.max(cfg.minWaitMs, Number(decision.waitMs || cfg.baseWaitMs)));
   await sleep(waitMs);
   const latest = messageDebounceRuntime.get(key);
   if (!latest || latest.seq !== seq) return { skip: true, reason: "superseded" };
@@ -9393,6 +9455,40 @@ async function main() {
           const delivery = replyDeliveryConfig(selected, job, signal, revision, () => !intent.signal.aborted && socialCurrent(ctx));
           const text = intent.messages.map(item => sanitizeChatReply(item)).join("\n");
           if (!text || text === "__SKIP__") throw new Error("SOCIAL_EMPTY_REPLY");
+          const experience = selected.socialExperience?.enabled === true ? socialExperienceFor(selected, scope.internalId) : null;
+          if (experience?.active && experience.expression.enabled && !experience.shadowMode) {
+            const messages = intent.messages.map(item => sanitizeChatReply(item));
+            const plan = fromSocialMessages(messages.length > experience.expression.maxMessages ? [messages.join("\n")] : messages,
+              { maxMessages: experience.expression.maxMessages, direct: false });
+            const original = intent.messages.length > experience.expression.maxMessages ? [intent.messages.join("\n")] : intent.messages;
+            const evidence = discoveryPlanEvidence(original, plan, discoveryItemsFor(selected, text));
+            const bubbleReceiptIds = [];
+            const outcome = await deliverChatExpression({ plan, job, signal, config: selected, event: scope.event,
+              ws: scope.ws, request: oneBotRequest, binding: { ...oneBotBinding(scope.ws, scope.accountId),
+                executionContext: selected.__runtimeContext, isCurrent: delivery.__deliveryGuard, onSendStarted: delivery.__deliveryStarted },
+              onConfirmed: async receipt => {
+                const receiptId = `${discoveryClaimId || `social:${job.id}`}:bubble:${receipt.messageId}`;
+                if (evidence[receipt.index]?.length) bubbleReceiptIds.push(receiptId);
+                archiveBotReply({ event: scope.event, config: selected, memory, text: receipt.content,
+                  meta: { source: "social-expression", messageId: receipt.messageId, user_id: accountById(config, scope.accountId)?.qq || "bot", replyToUserId: scope.userId } });
+                await recordBotMessage({ historyByGroup, lastBotMessageByGroup, groupId: scope.internalId, text: receipt.content,
+                  config: selected, memory, meta: { source: "social-expression", messageId: receipt.messageId,
+                    user_id: accountById(config, scope.accountId)?.qq || "bot", replyToUserId: scope.userId,
+                    discoveryUsedIds: evidence[receipt.index] || [], discoveryReceiptId: receiptId } });
+              } });
+            if (!outcome.sent) throw new Error("SOCIAL_SEND_UNCONFIRMED");
+            if (discoveryClaimId) await mutateMemory(memory, draft => {
+              const args = { logicalId: ctx.logicalId, claimId: discoveryClaimId, now: Date.now() };
+              if (!outcome.partial && !outcome.uncertain) {
+                const settled = settleDiscoveryShare(draft, { ...args, status: "sent", receiptIds: bubbleReceiptIds });
+                if (settled.ok) return settled;
+              }
+              return settleDiscoveryShare(draft, { ...args, status: "uncertain" });
+            });
+            requireSocialCurrent(ctx, intent.signal);
+            if (!scope.discoveryWakeId) await socialAck(ctx, { ...intent, seenSeq });
+            return outcome;
+          }
           if (!await sendGroupMessage(scope.ws, scope.event, text, delivery, { reply: false })) throw new Error("SOCIAL_SEND_UNCONFIRMED");
           if (discoveryClaimId) await mutateMemory(memory, draft => settleDiscoveryShare(draft, { logicalId: ctx.logicalId, claimId: discoveryClaimId, status: "sent", now: Date.now() }));
           requireSocialCurrent(ctx, intent.signal);
@@ -12508,6 +12604,8 @@ async function main() {
           return replyJson(200, publicConfig(config));
         }
 
+        if (req.method === "GET" && url.pathname === "/api/social-agent/expression-status")
+          return replyJson(200, { ok: true, ...expressionDiagnostics.snapshot() });
         const discoveryMatch = url.pathname.match(/^\/api\/social-agent\/accounts\/([^/]+)\/discovery(?:\/(run|cancel|items)(?:\/([^/]+)\/feedback)?)?$/);
         if (discoveryMatch) {
           const expectedConfig = configRevision, id = decodeURIComponent(discoveryMatch[1]);
@@ -14617,7 +14715,7 @@ async function main() {
             const webSearchBuilt = effectiveWebSearch ? await buildWebSearchContext(effectiveSearchDecision, replyConfig) : { text: "", result: null };
             if (signal.aborted || Number(job.contextRevision || 0) !== revision || accountExecutionRevision(generationAccountId, groupId) !== generationConfigRevision) return { retry: true };
             const webSearchContext = webSearchBuilt.text || "";
-            const prompt = buildPrompt({
+            let prompt = buildPrompt({
               config: replyConfig,
               history: latestHistory,
               current: effectiveCurrent,
@@ -14628,12 +14726,26 @@ async function main() {
               archiveContext: archiveContext.text || "",
               learningPrompt: learningPromptForConversation(groupId, replyConfig)
             });
+            const experience = replyConfig.socialExperience?.enabled === true ? socialExperienceFor(replyConfig, groupId) : null;
+            const quoteIds = [...new Set([effectiveEvent.message_id, ...latestHistory.flatMap(item => [item.messageId, ...(item.messageIds || [])])]
+              .filter(id => id != null).map(String))].filter(id => /^-?[1-9]\d{0,19}$/.test(id)).slice(-128);
+            if (experience?.active && experience.expression.enabled && !experience.shadowMode)
+              prompt += `\n${replyPlanPrompt({ maxMessages: experience.expression.maxMessages, direct: job.direct || isPrivate,
+                allowedQuoteIds: experience.expression.allowQuotes ? quoteIds : [] })}`;
             const rawResponse = await callHermes(prompt, replyConfig, { signal });
             const usedDiscoveryIds = discoveryUsedIds(rawResponse, discoveryItemsFor(replyConfig, effectiveCurrent.text,
               /(?:解释|复述|再说|再讲|什么意思)/.test(effectiveCurrent.text || "")));
             if (!oneBotBindingCurrent(sendWs, inboundBinding)) return { sent: false, skipped: true };
             const learningQuestion = /^\s*__LEARN__/.test(rawResponse) && Boolean(learningPromptForConversation(groupId, replyConfig));
-            const response = trimForGroup(String(rawResponse || "").replace(/^\s*__LEARN__\s*/, ""), replyConfig);
+            const expressionPlan = experience?.active && experience.expression.enabled && !experience.shadowMode
+              ? parseReplyPlan(String(rawResponse || "").replace(/^\s*__LEARN__\s*/, ""), { maxMessages: experience.expression.maxMessages, direct: job.direct || isPrivate,
+                allowedQuoteIds: experience.expression.allowQuotes ? quoteIds : [] }) : null;
+            const perBubbleDiscovery = expressionPlan ? discoveryPlanEvidence(rawResponse, expressionPlan,
+              discoveryItemsFor(replyConfig, effectiveCurrent.text, /(?:解释|复述|再说|再讲|什么意思)/.test(effectiveCurrent.text || ""))) : [];
+            if (experience?.active && experience.shadowMode) expressionDiagnostics.record("plans", job.logicalBotId,
+              { shadow: true, messageCount: 1 });
+            const response = expressionPlan ? expressionPlan.messages.map(item => item.content).join("\n")
+              : trimForGroup(String(rawResponse || "").replace(/^\s*__LEARN__\s*/, ""), replyConfig);
             if (signal.aborted || Number(job.contextRevision || 0) !== revision || accountExecutionRevision(generationAccountId, groupId) !== generationConfigRevision) return { retry: true };
             if (isQuiet(memory, groupId, replyConfig) || sendWs.readyState !== 1) return { sent: false, skipped: true };
             if (response === "__SKIP__" && config.reply?.allowSkip !== false) return { sent: false, skipped: true };
@@ -14697,6 +14809,25 @@ async function main() {
             }
             if (!voiceDelivered) {
               if (signal.aborted || Number(job.contextRevision || 0) !== revision || accountExecutionRevision(generationAccountId, groupId) !== generationConfigRevision) return { retry: true };
+              if (expressionPlan) {
+                const outcome = await deliverChatExpression({ plan: expressionPlan, job, signal, config: replyConfig,
+                  event: effectiveEvent, ws: sendWs, binding: deliveryBinding, request: oneBotRequest,
+                  onConfirmed: async receipt => {
+                    archiveBotReply({ event: effectiveEvent, config: replyConfig, memory, text: receipt.content,
+                      meta: { source: "expression", user_id: chatAccount.qq || "bot", replyToUserId: senderId,
+                        messageId: receipt.messageId, expressionIndex: receipt.index, coveredMessageIds: job.messageIds } });
+                    await recordBotMessage({ historyByGroup, lastBotMessageByGroup, groupId, text: receipt.content,
+                      config: replyConfig, memory, meta: { source: "expression", user_id: chatAccount.qq || "bot",
+                        replyToUserId: senderId, replyToSender: effectiveSenderName, messageId: receipt.messageId,
+                        coveredMessageIds: job.messageIds, discoveryUsedIds: perBubbleDiscovery[receipt.index] || [],
+                        discoveryReceiptId: `expression:${job.id}:bubble:${receipt.messageId}` } });
+                  } });
+                if (outcome.sent && learningQuestion) await markLearningQuestion(groupId);
+                if (outcome.sent && effectiveWebSearch) archiveWebSearchResult({ event: effectiveEvent, config, memory,
+                  decision: effectiveSearchDecision, searchResult: webSearchBuilt.result || {}, contextText: webSearchContext,
+                  usedConclusion: outcome.receipts.filter(row => row.status === "sent").map(row => row.content).join("\n") });
+                return { ...outcome, coveredMessageIds: job.messageIds };
+              }
               const sent = await sendGroupMessage(sendWs, effectiveEvent, response, deliveryConfig, { reply: job.direct || (job.mode === "implicit" && behaviorConfig.implicitReply?.replyToMessage !== false) });
               if (!sent) return { sent: false, skipped: true };
             }

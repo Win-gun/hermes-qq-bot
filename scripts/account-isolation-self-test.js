@@ -16,7 +16,12 @@ import { AccountRuntime, logicalBotId, botConversationKey, botControlRevision } 
 import { replyDeliveryConfig } from "../src/reply-execution.js";
 import { reconcileMemoryInPlace } from "../src/memory-state.js";
 import { socialAgentConfig } from "../src/social-agent-state.js";
-import { discoveryUsedIds } from "../src/social-discovery-context.js";
+import { discoveryUsedIds, discoveryPlanEvidence } from "../src/social-discovery-context.js";
+import { socialExperienceFor } from "../src/social-experience-policy.js";
+import { evaluateConversationTurn } from "../src/conversation-turn-manager.js";
+import { parseReplyPlan, replyPlanPrompt } from "../src/reply-plan.js";
+import { executeReplyPlan } from "../src/expression-renderer.js";
+import { ExpressionDiagnostics } from "../src/social-expression-diagnostics.js";
 
 // Read source only. Never import/start main(), open sockets, spawn a service,
 // read live config/state, or persist anything. The complete real message callback
@@ -97,7 +102,7 @@ const realFunctions = [
   "stableMessageFingerprint", "accountScopedInboundKey", "claimConversationMessage", "messageTiming", "extractReplyMessageIds",
   "messageDebounceConfig", "isLikelyIncompleteInput", "shouldWaitForMoreInput", "flushDebouncedMessage", "enqueueDebouncedMessage", "pendingDebouncedContext", "orderedHistory", "mergeReplyCurrents",
   "quietUntil", "isQuiet", "repairInvalidQuietUntil", "parseDurationMs", "formatDuration", "isGroupAdmin", "handleBotCommand", "handleMemoryVerificationCommand",
-  "sameLogicalAccount", "recordBotMessage", "lastBotMessageForAccount", "sendGroupMessage", "lastNonBotMessage", "lastNonBotMessagesSince", "scoreImplicitReplyAgainstBotMessage", "isMediaOnlyText"
+  "sameLogicalAccount", "recordBotMessage", "lastBotMessageForAccount", "sendGroupMessage", "deliverChatExpression", "lastNonBotMessage", "lastNonBotMessagesSince", "scoreImplicitReplyAgainstBotMessage", "isMediaOnlyText"
 ];
 
 function harness(config = fixtureConfig(), mutation = {}) {
@@ -112,6 +117,8 @@ function harness(config = fixtureConfig(), mutation = {}) {
   const forbidden = (name) => () => { throw new Error(`unmocked external boundary: ${name}`); };
   const context = vm.createContext({
     Date: FakeDate, structuredClone, randomBytes, AbortController,
+    socialExperienceFor, evaluateConversationTurn, parseReplyPlan, replyPlanPrompt, executeReplyPlan,
+    expressionDiagnostics: new ExpressionDiagnostics(),
     logicalBotId, botConversationKey, botControlRevision, replyDeliveryConfig,
     accountKernel: new AccountRuntime(config), kernelConfigRevision: 1, pendingReplyHandoffs: [],
     Math: Object.assign(Object.create(Math), { random: () => 0.5 }),
@@ -159,7 +166,7 @@ function harness(config = fixtureConfig(), mutation = {}) {
     // is disabled. Keep these boundaries account-owned, like the real runtime.
     discoveryLastHuman: new Map(), discoveryLastGroupEvent: new Map(),
     discoveryCancellations: [], discoveryRuntime: { cancel: owner => context.discoveryCancellations.push(owner) },
-    discoveryUsedIds, discoveryItemsFor: () => [], discoveryDeliveredProvider: async () => [],
+    discoveryUsedIds, discoveryPlanEvidence, discoveryItemsFor: () => [], discoveryDeliveredProvider: async () => [],
     taskRuntime: { get: () => null }, handleTaskControl: async () => false,
     replyCoordinator: { observeMessage: () => ({ absorbed: false }), dropSenderJobs: noop, enqueue: (job) => jobs.push(job),
       refreshLogicalBot: noop, invalidateLogicalBot: noop },
@@ -318,6 +325,54 @@ await test("human intake cancels discovery only for its logical account", async 
   check.equal(c.discoveryLastGroupEvent.size, 1, "private intake must not publish group discovery context");
   await h.emit(A, "peer bot fixture", { userId: QQ[B] });
   check.deepEqual([...c.discoveryCancellations], [alpha, beta], "peer bot events must not count as human intake");
+});
+
+await test("shared expression fastpath uses real policy/ACKs and stops a burst on quiet", async () => {
+  for (const quietAfterFirst of [false, true]) {
+    const cfg = fixtureConfig();
+    cfg.accounts.items.find(item => item.id === A).socialExperience = {
+      enabled: true, shadowMode: false, conversationIds: [`group:${G}`],
+      expression: { minIntervalMs: 0, maxIntervalMs: 0 }
+    };
+    const h = harness(cfg);
+    h.connect(A); h.connect(B);
+    const delivered = [];
+    h.c.archiveBotReply = row => delivered.push(row);
+    let calls = 0;
+    h.c.callHermes = async () => { calls++; return JSON.stringify({ version: 1, action: "reply", replyToMessageId: null,
+      messages: [{ type: "text", content: "第一句，保留完整链接 https://example.test/a?b=1" }, { type: "text", content: "第二句 👩‍💻" }] }); };
+    h.c.oneBotRequest = (ws, action, params, options) => ws.__hermesDispatch(action, params, () => {
+      h.sends.push({ accountId: ws.__hermesAccountId, action, params });
+      if (quietAfterFirst) h.c.groupSettings(h.c.memory, G, h.c.configForReplyAccount(h.c.accountById(h.config, A)), { write: true }).quietUntil = h.time() + 60000;
+      return Promise.resolve({ message_id: 200 + h.sends.length });
+    }, options.binding);
+    await h.emit(A, "fixture question?", { mentions: [A] });
+    const result = await h.execute();
+    check.equal(result.sent, true);
+    check.equal(calls, 1, "expression must not add a serial model call");
+    check.equal(h.sends.length, quietAfterFirst ? 1 : 2);
+    check.equal(result.partial, quietAfterFirst);
+    check.equal(delivered.length, h.sends.length, "archive only confirmed bubbles");
+    check.ok(h.sends.every(row => row.accountId === A && Array.isArray(row.params.message)));
+    check.equal(h.c.expressionDiagnostics.snapshot().plans, 1);
+  }
+});
+
+await test("unknown expression ACK is never promoted to delivery or memory", async () => {
+  const cfg = fixtureConfig();
+  cfg.accounts.items.find(item => item.id === A).socialExperience = { enabled: true, shadowMode: false, conversationIds: [`group:${G}`] };
+  const h = harness(cfg);
+  h.connect(A);
+  const delivered = [];
+  h.c.archiveBotReply = row => delivered.push(row);
+  h.c.callHermes = async () => "synthetic response";
+  h.c.oneBotRequest = async () => ({});
+  await h.emit(A, "fixture question?", { mentions: [A] });
+  const result = await h.execute();
+  check.equal(result.sent, false);
+  check.equal(result.uncertain, true);
+  check.equal(delivered.length, 0);
+  check.equal(h.c.lastBotMessageByGroup.size, 0);
 });
 
 await test("2 private diagnostic authenticity, freshness, replay, ACK race", async () => {

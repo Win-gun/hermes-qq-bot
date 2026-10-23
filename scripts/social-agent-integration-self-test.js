@@ -51,6 +51,7 @@ const model = http.createServer(async (req,res) => {
   fs.appendFileSync(path.join(home,'calls'),'call\n');
   const waiting=fs.existsSync(path.join(home,'wait'));
   let decision=waiting?{action:'wait',delayMs:1100}:{action:'reply',messages:['synthetic reply']};
+  if (fs.existsSync(path.join(home,'burst'))) decision={action:'reply',messages:['synthetic first bubble','synthetic second bubble']};
   if (payload.messages.at(-1).content.includes('当前问题已完成回复')) decision={action:'reply',messages:['must not send reflection'],continuity:{mood:{valence:0.2}}};
   if (fs.existsSync(path.join(home,'persona'))) {
     const {snapshot}=JSON.parse(payload.messages.at(-1).content.split('\n').at(-1));
@@ -118,6 +119,11 @@ const accountUrl = '/api/social-agent/accounts/primary';
 async function policy(patch) { for(let attempt=0;attempt<8;attempt++) { const previous = await request(accountUrl); const r = await request(accountUrl,{method:'PATCH',body:{expectedRevision:previous.body.revision,policy:{...previous.body.policy,...patch}}}); if(r.status===409){await pause(100);continue;} assert.equal(r.status,200,JSON.stringify(r.body)); return r; } throw new Error('fixture policy CAS never quiesced'); }
 try {
   await start();
+  assert.equal((await request('/api/social-agent/expression-status', { auth: false })).status, 403);
+  const expressionStatus = await request('/api/social-agent/expression-status');
+  assert.equal(expressionStatus.status, 200);
+  assert.equal(expressionStatus.body.plans, 0);
+  assert.deepEqual(expressionStatus.body.recent, []);
   assert.equal((await request(accountUrl,{auth:false})).status,403);
   const initial = await request(accountUrl); assert.equal(initial.status,200); assert.equal(initial.body.policy.enabled,false); assert(!JSON.stringify(initial.body).includes('13800138000'));
   assert.equal((await request(accountUrl,{method:'PATCH',body:{expectedRevision:'stale',policy:{enabled:true}}})).status,409);
@@ -212,6 +218,22 @@ try {
   assert.equal(approvedConfig.accounts.items[0].socialAgent.profile.expression,'synthetic approved expression');
   assert.equal(approvedConfig.accounts.items[0].style.systemPrompt,'synthetic-persona','original persona snapshot must survive approval');
   assert.equal((await request(resolveUrl,{method:'POST',body:decisionBody})).status,409,'terminal proposal cannot replay');
+  await policy({ enabled: true, conversationIds: ['group:20002'], turnTimeoutMs: 5000 });
+  const registry = await request('/api/accounts');
+  const expressionSave = await request('/api/accounts/primary', { method: 'PATCH', body: {
+    expectedRevision: registry.body.revision, patch: { socialExperience: { enabled: true, shadowMode: false,
+      conversationIds: ['group:20002'], expression: { minIntervalMs: 0, maxIntervalMs: 0 } } }
+  } });
+  assert.equal(expressionSave.status, 200, JSON.stringify(expressionSave.body));
+  fs.writeFileSync(path.join(home,'burst'),'1');
+  const beforeBurst = sends.length;
+  message(999, 'synthetic expression burst', 20002);
+  await until(() => sends.length === beforeBurst + 2, 'shared social expression sends separate bubbles', 10000);
+  assert(sends.slice(beforeBurst).every(item => item.action === 'send_group_msg' && Number(item.params.group_id) === 20002 && Array.isArray(item.params.message)));
+  await until(async () => (await request('/api/social-agent/expression-status')).body.plans === 1, 'expression receipt diagnostics');
+  const expressionReceipt = (await request('/api/social-agent/expression-status')).body.recent.at(-1);
+  assert.equal(expressionReceipt.confirmed, 2);
+  assert.equal(expressionReceipt.uncertain, false);
   console.log('PASS social bridge integration: auth/CAS/default-off/restricted-model/confirmed-send/durable-ACK/dedup/habit-revoke/self-consent-revoke/at-replan-terminal/startup-pause/config-race');
 } finally {
   socket?.close(); child?.kill('SIGTERM'); if (child && child.exitCode===null) await Promise.race([new Promise(resolve=>child.once('exit',resolve)),pause(3000)]);

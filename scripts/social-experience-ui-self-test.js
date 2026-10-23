@@ -1,0 +1,346 @@
+#!/usr/bin/env node
+// Offline contract tests: real admin functions, synthetic DOM/transport only.
+// --preview renders the same editor with an in-memory account API on loopback.
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import vm from "node:vm";
+import http from "node:http";
+
+const html = fs.readFileSync(new URL("../public/admin.html", import.meta.url), "utf8");
+const script = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]).find(s => s.includes("function registryEditable("));
+function source(name) {
+  const start = new RegExp(`^    (?:async )?function ${name}\\(`, "m").exec(script);
+  assert.ok(start, `missing real function ${name}`);
+  const rest = script.slice(start.index), end = /^    \}/m.exec(rest);
+  assert.ok(end, `missing closing brace ${name}`);
+  return rest.slice(0, end.index + end[0].length);
+}
+const constants = ["registryTabs", "registryFeatures", "registrySendTypes", "registryIdentityKeys", "registryPolicyKeys"]
+  .map(name => script.match(new RegExp(`^    const ${name} = .+;$`, "m"))[0]).join("\n");
+const functions = ["api", "ensureAdminSession", "switchPage", "currentScope", "registryItem", "registryGroup", "registryEffective", "registryStyle", "registryEditable", "registryDraft", "registryGet", "registrySet", "registryButton", "registryRequest", "rebaseRegistryDraft", "refreshAccountRegistry", "registryField", "registryFields", "refreshExperienceStatus", "renderExperienceDiagnostic", "registryExperienceDiagnostic", "registryValidate", "registryTabKeys", "registryPatch", "confirmRegistrySave", "saveRegistryPatch", "saveRegistryEditor", "registrySelect", "syncRegistryDraftControls", "renderRegistryEditor", "registryDraftStatus"]
+  .map(source).join("\n");
+const realSource = `${constants}\nlet adminSessionToken = "", adminSessionRequest = null;\n${functions}`;
+// Syntax-check every inline script too, without running page initialization.
+for (const m of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) new vm.Script(m[1]);
+
+class Element {
+  constructor(tag = "div") {
+    this.tagName = tag.toUpperCase(); this.children = []; this.dataset = {}; this.style = {}; this.listeners = {};
+    this.attributes = {}; this.classes = new Set(); this.type = ""; this._value = ""; this._text = "";
+    this.disabled = false; this.checked = false; this.open = false;
+    this.classList = { add: key => this.classes.add(key), remove: key => this.classes.delete(key), toggle: (key, value) => value ? this.classes.add(key) : this.classes.delete(key) };
+  }
+  set value(value) { this._value = String(value); }
+  get value() { return this._value; }
+  set textContent(value) { this._text = String(value); this.children = []; }
+  get textContent() { return this._text + this.children.map(c => c.textContent).join(""); }
+  append(...items) { for (const item of items) { item.parent = this; this.children.push(item); } }
+  replaceChildren(...items) { this.children = []; this._text = ""; this.append(...items); }
+  setAttribute(key, value) { this.attributes[key] = String(value); }
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+  contains(node) { return this === node || this.children.some(c => c.contains(node)); }
+  querySelectorAll(selector) {
+    const nodes = this.children.flatMap(c => [c, ...c.querySelectorAll("*")]);
+    if (selector === "*") return nodes;
+    if (selector === "[data-registry-field]") return nodes.filter(c => c.dataset.registryField);
+    if (selector === "[data-registry-participation-state]") return nodes.filter(c => "registryParticipationState" in c.dataset);
+    if (selector === "[data-registry-participation]") return nodes.filter(c => "registryParticipation" in c.dataset);
+    if (selector === "[data-experience-diagnostic]") return nodes.filter(c => "experienceDiagnostic" in c.dataset);
+    return [];
+  }
+  querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+  set innerHTML(_) { throw new Error("unsafe dynamic HTML"); }
+}
+function mockDocument() {
+  const editor = new Element("div"); editor.id = "dynamicAccountEditor";
+  const nodes = new Map([editor.id, "pageTitle", "pageSubtitle", "saveBtn", "page-qa", "page-account-functions"].map(id => [id, id === editor.id ? editor : new Element()]));
+  return { activeElement: null, createElement: tag => new Element(tag), getElementById: id => nodes.get(id) || null,
+    querySelectorAll: selector => selector === ".page" ? [nodes.get("page-qa"), nodes.get("page-account-functions")] : [] };
+}
+
+// Serializable for browser preview. No production URL, filesystem or tools.
+function fixture(document, state = {}) {
+  const requests = [], feedback = [], server = { revision: "r1", items: [
+    { id: "demo-a", displayName: "演示账号 A", enabled: true, style: { systemPrompt: "saved A" }, features: { chat: true } },
+    { id: "demo-b", displayName: "演示账号 B", enabled: true, style: { systemPrompt: "saved B" }, features: { chat: true } }
+  ], failoverGroups: [], statuses: [] };
+  const response = (body, status = 200) => new Response(JSON.stringify(body), { status });
+  const hooks = { diagnostic: { ok: true, turns: 0, plans: 0, recent: [] } };
+  Object.assign(state, {
+    cfg: { revision: "r1" }, dirtyScopes: new Set(), conflictedScopes: new Set(), activePage: "account-functions", activeTabs: { qa: "persona" },
+    pageMeta: {}, scopeNames: { "account-functions": "账号功能", "qa:persona": "风格" },
+    registryState: { loaded: true, selected: "demo-a", tab: "experience", revision: "r1", epoch: 0, items: structuredClone(server.items), groups: [], statuses: [], drafts: new Map(), contexts: {}, operations: new Map(), error: "", refreshing: null, modelLoadedAt: Date.now(), busy: false },
+    $: id => document.getElementById(id),
+    renderRegistryLists() {}, renderRegistryContexts() {}, renderRegistrySaveState() {}, renderSaveState() {}, renderApiAccountModels() {}, renderAutomationTargetPicker() {}, fillConfig() {},
+    registryFeedback: message => feedback.push(message), confirm: () => true,
+    sensitiveApi: async () => ({ center: {} }),
+    fetch: async (url, opts = {}) => {
+      const method = opts.method || "GET";
+      requests.push({ url, method, body: opts.body ? JSON.parse(opts.body) : null, token: opts.headers?.get("x-hermes-qq-admin") });
+      if (url === "/api/admin/session") return response({ token: "synthetic-session" });
+      if (url === "/api/social-agent/expression-status") {
+        assertRoute(method === "GET" && opts.headers.get("x-hermes-qq-admin") === "synthetic-session");
+        await hooks.beforeDiagnostic?.();
+        return response(hooks.diagnostic, hooks.diagnosticStatus || 200);
+      }
+      if (url.startsWith("/api/config?")) return response({ revision: server.revision });
+      if (url.startsWith("/api/accounts?")) {
+        const snapshot = structuredClone(server);
+        await hooks.beforeRead?.();
+        if (hooks.readError) throw new Error("synthetic readback unavailable");
+        return response({ ok: true, ...snapshot });
+      }
+      assertRoute(url.startsWith("/api/accounts/") && method === "PATCH");
+      assertRoute(opts.headers.get("x-hermes-qq-admin") === "synthetic-session");
+      const body = JSON.parse(opts.body);
+      await hooks.beforePatch?.();
+      if (hooks.patchStatus) return response({ error: "synthetic rejection" }, hooks.patchStatus);
+      if (body.expectedRevision !== server.revision) return response({ error: "synthetic conflict" }, 409);
+      const item = server.items.find(i => i.id === decodeURIComponent(url.split("/").at(-1)));
+      Object.assign(item, structuredClone(body.patch)); server.revision = `r${Number(server.revision.slice(1)) + 1}`;
+      hooks.afterPatch?.(item);
+      return response({ ok: true, revision: server.revision });
+    }
+  });
+  function assertRoute(ok) { if (!ok) throw new Error("Unexpected synthetic route or missing session"); }
+  return { state, server, requests, feedback, hooks, document };
+}
+async function runtime() {
+  const document = mockDocument();
+  const t = fixture(document, { document, Headers, Response, structuredClone, Date });
+  vm.runInContext(realSource, vm.createContext(t.state));
+  t.edit = (path, value) => {
+    const control = document.getElementById("dynamicAccountEditor").querySelectorAll("[data-registry-field]").find(c => c.dataset.registryField === `socialExperience.${path}`);
+    assert.ok(control, `control ${path}`); assert.equal(control.disabled, false);
+    if (control.type === "checkbox") control.checked = value; else control.value = value;
+    for (const listener of control.listeners[control.type === "checkbox" || control.tagName === "SELECT" ? "change" : "input"]) listener();
+    return control;
+  };
+  t.state.registrySelect("demo-a", "experience");
+  await t.state.registryState.experienceStatus.loading;
+  return t;
+}
+const plain = value => JSON.parse(JSON.stringify(value));
+const expected = { enabled: false, shadowMode: true, conversationIds: [], turn: { enabled: true, minWaitMs: 150, maxWaitMs: 4500, ordinaryWaitMs: 700, incompleteWaitMs: 2500, maxTurnMs: 8000 }, expression: { enabled: true, maxMessages: 2, minIntervalMs: 200, maxIntervalMs: 800, allowQuotes: true } };
+const cases = [];
+async function test(name, fn) { await fn(); cases.push(name); }
+function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
+async function until(check) { for (let i = 0; i < 200; i++) { if (check()) return; await Promise.resolve(); } throw new Error("synthetic boundary not reached"); }
+
+await test("draft-only defaults, controls and no implicit activation", async () => {
+  const t = await runtime(), s = t.state, d = s.registryDraft();
+  assert.deepEqual(plain(d.value.socialExperience), expected);
+  assert.equal(Object.hasOwn(s.registryItem(), "socialExperience"), false);
+  assert.equal(Object.hasOwn(t.server.items[0], "socialExperience"), false);
+  assert.equal(d.dirty.size, 0); assert(t.requests.every(r => r.method === "GET"));
+  const host = t.document.getElementById("dynamicAccountEditor");
+  const nodes = host.querySelectorAll("*");
+  assert(nodes.some(n => n.tagName === "DETAILS" && !n.open));
+  const mode = nodes.find(n => n.dataset.registryField === "socialExperience.shadowMode");
+  assert.equal(mode.value, "true"); assert.equal(mode.children.length, 2);
+  assert.match(host.textContent, /全局累计/);
+  t.edit("shadowMode", "false"); t.edit("expression.maxMessages", 3);
+  assert.equal(d.value.socialExperience.enabled, false); assert.equal(d.value.socialExperience.shadowMode, false);
+  assert.equal(d.value.socialExperience.expression.maxMessages, 3);
+  assert(t.requests.every(r => r.method === "GET"));
+  // Polling preserves both focus and select's boolean value, including false.
+  t.document.activeElement = mode; s.renderRegistryEditor();
+  assert(host.contains(mode));
+  t.document.activeElement = null; s.syncRegistryDraftControls(host, d.value);
+  assert.equal(mode.value, "false");
+});
+await test("save only the account root; preserve other tabs/accounts across navigation", async () => {
+  const t = await runtime(), s = t.state, d = s.registryDraft();
+  t.edit("conversationIds", "group:123456\nprivate:654321,group:123456"); t.edit("enabled", true);
+  d.value.style.systemPrompt = "unsaved style"; d.dirty.add("style.systemPrompt");
+  s.switchPage("qa"); assert.equal(s.activePage, "qa");
+  s.switchPage("account-functions"); s.registrySelect("demo-b", "experience"); t.edit("turn.maxWaitMs", 5000);
+  const b = s.registryDraft(); s.registrySelect("demo-a", "identity"); s.registrySelect("demo-a", "experience");
+  assert.equal(s.registryDraft(), d); assert.equal(b.value.socialExperience.turn.maxWaitMs, 5000);
+  await s.saveRegistryEditor();
+  const writes = t.requests.filter(r => r.method === "PATCH");
+  assert.equal(writes.length, 1); assert.equal(writes[0].url, "/api/accounts/demo-a");
+  assert.equal(writes[0].token, "synthetic-session"); assert.equal(writes[0].body.expectedRevision, "r1");
+  assert.deepEqual(Object.keys(writes[0].body.patch), ["socialExperience"]);
+  assert.deepEqual(writes[0].body.patch.socialExperience.conversationIds, ["group:123456", "private:654321"]);
+  assert.deepEqual([...d.dirty], ["style.systemPrompt"]); assert(b.dirty.has("socialExperience.turn.maxWaitMs"));
+  assert.equal(t.server.items[0].style.systemPrompt, "saved A"); assert.equal(Object.hasOwn(t.server.items[1], "socialExperience"), false);
+  assert(t.requests.some(r => r.url.startsWith("/api/accounts?"))); assert.equal(s.registryState.revision, "r2");
+  assert.equal(d.value.socialExperience.shadowMode, true);
+});
+await test("saving another tab never persists experience defaults", async () => {
+  const t = await runtime(), s = t.state, d = s.registryDraft();
+  d.value.displayName = "renamed"; d.dirty.add("displayName");
+  await s.saveRegistryPatch("demo-a", s.registryTabKeys("identity"), "基本");
+  assert.equal(Object.hasOwn(t.requests.find(r => r.method === "PATCH").body.patch, "socialExperience"), false);
+  assert.equal(Object.hasOwn(t.server.items[0], "socialExperience"), false);
+});
+await test("409 retains draft and session failure never replays", async () => {
+  for (const status of [409, 403, 500]) {
+    const t = await runtime(), s = t.state, d = s.registryDraft(); t.edit("turn.incompleteWaitMs", 2800);
+    t.hooks.patchStatus = status;
+    await assert.rejects(s.saveRegistryPatch("demo-a", s.registryTabKeys("experience"), "社交表达"));
+    assert(d.dirty.has("socialExperience.turn.incompleteWaitMs")); assert.equal(d.value.socialExperience.turn.incompleteWaitMs, 2800);
+    assert.equal(t.requests.filter(r => r.method === "PATCH").length, 1);
+    assert.equal(d.saveState.status, "failed"); if (status === 409) assert.equal(d.conflict, true);
+    assert.equal(Object.hasOwn(t.server.items[0], "socialExperience"), false);
+    if (status === 403) { await s.api("/api/accounts?retry-read"); assert.equal(t.requests.filter(r => r.url === "/api/admin/session").length, 2); }
+  }
+});
+await test("fresh readback mismatch/failure retains submitted dirty root", async () => {
+  for (const mode of ["mismatch", "read-error"]) {
+    const t = await runtime(), s = t.state, d = s.registryDraft(); t.edit("turn.incompleteWaitMs", 2800);
+    t.hooks.afterPatch = item => { if (mode === "mismatch") item.socialExperience.turn.incompleteWaitMs = 999; else t.hooks.readError = true; };
+    await assert.rejects(s.saveRegistryPatch("demo-a", ["socialExperience"], "社交表达"));
+    assert.equal(d.saveState.status, "unverified"); assert(d.dirty.has("socialExperience.turn.incompleteWaitMs"));
+    assert.equal(d.value.socialExperience.turn.incompleteWaitMs, 2800); assert.match(t.feedback.at(-1), /未通过保存核对/);
+  }
+});
+await test("real stale CAS refresh preserves local value without resubmission", async () => {
+  const t = await runtime(), s = t.state, d = s.registryDraft(); t.edit("turn.incompleteWaitMs", 2800);
+  t.hooks.beforePatch = () => {
+    t.server.revision = "r2";
+    t.server.items[0].socialExperience = structuredClone(expected);
+    t.server.items[0].socialExperience.turn.incompleteWaitMs = 3000;
+  };
+  await assert.rejects(s.saveRegistryPatch("demo-a", ["socialExperience"], "社交表达"));
+  assert.equal(d.conflict, true); assert.equal(s.registryState.revision, "r2");
+  assert.equal(d.value.socialExperience.turn.incompleteWaitMs, 2800);
+  assert.equal(d.base.socialExperience.turn.incompleteWaitMs, 3000);
+  assert.equal(t.requests.filter(r => r.method === "PATCH").length, 1);
+});
+await test("new input during save remains dirty after acknowledgement", async () => {
+  const t = await runtime(), s = t.state, d = s.registryDraft(), gate = deferred();
+  t.edit("turn.incompleteWaitMs", 2800); t.hooks.beforePatch = () => gate.promise;
+  const saving = s.saveRegistryPatch("demo-a", ["socialExperience"], "社交表达");
+  await until(() => t.requests.some(r => r.method === "PATCH"));
+  t.edit("turn.incompleteWaitMs", 3100); gate.resolve(); await saving;
+  assert.equal(t.server.items[0].socialExperience.turn.incompleteWaitMs, 2800);
+  assert.equal(d.value.socialExperience.turn.incompleteWaitMs, 3100); assert(d.dirty.has("socialExperience.turn.incompleteWaitMs"));
+  assert.equal(d.conflict, false);
+});
+await test("pre-save refresh is not fresh post-save evidence", async () => {
+  const t = await runtime(), s = t.state, d = s.registryDraft(), gate = deferred(); let reads = 0;
+  t.hooks.beforeRead = () => ++reads === 1 ? gate.promise : undefined;
+  const oldRead = s.refreshAccountRegistry(); await until(() => reads === 1);
+  t.edit("turn.incompleteWaitMs", 2800);
+  let finished = false;
+  const saving = s.saveRegistryPatch("demo-a", ["socialExperience"], "社交表达").then(() => { finished = true; });
+  await until(() => t.server.revision === "r2"); assert.equal(finished, false);
+  gate.resolve(); await oldRead; await saving;
+  assert(reads >= 3); assert.equal(d.dirty.size, 0); assert.equal(s.registryState.revision, "r2");
+});
+await test("shared policy is disabled in member editor and cannot PATCH", async () => {
+  const t = await runtime(), s = t.state;
+  s.registryState.groups = [{ id: "shared", name: "共享", memberIds: ["demo-a", "demo-b"], policy: { socialExperience: { ...structuredClone(expected), expression: { ...expected.expression, maxMessages: 3 } } } }];
+  s.renderRegistryEditor(true);
+  const controls = t.document.getElementById("dynamicAccountEditor").querySelectorAll("[data-registry-field]");
+  assert(controls.length > 0 && controls.every(c => c.disabled));
+  assert.equal(controls.find(c => c.dataset.registryField === "socialExperience.expression.maxMessages").value, "3");
+  await assert.rejects(s.saveRegistryPatch("demo-a", ["socialExperience"], "社交表达"), /接管组/);
+  assert(t.requests.every(r => r.method === "GET"));
+  // Shared policy rendering also works when legacy policy lacks the new root.
+  const host = new Element(); const policy = {};
+  s.registryFields(host, policy, "experience", (path, value) => s.registrySet(policy, path, value), { policy: true });
+  assert.deepEqual(policy, {});
+  const control = host.querySelectorAll("[data-registry-field]").find(c => c.dataset.registryField === "socialExperience.expression.maxMessages");
+  control.value = "3"; control.listeners.input[0]();
+  s.registryValidate(policy, ["socialExperience"]); assert.equal(policy.socialExperience.enabled, false);
+});
+await test("invalid ranges, scope and toggles fail before transport", async () => {
+  const t = await runtime(), s = t.state;
+  for (const [path, value] of [["enabled", "true"], ["enabled", true], ["conversationIds", ["all"]], ["turn.minWaitMs", -1], ["turn.maxWaitMs", 9000], ["turn.ordinaryWaitMs", 0], ["turn.incompleteWaitMs", 5000], ["expression.maxMessages", 0], ["expression.maxMessages", 1.5], ["expression.minIntervalMs", 1000], ["expression.maxIntervalMs", NaN]]) {
+    const valueRoot = structuredClone(expected); s.registrySet(valueRoot, path, value);
+    assert.throws(() => s.registryValidate({ socialExperience: valueRoot }, ["socialExperience"]));
+  }
+  assert(t.requests.every(r => r.method === "GET"));
+  assert.deepEqual(plain(s.registryTabKeys("experience")), ["socialExperience"]);
+  assert.match(constants, /registryPolicyKeys[^\n]*"socialExperience"/);
+});
+await test("admin-only diagnostics filter owners, bound rows and never expose content", async () => {
+  const t = await runtime(), s = t.state;
+  t.hooks.diagnostic = { ok: true, turns: 120, plans: 50, recent: [
+    { kind: "plans", owner: "account:demo-b", reason: "other_account" },
+    ...Array.from({ length: 7 }, (_, i) => ({ kind: "turns", owner: "account:demo-a", at: 1700000000000 + i,
+      waitMs: i, messageCount: i, shadow: true, reason: `code_${i}`, content: "PRIVATE_CONTENT_SENTINEL", reasoning: "REASONING_SENTINEL" })),
+    { kind: "plans", owner: "demo-a", at: 1700000000010, confirmed: 0, partial: false, uncertain: true, shadow: false, reason: "<script>PRIVATE_CONTENT_SENTINEL</script>" }
+  ] };
+  await s.refreshExperienceStatus();
+  const text = s.registryExperienceDiagnostic("demo-a");
+  assert.match(text, /全局累计（非当前账号计数）：turn 120 · ReplyPlan 50/);
+  assert.match(text, /最近 5 条/); assert.match(text, /确认 0 · 部分发送 否 · 结果不确定 是/);
+  assert.match(text, /实际/); assert.match(text, /观察/); assert.match(text, /原因 未报告/);
+  assert(!/other_account|code_0|code_1|code_2|PRIVATE_CONTENT|REASONING/.test(text));
+  assert(text.indexOf("ReplyPlan · 实际") < text.indexOf("原因 code_6"));
+  const reads = t.requests.filter(r => r.url === "/api/social-agent/expression-status");
+  assert(reads.every(r => r.method === "GET" && r.token === "synthetic-session"));
+  assert(t.requests.every(r => r.url === "/api/admin/session" || r.url === "/api/social-agent/expression-status"));
+  assert(!text.includes("[object Object]"));
+});
+await test("shared identity diagnostics do not mix independent histories", async () => {
+  const t = await runtime(), s = t.state;
+  s.registryState.groups = [{ id: "team", memberIds: ["demo-a", "demo-b"] }];
+  t.hooks.diagnostic = { ok: true, recent: [
+    { kind: "turns", owner: "account:demo-a", reason: "old_independent" },
+    { kind: "plans", owner: "group:team", confirmed: true, partial: false, uncertain: false, reason: "shared_current" },
+    { kind: "plans", owner: "group:elsewhere", reason: "other_group" }
+  ] };
+  await s.refreshExperienceStatus();
+  const text = s.registryExperienceDiagnostic("demo-a");
+  assert.match(text, /turn 未知 · ReplyPlan 未知/); assert.match(text, /当前接管组共享身份/);
+  assert.match(text, /确认 是/); assert.match(text, /shared_current/);
+  assert(!/old_independent|other_group/.test(text));
+  assert.equal(text, s.registryExperienceDiagnostic("demo-b"));
+  assert.match(s.registryExperienceDiagnostic(""), /请到接管组成员账号/);
+});
+await test("diagnostic refresh deduplicates, preserves focused drafts and clears failed auth", async () => {
+  const t = await runtime(), s = t.state, d = s.registryDraft(), gate = deferred();
+  const field = t.edit("turn.incompleteWaitMs", 3100); t.document.activeElement = field;
+  const host = t.document.getElementById("dynamicAccountEditor"), diagnostic = host.querySelector("[data-experience-diagnostic]");
+  const draftBefore = plain(d.value), dirtyBefore = [...d.dirty], revision = s.registryState.revision;
+  const count = () => t.requests.filter(r => r.url === "/api/social-agent/expression-status").length;
+  const before = count(); t.hooks.beforeDiagnostic = () => gate.promise;
+  t.hooks.diagnostic = { ok: true, turns: 1, plans: 0, recent: [{ kind: "turns", owner: "account:demo-a", waitMs: 700, shadow: true, reason: "complete" }] };
+  const first = s.refreshExperienceStatus(), second = s.refreshExperienceStatus();
+  await until(() => count() === before + 1); assert.match(diagnostic.textContent, /正在读取/);
+  gate.resolve(); await Promise.all([first, second]); s.renderRegistryEditor();
+  assert.equal(count(), before + 1); assert.equal(host.querySelector("[data-experience-diagnostic]"), diagnostic);
+  assert.match(diagnostic.textContent, /原因 complete/); assert.equal(t.document.activeElement, field); assert(host.contains(field));
+  assert.deepEqual(plain(d.value), draftBefore); assert.deepEqual([...d.dirty], dirtyBefore); assert.equal(s.registryState.revision, revision);
+  t.hooks.diagnosticStatus = 403; await s.refreshExperienceStatus();
+  assert.equal(count(), before + 2); assert.equal(s.registryState.experienceStatus.value, null);
+  assert.match(diagnostic.textContent, /旧摘要已清空/); assert(!diagnostic.textContent.includes("complete"));
+  t.hooks.diagnosticStatus = 200; t.hooks.diagnostic = { ok: true, recent: [] }; await s.refreshExperienceStatus();
+  assert.equal(t.requests.filter(r => r.url === "/api/admin/session").length, 2);
+  assert.match(diagnostic.textContent, /暂无最近记录/);
+  t.hooks.diagnostic = { ok: true, recent: "invalid" }; await s.refreshExperienceStatus();
+  assert.equal(s.registryState.experienceStatus.value, null); assert.match(diagnostic.textContent, /加载失败/);
+  assert(t.requests.every(r => r.method === "GET"));
+});
+await test("generic registry refresh works without activePage in old VM harnesses", async () => {
+  const t = await runtime(), s = t.state;
+  delete s.activePage;
+  const count = t.requests.filter(r => r.url === "/api/social-agent/expression-status").length;
+  await s.refreshAccountRegistry();
+  assert.equal(s.registryState.error, "");
+  assert.equal(t.requests.filter(r => r.url === "/api/social-agent/expression-status").length, count);
+});
+console.log(JSON.stringify({ ok: true, cases, offline: true, liveDataTouched: false, bridgeStarted: false }));
+
+if (process.argv.includes("--preview")) {
+  const css = fs.readFileSync(new URL("../public/console.css", import.meta.url), "utf8");
+  const page = `<!doctype html><html lang="zh-CN" data-theme="dark"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/console.css"><title>社交表达 · 合成预览</title><body><main style="max-width:1000px;margin:auto;padding:24px"><h1>社交表达 · 合成预览</h1><p>仅虚构账号与内存保存，不连接真实机器人。</p><div class="row"><button id="theme">切换明暗</button><button id="other">切换演示账号</button></div><section id="dynamicAccountEditor" class="card"></section><p id="preview-feedback" role="status"></p></main><script>
+    const synthetic = (${fixture.toString()})(document, window);
+    ${realSource}
+    registryFeedback = message => document.getElementById('preview-feedback').textContent = message;
+    registrySelect('demo-a', 'experience');
+    document.getElementById('theme').addEventListener('click', () => document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+    document.getElementById('other').addEventListener('click', () => registrySelect(registryState.selected === 'demo-a' ? 'demo-b' : 'demo-a', 'experience'));
+  </script></body></html>`;
+  const server = http.createServer((req, res) => {
+    if (req.url === "/console.css") { res.setHeader("content-type", "text/css"); res.end(css); }
+    else if (req.url === "/") { res.setHeader("content-type", "text/html; charset=utf-8"); res.end(page); }
+    else { res.writeHead(404); res.end(); }
+  });
+  server.listen(0, "127.0.0.1", () => console.log(`Synthetic experience preview: http://127.0.0.1:${server.address().port}/`));
+}

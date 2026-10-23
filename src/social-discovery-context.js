@@ -1,4 +1,5 @@
 // Pure prompt/receipt helpers. Web material is data, never policy or a person fact.
+import { sanitizeChatReply } from "./reply-safety.js";
 export function discoveryMaterialPrompt(items) {
   if (!Array.isArray(items) || !items.length) return "";
   const data = items.slice(0, 3).map(item => ({ id: item.id, kind: item.kind, title: item.title,
@@ -18,4 +19,23 @@ export function discoveryUsedIds(text, items = []) {
     if (markers.includes(item.id) || (phrase.length >= 5 && String(text).includes(phrase))) result.push(item.id);
   }
   return [...new Set(result)].slice(0, 3);
+}
+
+// A plan-level marker is NOT proof that an earlier bubble used the material.
+// Match each original expression to its actual cleaned outgoing text first.
+export function discoveryPlanEvidence(raw, plan, items = []) {
+  let contents = null;
+  if (typeof raw === "string") {
+    const text = raw.replace(/^\s*__LEARN__\s*/, "");
+    try {
+      const object = JSON.parse(text.trim().replace(/^```json\s*\n([\s\S]*)\n```$/i, "$1"));
+      if (Array.isArray(object?.messages)) contents = object.messages.map(item => typeof item === "string" ? item : item?.content);
+    } catch { /* Plain legacy response can still be one expression. */ }
+    contents ||= [text];
+  } else if (Array.isArray(raw)) contents = raw;
+  return (plan?.messages || []).map((message, index) => {
+    const original = contents?.[index];
+    return typeof original === "string" && sanitizeChatReply(original) === message.content
+      ? discoveryUsedIds(original, items) : [];
+  });
 }

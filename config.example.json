@@ -69,6 +69,13 @@
       "promptOverride": "",
       "displayName": "机器人 A",
       "selfName": "",
+      "socialExperience": {
+        "enabled": false,
+        "shadowMode": true,
+        "conversationIds": [],
+        "turn": { "enabled": true, "minWaitMs": 150, "maxWaitMs": 4500, "ordinaryWaitMs": 700, "incompleteWaitMs": 2500, "maxTurnMs": 8000 },
+        "expression": { "enabled": true, "maxMessages": 2, "minIntervalMs": 200, "maxIntervalMs": 800, "allowQuotes": true }
+      },
       "socialAgent": {
         "enabled": false,
         "shadowMode": true,

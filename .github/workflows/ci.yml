@@ -31,6 +31,7 @@ jobs:
       - run: npm run test:retrieval
       - run: npm run test:social
       - run: npm run test:reply
+      - run: npm run test:social-experience
       - run: npm run test:text-completion
       - run: npm run test:accounts
         timeout-minutes: 4

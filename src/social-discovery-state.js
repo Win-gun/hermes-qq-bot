@@ -475,6 +475,16 @@ export function settleDiscoveryShare(root, args) {
     if (c.status === args.status) return { ok: true, duplicate: true };
     if (c.status !== "pending") return fail("claim_settled");
     if (args.status === "sent") {
+      if (args.receiptIds !== undefined) {
+        if (!Array.isArray(args.receiptIds) || !args.receiptIds.length || args.receiptIds.length > 4
+          || new Set(args.receiptIds).size !== args.receiptIds.length) return fail("invalid_receipts");
+        const receipts = args.receiptIds.map(id => s.receipts.find(row => row.id === id));
+        if (receipts.some(row => !row || row.conversationId !== c.conversationId)) return fail("invalid_receipts");
+        const actual = [...new Set(receipts.flatMap(row => row.itemIds))].sort();
+        if (JSON.stringify(actual) !== JSON.stringify([...c.itemIds].sort())) return fail("invalid_receipts");
+        Object.assign(c, { status: args.status, settledAt: args.now });
+        return { ok: true };
+      }
       const existing = s.receipts.find(r => r.id === c.id);
       if (existing && (existing.conversationId !== c.conversationId || JSON.stringify(existing.itemIds) !== JSON.stringify(c.itemIds))) return fail("receipt_conflict");
       const result = existing ? { ok: true } : receipt(s, { receiptId: c.id, conversationId: c.conversationId, now: args.now },

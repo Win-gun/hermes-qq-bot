@@ -263,6 +263,17 @@ export function runDiscoveryStateSelfTests() {
   unchanged(shares, () => share(shares, "s2"), "share_cooldown");
   check(discovery.settleDiscoveryShare(shares, { ...base, claimId: "s1", status: "uncertain" }).ok);
   check(discovery.settleDiscoveryShare(shares, { ...base, claimId: "s1", status: "uncertain" }).duplicate);
+  const bubbles = {};
+  check(begin(bubbles).ok); check(finish(bubbles, [candidate("bubble")]).ok);
+  check(share(bubbles, "bubble-share").ok);
+  const bubbleItem = state(bubbles).items[0].id;
+  unchanged(bubbles, () => discovery.settleDiscoveryShare(bubbles, { ...base, claimId: "bubble-share",
+    status: "sent", receiptIds: ["missing-ack"] }), "invalid_receipts");
+  check(discovery.markDiscoveryUsed(bubbles, { ...base, now: NOW + 2500, conversationId: "group:100",
+    itemIds: [bubbleItem], receiptId: "bubble-ack" }).ok);
+  const receiptCount = state(bubbles).receipts.length;
+  check(discovery.settleDiscoveryShare(bubbles, { ...base, claimId: "bubble-share", status: "sent", receiptIds: ["bubble-ack"] }).ok);
+  check(state(bubbles).receipts.length, receiptCount); // settlement cannot double-count bubble receipts
   unchanged(shares, () => discovery.settleDiscoveryShare(shares, { ...base, claimId: "s1", status: "sent" }), "claim_settled");
   unchanged(shares, () => share(shares, "s2", NOW + 3 * HOUR + 2000), "event_reuse");
   check(share(shares, "s2", NOW + 3 * HOUR + 2000, { conversationId: "group:101" }).ok);

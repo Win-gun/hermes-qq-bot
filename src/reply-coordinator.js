@@ -156,6 +156,12 @@ export class ReplyCoordinator {
       messageIds: unique(messageIds), direct, maxMergedMessages: cfg.maxMergedMessages, settleMs: cfg.settleMs
     };
     const now = Date.now();
+    // A started burst is never regenerated/replayed, but its unsent remainder
+    // can still yield to new relevant input. That input gets its own next job.
+    if (state.active?.deliveryStarted && state.active.expressionSending && sameAccount(state.active, incoming)
+      && (state.active.senderId === incoming.senderId || direct || messagesRelated(state.active, incoming))) {
+      state.active.stopRemaining?.("new-input-during-expression");
+    }
     const mergeTarget = [state.active, ...state.pending].find((job) => (
       job && !job.dropped && !job.deliveryStarted && sameAccount(job, incoming) && String(job.senderId) === incoming.senderId && now - Number(job.updatedAt || job.createdAt || 0) <= cfg.windowMs
     ));
@@ -315,6 +321,8 @@ export class ReplyCoordinator {
     };
     if (this.isCovered(job.messageIds, job.accountId, job)) return Promise.resolve({ ok: true, skipped: true, reason: "covered" });
     const state = this.state(job.conversationId, job.logicalBotId);
+    if (state.active?.deliveryStarted && state.active.expressionSending && sameAccount(state.active, job)
+      && (state.active.senderId === job.senderId || job.direct)) state.active.stopRemaining?.("new-job-during-expression");
     const existing = [state.active, ...state.pending].find((item) => (
       item && !item.dropped && !item.deliveryStarted && sameAccount(item, job) && item.senderId === job.senderId && Date.now() - Number(item.updatedAt || item.createdAt) <= cfg.windowMs
     ));
@@ -401,6 +409,7 @@ export class ReplyCoordinator {
         if (job.deliveryStarted && result?.retry) return { ok: true, skipped: true, deliveryUnconfirmed: true, reason: "delivery-started-no-replay" };
         if (job.dropped) return { ok: true, skipped: true, reason: job.cancelReason || "dropped" };
         const stale = controller.signal.aborted || Number(job.contextRevision || 0) !== revision;
+        if (job.deliveryStarted && stale) return { ok: true, ...result, reason: "delivery-started-no-replay" };
         if ((result?.retry || stale) && job.regenerationCount < this.config().maxRegenerations) {
           job.regenerationCount += 1;
           this.metrics.regenerated += 1;
@@ -418,6 +427,7 @@ export class ReplyCoordinator {
         }
         return { ok: true, ...result, regenerationCount: job.regenerationCount };
       } catch (err) {
+        if (job.deliveryStarted) return { ok: true, skipped: true, deliveryUnconfirmed: true, reason: "delivery-started-no-replay" };
         if (controller.signal.aborted) {
           if (job.dropped) return { ok: true, skipped: true, reason: job.cancelReason || "dropped" };
           if (job.regenerationCount < this.config().maxRegenerations) {
@@ -430,6 +440,9 @@ export class ReplyCoordinator {
         }
         throw err;
       } finally {
+        if (job.deliveryStarted) for (const id of unique(job.deliveryMessageIds || job.messageIds)) {
+          this.covered.set(coveredKey(job.logicalBotId, job.conversationId, id), Date.now() + Math.max(cfg.windowMs * 3, 60_000));
+        }
         job.controller = null;
       }
     }

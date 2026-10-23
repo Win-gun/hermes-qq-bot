@@ -5394,11 +5394,11 @@
       drafts: new Map(), contexts: { qa: "", vision: "", voice: "" },
       error: "", busy: false, refreshing: null, wizard: null, wizards: new Map(), operations: new Map(), groupDraft: null, modelCenter: null, modelLoadedAt: 0, modelError: ""
     };
-    const registryTabs = { identity: "基本", style: "风格", features: "功能", sendTypes: "发送", scope: "范围", models: "模型", connection: "连接高级" };
+    const registryTabs = { identity: "基本", style: "风格", experience: "社交表达", features: "功能", sendTypes: "发送", scope: "范围", models: "模型", connection: "连接高级" };
     const registryFeatures = { chat: "聊天问答", task: "正式任务", proactive: "主动参与", automation: "自动化", webSearch: "联网搜索", vision: "识图", asr: "语音识别", learning: "学习模式" };
     const registrySendTypes = { text: "文字", image: "图片", record: "语音", video: "视频", file: "文件" };
     const registryIdentityKeys = ["displayName", "selfName", "qq", "protocol", "managed", "onebotWsUrl", "onebotPath", "protocolContainer", "napcatContainer", "webuiPort", "noVncPort", "vncPort", "snowlumaImage", "behaviorMode"];
-    const registryPolicyKeys = ["displayName", "selfName", "style", "features", "sendTypes", "scope", "modelBindings", "voice", "behaviorMode"];
+    const registryPolicyKeys = ["displayName", "selfName", "style", "features", "sendTypes", "scope", "modelBindings", "voice", "behaviorMode", "socialExperience"];
 
     function registryStatus(id) {
       const rows = registryState.statuses;
@@ -5442,7 +5442,7 @@
     }
     function registryEditable(item) {
       const result = {};
-      for (const key of [...registryIdentityKeys, "features", "sendTypes", "scope", "modelBindings", "voice"]) {
+      for (const key of [...registryIdentityKeys, "features", "sendTypes", "scope", "modelBindings", "voice", "socialExperience"]) {
         if (item[key] !== undefined) result[key] = structuredClone(item[key]);
       }
       result.features = { ...Object.fromEntries(Object.keys(registryFeatures).map((key) => [key, false])), ...result.features };
@@ -5452,6 +5452,13 @@
       result.selfName = typeof item.selfName === "string" ? item.selfName : String(item.displayName || "");
       result.voice = { mode: "inherit", preset: "", ...result.voice };
       result.style = registryStyle(item);
+      // Compatibility defaults are draft-only. Only the experience tab submits
+      // this root; reading old accounts must never write configuration.
+      result.socialExperience = {
+        enabled: false, shadowMode: true, conversationIds: [], ...result.socialExperience,
+        turn: { enabled: true, minWaitMs: 150, maxWaitMs: 4500, ordinaryWaitMs: 700, incompleteWaitMs: 2500, maxTurnMs: 8000, ...result.socialExperience?.turn },
+        expression: { enabled: true, maxMessages: 2, minIntervalMs: 200, maxIntervalMs: 800, allowQuotes: true, ...result.socialExperience?.expression }
+      };
       return result;
     }
     function registryDraft(id = registryState.selected) {
@@ -5568,6 +5575,7 @@
           registryState.error = `账号管理加载失败：${error.message}。已有草稿保留，请重试。`;
         }
         renderRegistryLists(); renderRegistryEditor(); renderRegistryContexts(); renderRegistrySaveState(); renderApiAccountModels();
+        if (registryState.tab === "experience" && typeof activePage !== "undefined" && activePage === "account-functions") refreshExperienceStatus();
         return confirmed;
       })().finally(() => { registryState.refreshing = null; });
       return registryState.refreshing;
@@ -5590,7 +5598,7 @@
       control.disabled = disabled;
       control.addEventListener(type === "checkbox" || options ? "change" : "input", () => {
         let next = type === "checkbox" ? control.checked : type === "number" ? (control.value === "" ? null : Number(control.value)) : control.value;
-        if (path === "scope.groupIds") next = [...new Set(control.value.split(/[\s,，]+/).filter(Boolean))];
+        if (["scope.groupIds", "socialExperience.conversationIds"].includes(path)) next = [...new Set(control.value.split(/[\s,，]+/).filter(Boolean))];
         change(path, next);
       });
       // Keep label association; aria-label above excludes select option text
@@ -5604,6 +5612,58 @@
       const profiles = key === "search" ? center.searchProfiles || [] : (center.profiles || []).filter((item) => item.kind === ({ task: "chat" }[key] || key) && item.model !== "mimo-v2.5-tts-voiceclone");
       return [["", "继承全局方案"], ...(key === "task" ? [["inherit-chat", "继承本账号问答"]] : []), ...profiles.map((item) => [item.id, item.name || item.id])];
     }
+    async function refreshExperienceStatus() {
+      const state = registryState.experienceStatus ||= { value: null, loading: null, error: "" };
+      if (state.loading) return state.loading;
+      state.error = "";
+      state.loading = (async () => {
+        try {
+          const result = await api("/api/social-agent/expression-status");
+          if (result.ok !== true || !Array.isArray(result.recent)) throw new Error("invalid_response");
+          // This cache is UI-only; never project runtime diagnostics into drafts.
+          state.value = { turns: result.turns, plans: result.plans, recent: result.recent };
+        } catch {
+          state.value = null;
+          state.error = "运行诊断加载失败或管理会话不可用；旧摘要已清空，请刷新重试。";
+        } finally {
+          state.loading = null;
+          renderExperienceDiagnostic();
+        }
+      })();
+      renderExperienceDiagnostic();
+      return state.loading;
+    }
+    function renderExperienceDiagnostic() {
+      const diagnostic = $("dynamicAccountEditor")?.querySelector("[data-experience-diagnostic]");
+      if (diagnostic?.dataset?.accountId) diagnostic.textContent = registryExperienceDiagnostic(diagnostic.dataset.accountId);
+    }
+    function registryExperienceDiagnostic(id) {
+      if (!id) return "最近运行 · 只读：请到接管组成员账号的社交表达标签查看共享身份摘要。";
+      const state = registryState.experienceStatus;
+      if (state?.error) return `最近运行 · 只读：${state.error}`;
+      if (state?.loading) return "最近运行 · 只读：正在读取管理员诊断…";
+      const data = state?.value;
+      if (!data) return "最近运行 · 只读：尚未读取管理员诊断，不能据此判断功能是否正在运行。";
+      const number = value => Number.isSafeInteger(value) && value >= 0 ? String(value) : "未知";
+      const group = registryGroup(id);
+      const owners = group ? [`group:${group.id}`] : [`account:${id}`, id];
+      const scope = group ? "当前接管组共享身份" : "当前账号";
+      const lines = [`全局累计（非当前账号计数）：turn ${number(data.turns)} · ReplyPlan ${number(data.plans)}`];
+      if (!Array.isArray(data.recent)) return [...lines, `${scope}：最近记录未提供。`].join("\n");
+      const rows = data.recent.filter(row => row && owners.includes(row.owner) && ["turns", "plans"].includes(row.kind)).slice(-5).reverse();
+      if (!rows.length) return [...lines, `${scope}暂无最近记录；有界窗口为空不代表从未执行。`].join("\n");
+      lines.push(`${scope} · 最近 ${rows.length} 条（新到旧，仅状态，不含聊天内容）：`);
+      for (const row of rows) {
+        const date = typeof row.at === "number" && Number.isFinite(row.at) && row.at >= 0 ? new Date(row.at) : null;
+        const time = date && !Number.isNaN(date.getTime()) ? date.toLocaleString("zh-CN", { hour12: false }) : "时间未知";
+        const mode = row.shadow === true ? "观察" : row.shadow === false ? "实际" : "模式未报告";
+        const reason = typeof row.reason === "string" && /^[a-z0-9_-]{1,80}$/i.test(row.reason) ? row.reason : "未报告";
+        const confirmed = typeof row.confirmed === "boolean" ? row.confirmed ? "是" : "否" : number(row.confirmed);
+        const flag = value => value === true ? "是" : value === false ? "否" : "未知";
+        lines.push(`${time} · ${row.kind === "turns" ? "turn" : "ReplyPlan"} · ${mode} · 等待 ${number(row.waitMs)} ms · 消息 ${number(row.messageCount)} · 确认 ${confirmed} · 部分发送 ${flag(row.partial)} · 结果不确定 ${flag(row.uncertain)} · 原因 ${reason}`);
+      }
+      return lines.join("\n");
+    }
     function registryFields(host, value, tab, change, { policy = false, disabled = false } = {}) {
       const field = (label, path, options = {}) => registryField(host, label, path, registryGet(value, path), change, { disabled, ...options });
       if (tab === "identity") {
@@ -5614,6 +5674,49 @@
       } else if (tab === "style") {
         registryCopyStyle(host, value, change, disabled);
         field("此账号系统提示词 · 独立快照", "style.systemPrompt", { type: "textarea", hint: "留空就是空提示词，不回退到模板或其他账号。复制只取已保存的快照，不建立绑定；定时发送请到自动化配置。" });
+      } else if (tab === "experience") {
+        const settings = registryEditable(value).socialExperience;
+        const section = document.createElement("section"); section.style.gridColumn = "1 / -1";
+        const heading = document.createElement("h4"); heading.textContent = policy ? "社交表达 · 接管组共享" : "社交表达 · 此账号";
+        const note = document.createElement("p"); note.className = "hint";
+        note.textContent = policy ? "由接管组共享，随接管组策略一起保存；不改变公共活跃度、模型或发送权限。未配置时使用缺省草稿。" : "先观察，再按需启用。仅保存此账号的社交表达；不改变公共活跃度、模型或发送权限。未配置时使用缺省草稿，不会自动写入。";
+        section.append(heading, note);
+        const main = document.createElement("div"); main.className = "form-grid"; section.append(main);
+        const edit = (path, next) => {
+          // Old shared policies can lack the root too; initialize only on edit.
+          value.socialExperience ||= structuredClone(settings);
+          change(path, path === "socialExperience.shadowMode" ? next === "true" : next);
+        };
+        const add = (target, label, path, options = {}) => {
+          const current = registryGet(settings, path);
+          const control = registryField(target, label, `socialExperience.${path}`, path === "shadowMode" ? String(current) : current, edit, { disabled, ...options });
+          if (options.type === "number") { control.min = path === "expression.maxMessages" || path === "turn.maxTurnMs" ? "1" : "0"; control.step = "1"; }
+          return control;
+        };
+        add(main, "启用社交表达", "enabled", { type: "checkbox", hint: "默认关闭；修改模式或参数不会代替你打开此开关。" });
+        add(main, "运行模式", "shadowMode", { options: [["true", "观察 · 不发送"], ["false", "实际 · 仍受原有权限约束"]] });
+        add(main, "会话范围（一行一个）", "conversationIds", { type: "textarea", hint: "例如 group:123456 或 private:123456。空范围不参与任何会话；启用前须明确指定。" });
+        add(main, "等待上限（毫秒）", "turn.maxWaitMs", { type: "number" });
+        add(main, "未完消息等待（毫秒）", "turn.incompleteWaitMs", { type: "number" });
+        add(main, "最大气泡数", "expression.maxMessages", { type: "number" });
+        add(main, "气泡最短间隔（毫秒）", "expression.minIntervalMs", { type: "number" });
+        add(main, "气泡最长间隔（毫秒）", "expression.maxIntervalMs", { type: "number" });
+        const advanced = document.createElement("details"); advanced.className = "panel-details settings-block";
+        const summary = document.createElement("summary"); summary.textContent = "高级 · 合并与引用"; advanced.append(summary);
+        const fields = document.createElement("div"); fields.className = "form-grid"; advanced.append(fields);
+        add(fields, "启用自适应等待", "turn.enabled", { type: "checkbox" });
+        add(fields, "最短等待（毫秒）", "turn.minWaitMs", { type: "number" });
+        add(fields, "普通消息等待（毫秒）", "turn.ordinaryWaitMs", { type: "number" });
+        add(fields, "整轮最长等待（毫秒）", "turn.maxTurnMs", { type: "number" });
+        add(fields, "启用多气泡表达", "expression.enabled", { type: "checkbox" });
+        add(fields, "允许引用消息", "expression.allowQuotes", { type: "checkbox" });
+        section.append(advanced);
+        const diagnostic = document.createElement("p"); diagnostic.className = "hint"; diagnostic.setAttribute("role", "status");
+        diagnostic.dataset.experienceDiagnostic = ""; diagnostic.dataset.accountId = policy ? "" : registryState.selected;
+        diagnostic.style.whiteSpace = "pre-line"; diagnostic.style.overflowWrap = "anywhere";
+        diagnostic.textContent = registryExperienceDiagnostic(diagnostic.dataset.accountId);
+        const refresh = registryButton("刷新运行摘要（只读）", refreshExperienceStatus);
+        section.append(diagnostic, refresh); host.append(section);
       } else if (tab === "connection") {
         if (!policy) {
           field("协议", "protocol", { options: [["snowluma", "SnowLuma"], ["napcat", "NapCat"]] });
@@ -5635,6 +5738,19 @@
       }
     }
     function registryValidate(value, keys) {
+      if (keys.includes("socialExperience") && value.socialExperience !== undefined) {
+        const p = value.socialExperience;
+        if (!p || typeof p !== "object" || Array.isArray(p)) throw new Error("社交表达配置须为对象");
+        for (const flag of [p.enabled, p.shadowMode, p.turn?.enabled, p.expression?.enabled, p.expression?.allowQuotes]) if (typeof flag !== "boolean") throw new Error("社交表达开关须为布尔值");
+        if (!Array.isArray(p.conversationIds) || p.conversationIds.length > 128 || p.conversationIds.some(id => typeof id !== "string" || !/^(?:group|private):[1-9]\d{0,19}$/.test(id))) throw new Error("社交表达范围最多 128 项，须为 group:数字 或 private:数字（ID 最长 20 位）");
+        if (p.enabled && !p.conversationIds.length) throw new Error("启用社交表达前须明确指定会话范围");
+        for (const [key, n] of Object.entries({ minWaitMs: p.turn?.minWaitMs, maxWaitMs: p.turn?.maxWaitMs, ordinaryWaitMs: p.turn?.ordinaryWaitMs, incompleteWaitMs: p.turn?.incompleteWaitMs, maxTurnMs: p.turn?.maxTurnMs, minIntervalMs: p.expression?.minIntervalMs, maxIntervalMs: p.expression?.maxIntervalMs, maxMessages: p.expression?.maxMessages })) {
+          if (!Number.isSafeInteger(n) || n < (["maxTurnMs", "maxMessages"].includes(key) ? 1 : 0)) throw new Error(`社交表达 ${key} 须为${["maxTurnMs", "maxMessages"].includes(key) ? "正" : "非负"}整数`);
+        }
+        const t = p.turn, e = p.expression;
+        if (t.minWaitMs > t.maxWaitMs || t.maxWaitMs > t.maxTurnMs || [t.ordinaryWaitMs, t.incompleteWaitMs].some(n => n < t.minWaitMs || n > t.maxWaitMs)) throw new Error("等待参数须满足：最短等待 ≤ 普通 / 未完等待 ≤ 等待上限 ≤ 整轮最长等待");
+        if (e.minIntervalMs > e.maxIntervalMs) throw new Error("气泡最短间隔不能大于最长间隔");
+      }
       if (keys.includes("style") && (typeof value.style?.systemPrompt !== "string" || value.style.systemPrompt.length > 12000)) throw new Error("风格提示词须为文本，最多 12000 字符；允许留空");
       if (keys.includes("displayName") && (!String(value.displayName || "").trim() || String(value.displayName).length > 100)) throw new Error("账号名称须为 1–100 字");
       if (keys.includes("selfName") && (typeof value.selfName !== "string" || value.selfName.length > 100)) throw new Error("机器人自称须为文本，最多 100 字；允许留空");
@@ -5646,7 +5762,7 @@
       }
       for (const key of keys.filter((key) => key.endsWith("Port"))) if (value[key] != null && (!Number.isInteger(value[key]) || value[key] < 1 || value[key] > 65535)) throw new Error("端口须为 1–65535 或留空");
     }
-    function registryTabKeys(tab) { return tab === "identity" ? ["displayName", "selfName", "qq", "behaviorMode"] : tab === "connection" ? registryIdentityKeys.filter((key) => !["displayName", "selfName", "qq", "behaviorMode"].includes(key)) : tab === "models" ? ["modelBindings", "voice"] : [tab]; }
+    function registryTabKeys(tab) { return tab === "experience" ? ["socialExperience"] : tab === "identity" ? ["displayName", "selfName", "qq", "behaviorMode"] : tab === "connection" ? registryIdentityKeys.filter((key) => !["displayName", "selfName", "qq", "behaviorMode"].includes(key)) : tab === "models" ? ["modelBindings", "voice"] : [tab]; }
     function registryPatch(draft, keys) {
       registryValidate(draft.value, keys);
       const patch = {};
@@ -5717,6 +5833,7 @@
     function registrySelect(id, tab = registryState.tab) {
       registryState.selected = id; registryState.tab = tab;
       renderRegistryLists(); renderRegistryEditor(true); renderRegistrySaveState();
+      if (tab === "experience") refreshExperienceStatus();
     }
     function syncRegistryDraftControls(host, value, group = null) {
       for (const control of host.querySelectorAll("[data-registry-field]")) {
@@ -5858,6 +5975,8 @@
         const paused = registryItem().enabled === false;
         const badge = host.querySelector("[data-registry-participation-state]"); if (badge) { badge.textContent = paused ? "已暂停参与" : "参与中"; badge.className = `pill ${paused ? "" : "good"}`; }
         const action = host.querySelector("[data-registry-participation]"); if (action) action.textContent = paused ? "恢复参与" : "暂停参与";
+        const diagnostic = host.querySelector("[data-experience-diagnostic]");
+        if (diagnostic?.dataset?.accountId) diagnostic.textContent = registryExperienceDiagnostic(diagnostic.dataset.accountId);
         return;
       }
       host.replaceChildren();

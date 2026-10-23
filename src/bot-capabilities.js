@@ -193,6 +193,7 @@ export function configForAccountCapabilities(config = {}, accountId = defaultAcc
   next.__activeAccountDisplayName = account.displayName;
   next.__activeAccountSelfName = account.selfName || account.displayName;
   next.socialAgent = structuredClone(account.socialAgent);
+  next.socialExperience = account.socialExperience === undefined ? undefined : structuredClone(account.socialExperience);
   applyApiCenterBindings(next, center, accountId);
   if (account.behaviorMode) {
     // Project before changing the selected default: root values belong to the
