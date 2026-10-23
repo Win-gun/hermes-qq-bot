@@ -33,6 +33,9 @@ jobs:
       - run: npm run test:reply
       - run: npm run test:text-completion
       - run: npm run test:accounts
+        timeout-minutes: 4
+        env:
+          HERMES_QQ_TEST_TIMING: '1'
       - run: npm run test:account-isolation
       - run: npm run test:features
       - run: npm run test:api-center

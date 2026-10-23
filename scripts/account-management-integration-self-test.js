@@ -20,7 +20,12 @@ const ids = Array.from({ length: 6 }, (_, index) => `fixture-${index}`);
 const qqs = ids.map((_, index) => String(91000 + index));
 const GROUP = "810001", BLOCKED = "810002", QUIET = "810003", EXPLICIT = "810004";
 const NEGATIVE_ACK_GROUP = "810005";
-const deadline = Date.now() + 60_000;
+// This is a 45-case end-to-end suite, not one failover attempt. It includes
+// durable config writes, six-account probes and real 1s shared send spacing.
+// Node 22/CI can exceed 60s cumulatively even when every bounded action passes.
+const fixtureBudgetMs = 120_000, caseBudgetMs = 20_000;
+const startedAt = Date.now(), deadline = startedAt + fixtureBudgetMs;
+let caseDeadline = Infinity;
 let child, childClosed, negativeAck, base, token = "", output = "", sequence = 0;
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const hasExited = (process) => process && (process.exitCode !== null || process.signalCode !== null);
@@ -45,7 +50,7 @@ async function freePort() {
 }
 
 async function until(predicate, label, timeoutMs = 4500) {
-  const end = Math.min(deadline, Date.now() + timeoutMs);
+  const end = Math.min(deadline, caseDeadline, Date.now() + timeoutMs);
   while (Date.now() < end) {
     if (hasExited(child)) throw new Error(`isolated bridge exited (${child.exitCode ?? child.signalCode}): ${clean(output)}`);
     const value = await predicate();
@@ -71,8 +76,11 @@ function sanitizedStatusDiagnosis(status) {
 }
 
 async function test(name, run, { diagnose = false } = {}) {
+  const started = Date.now();
+  caseDeadline = Math.min(deadline, started + caseBudgetMs);
   try { await run(); results.push({ name, ok: true }); }
   catch (error) {
+    caseDeadline = Infinity; // Permit bounded diagnostics after a case timeout.
     const failure = { name, ok: false, error: clean(error.message) };
     if (diagnose) {
       try { failure.statuses = (await current()).statuses.map(sanitizedStatusDiagnosis); }
@@ -80,10 +88,17 @@ async function test(name, run, { diagnose = false } = {}) {
     }
     results.push(failure);
   }
+  finally {
+    caseDeadline = Infinity;
+    results.at(-1).durationMs = Date.now() - started;
+    if (process.env.HERMES_QQ_TEST_TIMING === "1")
+      process.stderr.write(`${JSON.stringify({ test: name, durationMs: Date.now() - started, remainingMs: deadline - Date.now() })}\n`);
+  }
 }
 
 async function request(route, method = "GET", body, headers = {}) {
-  if (Date.now() > deadline) throw new Error("60s fixture deadline exceeded");
+  if (Date.now() > deadline) throw new Error(`${fixtureBudgetMs / 1000}s fixture deadline exceeded`);
+  if (Date.now() > caseDeadline) throw new Error(`${caseBudgetMs / 1000}s case deadline exceeded`);
   // Undici may rewrite Host; use raw loopback HTTP for the hostile-Host test.
   if (headers.host) return new Promise((resolve, reject) => {
     const req = http.request(`${base}${route}`, { method, headers: { "x-hermes-qq-admin": token, ...headers } }, (response) => {
@@ -148,7 +163,7 @@ const archive = (...parts) => {
   return fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) : [];
 };
 
-const hardStop = setTimeout(() => { for (const socket of sockets.values()) socket.terminate(); child?.kill("SIGKILL"); }, 62_000);
+const hardStop = setTimeout(() => { for (const socket of sockets.values()) socket.terminate(); child?.kill("SIGKILL"); }, fixtureBudgetMs + 2000);
 try {
   for (const dir of ["bin", "hermes", "tmp", "data"]) fs.mkdirSync(path.join(home, dir), { recursive: true });
   const dockerLog = path.join(home, "docker-attempts.jsonl");
@@ -629,5 +644,6 @@ finally {
 const failures = results.filter((item) => !item.ok);
 console.log(JSON.stringify({ ok: failures.length === 0, fixtureOnly: true, tests: results.length, passed: results.length - failures.length,
   fixture: { accountIds: ids, qqs, groups: { allowed: GROUP, blocked: BLOCKED, quiet: QUIET, explicit: EXPLICIT, negativeAck: NEGATIVE_ACK_GROUP },
-    transport: "napcat reverse WS", hermes: "local Node fixture", deadlineMs: 60000 }, failures }, null, 2));
+    transport: "napcat reverse WS", hermes: "local Node fixture", deadlineMs: fixtureBudgetMs, caseBudgetMs,
+    elapsedMs: Date.now() - startedAt }, failures }, null, 2));
 if (failures.length) process.exitCode = 1;

@@ -16,6 +16,7 @@ import { AccountRuntime, logicalBotId, botConversationKey, botControlRevision } 
 import { replyDeliveryConfig } from "../src/reply-execution.js";
 import { reconcileMemoryInPlace } from "../src/memory-state.js";
 import { socialAgentConfig } from "../src/social-agent-state.js";
+import { discoveryUsedIds } from "../src/social-discovery-context.js";
 
 // Read source only. Never import/start main(), open sockets, spawn a service,
 // read live config/state, or persist anything. The complete real message callback
@@ -154,6 +155,11 @@ function harness(config = fixtureConfig(), mutation = {}) {
     },
     socialScopes: new Map(), socialKey: ctx => JSON.stringify([ctx.logicalId, ctx.conversationId]),
     socialRuntime: { cancel: noop, observe: forbidden("unexpected social agent planner") },
+    // Human intake updates/cancels discovery even when automatic collection
+    // is disabled. Keep these boundaries account-owned, like the real runtime.
+    discoveryLastHuman: new Map(), discoveryLastGroupEvent: new Map(),
+    discoveryCancellations: [], discoveryRuntime: { cancel: owner => context.discoveryCancellations.push(owner) },
+    discoveryUsedIds, discoveryItemsFor: () => [], discoveryDeliveredProvider: async () => [],
     taskRuntime: { get: () => null }, handleTaskControl: async () => false,
     replyCoordinator: { observeMessage: () => ({ absorbed: false }), dropSenderJobs: noop, enqueue: (job) => jobs.push(job),
       refreshLogicalBot: noop, invalidateLogicalBot: noop },
@@ -293,6 +299,25 @@ await test("1 reverse WS identity/rebind/session isolation", async () => {
     check.notEqual(f.c.activeOneBotWs, alphaSocket, `${topology}: unknown identity clears old active reference`);
     check.deepEqual(f.warnings, []);
   }
+});
+
+await test("human intake cancels discovery only for its logical account", async () => {
+  const h = harness(), { c } = h;
+  const alpha = logicalBotId(h.config, A), beta = logicalBotId(h.config, B);
+  h.connect(A); h.connect(B);
+  await h.emit(A);
+  check.deepEqual([...c.discoveryLastHuman.keys()], [alpha]);
+  check.deepEqual([...c.discoveryCancellations], [alpha]);
+  check.equal(c.discoveryLastGroupEvent.has(JSON.stringify([alpha, `group:${G}`])), true);
+  check.equal(c.discoveryLastGroupEvent.has(JSON.stringify([beta, `group:${G}`])), false);
+  h.advance(1000);
+  await h.emit(B, "private fixture question", { private: true });
+  check.equal(c.discoveryLastHuman.get(alpha), h.time() - 1000);
+  check.equal(c.discoveryLastHuman.get(beta), h.time());
+  check.deepEqual([...c.discoveryCancellations], [alpha, beta]);
+  check.equal(c.discoveryLastGroupEvent.size, 1, "private intake must not publish group discovery context");
+  await h.emit(A, "peer bot fixture", { userId: QQ[B] });
+  check.deepEqual([...c.discoveryCancellations], [alpha, beta], "peer bot events must not count as human intake");
 });
 
 await test("2 private diagnostic authenticity, freshness, replay, ACK race", async () => {
