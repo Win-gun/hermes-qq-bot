@@ -1,4 +1,6 @@
 // Callback-only planner. No sockets, files, model clients or background timers.
+import { validateReplyPlan } from "./reply-plan.js";
+
 const TOOL_NAMES = ["read_unread", "read_detail", "read_history", "read_memory", "web_search", "schedule_followup"];
 const plain = value => value !== null && typeof value === "object" && !Array.isArray(value)
   && [Object.prototype, null].includes(Object.getPrototypeOf(value));
@@ -16,6 +18,21 @@ export function withSocialAgentUsage(decision, usage) {
   usageReceipts.set(decision, copy(usage));
   return decision;
 }
+// Host-only attachment, deliberately NOT a decision schema field. The adapter
+// supplies current scoped allowedStickerIds/allowedQuoteIds and text/bubble
+// limits via the ordinary ReplyPlan options. JSON cloning drops this metadata.
+const expressionPlans = new WeakMap();
+export function withSocialExpressionPlan(decision, plan, options) {
+  if (!plain(decision)) throw fail("SOCIAL_INVALID_EXPRESSION_PLAN");
+  expressionPlans.delete(decision);
+  if (decision.action !== "reply" || !plain(plan) || plan.action !== "reply") throw fail("SOCIAL_INVALID_EXPRESSION_PLAN");
+  let validated;
+  try { validated = validateReplyPlan(plan, options); }
+  catch { throw fail("SOCIAL_INVALID_EXPRESSION_PLAN"); }
+  if (validated.action !== "reply") throw fail("SOCIAL_INVALID_EXPRESSION_PLAN");
+  expressionPlans.set(decision, copy(validated));
+  return decision;
+}
 const safeKey = value => typeof value === "string" && /^(account|group):[A-Za-z0-9_.:\-]{1,100}$/.test(value);
 const conversation = value => typeof value === "string" && /^(group|private):[1-9]\d{0,19}$/.test(value);
 const qq = value => typeof value === "string" && /^[1-9]\d{0,19}$/.test(value);
@@ -24,7 +41,7 @@ const ERROR_CODES = new Set(["SOCIAL_DISABLED", "SOCIAL_CANCELLED", "SOCIAL_TIME
   "SOCIAL_INVALID_DECISION", "SOCIAL_INVALID_SEQUENCE", "SOCIAL_INVALID_TOOL", "SOCIAL_INVALID_SNAPSHOT",
   "SOCIAL_BUDGET_EXHAUSTED", "SOCIAL_TOOL_LIMIT", "SOCIAL_INVALID_TOOL_RESULT", "SOCIAL_CALL_LIMIT", "SOCIAL_SCHEDULE_UNAVAILABLE",
   "SOCIAL_INVALID_CONTINUITY", "SOCIAL_CONTINUITY_REJECTED", "SOCIAL_FOREIGN_TOOL_RESULT", "SOCIAL_INTENT_ALREADY_CLAIMED",
-  "SOCIAL_MODEL_ONLY_UNAVAILABLE"]);
+  "SOCIAL_MODEL_ONLY_UNAVAILABLE", "SOCIAL_INVALID_EXPRESSION_PLAN"]);
 
 function checkScope(value, ctx) {
   if (!plain(value)) return;
@@ -146,7 +163,7 @@ function validateDecision(value, seenSeq, allowed, seenMessageIds) {
  * tools[name](ctx,args,{signal}): scoped JSON result; adapters MUST honor signal
  * and must not expose foreign scopes or perform external sends. Descriptors
  * expose names/argument keys only; closures and credentials never reach model.
- * sendIntent(ctx,{messages,throughSeq,seenSeq,signal}): coordinator adapter; must honor
+ * sendIntent(ctx,{messages,throughSeq,seenSeq,signal,expressionPlan?}): coordinator adapter; must honor
  * signal and recheck routing/quiet/revisions at wire time. Resolution is final;
  * rejection/uncertainty is never retried by this runtime.
  * isCurrent(ctx): includes identity, conversation controls and quiet state.
@@ -170,6 +187,9 @@ function validateDecision(value, seenSeq, allowed, seenMessageIds) {
  * Adapter must revalidate actual sender/current evidence through core mutators.
  * Model decision.usage is untrusted. Only withSocialAgentUsage host receipts
  * contribute known tokens; all other dispatched calls count unknown usage.
+ * withSocialExpressionPlan attaches a detached, host-validated reply plan only.
+ * Raw decision.expressionPlan remains forbidden; the legacy messages string[]
+ * schema is unchanged. Only attached plans add expressionPlan to sendIntent.
  * Public methods return content-free codes; status never returns model text.
  */
 export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, callModel, tools = {}, sendIntent, isCurrent,
@@ -348,7 +368,7 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
           daily.reservedCalls += 1;
           daily.pending[claim] = { at: now() };
         });
-        let invoked = false, decision, trustedUsage;
+        let invoked = false, decision, trustedUsage, expressionPlan;
         try {
           const raw = await bounded(job, () => {
             invoked = true;
@@ -356,7 +376,16 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
           });
           trustedUsage = plain(raw) ? usageReceipts.get(raw) : undefined;
           if (plain(raw)) usageReceipts.delete(raw);
-          decision = validateDecision(raw, seenSeq, allowed, job.seenMessageIds);
+          try {
+            decision = validateDecision(raw, seenSeq, allowed, job.seenMessageIds);
+            // Capture only AFTER strict model schema validation; never inspect
+            // raw.expressionPlan. Consume once, including rejected decisions.
+            const attached = expressionPlans.get(raw);
+            if (attached) {
+              if (decision.action !== "reply") throw fail("SOCIAL_INVALID_EXPRESSION_PLAN");
+              expressionPlan = copy(attached);
+            }
+          } finally { if (plain(raw)) expressionPlans.delete(raw); }
           if (job.reflectOnly || job.discoveryWakeId) {
             if (decision.action === "tool" && !["read_unread", "read_detail", "read_history", "read_memory"].includes(decision.tool.name)) throw fail("SOCIAL_INVALID_TOOL");
             if (["wait", "dive", ...(job.reflectOnly ? ["reply"] : [])].includes(decision.action)) {
@@ -430,7 +459,8 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
           if (guard(job).shadow) return { code: "SOCIAL_SHADOWED" };
           metrics.intents += 1;
           await bounded(job, () => sendIntent(job.ctx, { messages: decision.messages,
-            materialIds: decision.materialIds || [], throughSeq: decision.throughSeq, seenSeq, signal }));
+            materialIds: decision.materialIds || [], throughSeq: decision.throughSeq, seenSeq, signal,
+            ...(expressionPlan ? { expressionPlan: copy(expressionPlan) } : {}) }));
         }
         await finish(job, patch);
         await terminal(job, decision, seenSeq);

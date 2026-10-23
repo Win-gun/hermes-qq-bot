@@ -42,6 +42,10 @@ config.listen.port = await freePort();
 config.control.port = await freePort();
 config.accounts.primary.qq = "10001";
 config.accounts.primary.protocol = "napcat";
+config.accounts.primary.onebotWsUrl = "";
+config.accounts.primary.managed = false;
+config.accounts.primary.protocolContainer = "";
+config.accounts.primary.napcatContainer = "";
 config.accounts.standbys = [];
 config.accounts.failover.enabled = false;
 config.targetGroups = ["*"];
@@ -54,6 +58,9 @@ config.voice.tts.enabled = true;
 config.voice.tts.allowMemberVoiceDesign = false;
 config.voice.voiceClone.enabled = true;
 config.memory.aiExtraction.enabled = false;
+config.memory.learning = { enabled: false };
+config.socialPlanner = { enabled: false };
+config.proactive = { enabled: false };
 config.webSearch.enabled = false;
 config.loginRecovery.enabled = false;
 config.adminNotifications.enabled = false;
@@ -61,14 +68,19 @@ config.dailyMessages.enabled = false;
 config.automation.enabled = false;
 config.taskMode.enabled = false;
 const mockAi = path.join(temp, "mock-ai.cjs");
-fs.writeFileSync(mockAi, 'process.stdout.write("这是隔离测试回复。");\n', { mode: 0o600 });
-config.ai.command = process.execPath;
-config.ai.args = [mockAi];
+fs.writeFileSync(mockAi, `#!${process.execPath}\nprocess.stdout.write("这是隔离测试回复。");\n`, { mode: 0o700 });
+config.ai.command = mockAi;
+config.ai.args = ["-z"];
+config.messageDebounce = { enabled: false };
 fs.writeFileSync(path.join(state, "config.json"), JSON.stringify(config), { mode: 0o600 });
+const preload = path.join(temp, "fake-host.cjs");
+fs.writeFileSync(preload, `const cp=require('node:child_process'),{syncBuiltinESMExports}=require('node:module');
+const spawn=cp.spawn;cp.spawnSync=()=>({status:1,stdout:'',stderr:'fixture host operations disabled'});
+cp.spawn=(cmd,args,opts)=>cmd===${JSON.stringify(mockAi)}?spawn(cmd,args,opts):spawn(process.execPath,['-e','process.exit(91)'],opts);syncBuiltinESMExports();`);
 
 const child = spawn(process.execPath, [path.join(root, "src/bridge.js")], {
   cwd: root,
-  env: { ...process.env, MIMO_API_KEY: "", HERMES_QQ_HOME: state, HERMES_QQ_RESOURCE_ROOT: root, HERMES_QQ_LOG_DIR: logs },
+  env: { ...process.env, MIMO_API_KEY: "", NODE_OPTIONS: `--require=${preload}`, HERMES_QQ_HOME: state, HERMES_QQ_RESOURCE_ROOT: root, HERMES_QQ_LOG_DIR: logs },
   stdio: ["ignore", "pipe", "pipe"]
 });
 let socket;
@@ -92,12 +104,16 @@ try {
     try { action = JSON.parse(String(raw)); } catch { return; }
     if (!action?.echo) return;
     const id = Number(action.params?.message_id);
-    const data = action.action === "get_msg"
+    const data = action.action === "get_login_info" ? { user_id: 10001, nickname: "Synthetic Fixture" }
+      : action.action === "get_status" ? { online: true, good: true }
+      : action.action === "get_group_member_list" ? [{ user_id: 10001 }, { user_id: 20002 }]
+      : action.action === "get_group_list" ? [{ group_id: 30003 }]
+      : action.action === "get_msg"
       ? { message_id: id, sender: { user_id: id === 42 ? 20002 : 30004 }, message: [{ type: "record", data: { file: "sample.amr" } }] }
       : { message_id: 777 };
     socket.send(JSON.stringify({ status: "ok", retcode: 0, data, echo: action.echo }));
     if (!["send_group_msg", "send_private_msg"].includes(action.action)) return;
-    const text = String(action.params?.message || "");
+    const text = Array.isArray(action.params?.message) ? action.params.message.filter(item => item.type === "text").map(item => item.data?.text || "").join("") : String(action.params?.message || "");
     const match = waiting.find((item) => item.action === action.action && item.pattern.test(text));
     if (match) {
       waiting.splice(waiting.indexOf(match), 1);
@@ -105,6 +121,8 @@ try {
       match.resolve(text);
     }
   });
+  socket.send(JSON.stringify({ post_type: "meta_event", meta_event_type: "lifecycle", sub_type: "connect", self_id: 10001 }));
+  await new Promise(resolve => setTimeout(resolve, 100));
   let messageId = 100;
   async function command(text, pattern, { privateChat = false, userId = 20002, quoteId = 0 } = {}) {
     const action = privateChat ? "send_private_msg" : "send_group_msg";
@@ -137,9 +155,9 @@ try {
   assert.match(await command("/bot voice force", /本会话语音模式已设为强制/, { privateChat: true }), /强制/);
   assert.match(await command("你好", /这是隔离测试回复/, { privateChat: true }), /这是隔离测试回复/);
   const memory = JSON.parse(fs.readFileSync(path.join(state, "data/memory.json"), "utf8"));
-  assert.equal(memory.groups["30003"].settings.voiceReplyMode, "mixed");
-  assert.equal(memory.groups["30003"].settings.voicePreset, "冰糖");
-  assert.equal(memory.groups["private:20002"].settings.voiceReplyMode, "force");
+  assert.equal(memory.groups["30003"].settings.botSettings["account:primary"].voiceReplyMode, "mixed");
+  assert.equal(memory.groups["30003"].settings.botSettings["account:primary"].voicePreset, "冰糖");
+  assert.equal(memory.groups["private:20002:primary"].settings.botSettings["account:primary"].voiceReplyMode, "force");
   console.log(JSON.stringify({ ok: true, commands: 15, realQqMessages: 0, fallbackText: true }));
 } finally {
   socket?.close();

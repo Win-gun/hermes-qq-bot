@@ -16,6 +16,13 @@ try {
   } });
   repository.acquireWriter(); repository.load();
   const committed = { groups: { fixture: { users: { u: { names: ["fixture recovered user"] } } } } };
+  // Optional expression state is additive, not a new writer/file. Ordinary
+  // backups preserve these non-credential branches even for old-style config;
+  // restored data alone cannot enable a policy or replay an outbound action.
+  committed.socialExpressionAssets = { version: 1, bots: { "account:fixture": { capabilities: {}, stickers: {} } } };
+  committed.socialExpressionLanguage = { version: 1, bots: {} };
+  committed.socialExpressionLibrary = { version: 1, bots: { "account:fixture": { nextClaim: 2, lastAt: 1000,
+    days: { "2026-10-23": { claims: { "1": { status: "reserved", at: 1000 } } } } } } };
   assert.throws(() => repository.save(committed));
   repository.close();
   assert.deepEqual(readMemorySnapshot(memoryPath), committed);

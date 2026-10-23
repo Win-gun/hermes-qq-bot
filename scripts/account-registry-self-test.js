@@ -174,6 +174,9 @@ assert(safe.onebotWsUrl.includes("path=ok"));
 assert.deepEqual(safe.style, independent.accounts.items[0].style);
 
 const delivery = (action, params, options = {}) => accountDeliveryDecision(independent, "bot3", action, params, options);
+for (const action of ["group_poke", "friend_poke", "send_poke"])
+  assert.equal(delivery(action, { group_id: "900001", user_id: "900002" }).allowed, false, "unverified native interaction cannot bypass send policy");
+assert.equal(delivery("get_status", {}).allowed, true, "read-only protocol status remains compatible");
 assert.equal(delivery("send_group_msg", { group_id: "900001", message: "hello" }).allowed, true);
 assert.equal(delivery("send_group_msg", { group_id: "900001", message: "hello" }, { quiet: true }).allowed, false);
 assert.equal(delivery("send_private_msg", { user_id: "900002", message: [{ type: "record", data: { file: "a.wav" } }] }).allowed, false);

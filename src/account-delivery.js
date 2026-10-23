@@ -67,6 +67,12 @@ export function messageContentTypes(message) {
 }
 
 export function accountDeliveryDecision(config, accountId, action, params = {}, { quiet = false, activeGroupAccountId = "" } = {}) {
+  // Native poke is not a read action. Until a verified protocol capability,
+  // target evidence and dedicated policy exist, fail closed even for group_poke
+  // (whose name does not match the legacy send_* guard).
+  if (["group_poke", "friend_poke", "send_poke"].includes(action)) return {
+    allowed: false, reason: "原生拍一拍能力尚未验证或授权", code: "ACCOUNT_SEND_BLOCKED", types: []
+  };
   if (!/^send_/.test(action) && !/^upload_(?:group|private)_file$/.test(action)) return { allowed: true, types: [] };
   const account = effectiveAccount(config, accountId);
   const groupId = params.group_id;

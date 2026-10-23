@@ -18,6 +18,7 @@ function source(name) {
 const constants = ["registryTabs", "registryFeatures", "registrySendTypes", "registryIdentityKeys", "registryPolicyKeys"]
   .map(name => script.match(new RegExp(`^    const ${name} = .+;$`, "m"))[0]).join("\n");
 const functions = ["api", "ensureAdminSession", "switchPage", "currentScope", "registryItem", "registryGroup", "registryEffective", "registryStyle", "registryEditable", "registryDraft", "registryGet", "registrySet", "registryButton", "registryRequest", "rebaseRegistryDraft", "refreshAccountRegistry", "registryField", "registryFields", "refreshExperienceStatus", "renderExperienceDiagnostic", "registryExperienceDiagnostic", "registryValidate", "registryTabKeys", "registryPatch", "confirmRegistrySave", "saveRegistryPatch", "saveRegistryEditor", "registrySelect", "syncRegistryDraftControls", "renderRegistryEditor", "registryDraftStatus"]
+  .concat(["experienceLibraryScopes", "experienceLibraryState", "experienceLibraryText", "experienceLibraryProjection", "loadExperienceLibrary", "selectExperienceLibrary", "mutateExperienceLibrary", "renderExperienceLibrary"])
   .map(source).join("\n");
 const realSource = `${constants}\nlet adminSessionToken = "", adminSessionRequest = null;\n${functions}`;
 // Syntax-check every inline script too, without running page initialization.
@@ -46,6 +47,7 @@ class Element {
     if (selector === "[data-registry-participation-state]") return nodes.filter(c => "registryParticipationState" in c.dataset);
     if (selector === "[data-registry-participation]") return nodes.filter(c => "registryParticipation" in c.dataset);
     if (selector === "[data-experience-diagnostic]") return nodes.filter(c => "experienceDiagnostic" in c.dataset);
+    if (selector === "[data-experience-library]") return nodes.filter(c => "experienceLibrary" in c.dataset);
     return [];
   }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
@@ -65,19 +67,58 @@ function fixture(document, state = {}) {
     { id: "demo-b", displayName: "演示账号 B", enabled: true, style: { systemPrompt: "saved B" }, features: { chat: true } }
   ], failoverGroups: [], statuses: [] };
   const response = (body, status = 200) => new Response(JSON.stringify(body), { status });
-  const hooks = { diagnostic: { ok: true, turns: 0, plans: 0, recent: [] } };
+  const hooks = { diagnostic: { ok: true, turns: 0, plans: 0, recent: [] } }, libraries = new Map();
+  const confirmAction = typeof state.confirm === "function" ? state.confirm.bind(state) : () => true;
+  const library = (id, scope) => {
+    const key = JSON.stringify([id, scope]);
+    if (!libraries.has(key)) libraries.set(key, { ok: true, revision: "s1", capabilities: { collection: "unknown" }, dailyVisionCalls: { reserved: 0, attempted: 2, limit: 8 }, stickers: [
+      { id: "sticker-a", official: { desc: "演示表情 · 未标注", url: "https://tracking.invalid/image.png", trust: "untrusted" }, annotation: null },
+      { id: "sticker-b", official: { desc: "演示表情 · 候选", trust: "untrusted" }, annotation: { revision: 1, status: "candidate", note: "合成笑脸", tags: ["合成"], sentCount: 0 } }
+    ], language: { ok: true, revision: 1, stats: { messageCount: 3, averageTextLength: 12, averageIntervalMs: 700, imageRatio: 0.2, emojiRatio: 0.3 }, candidates: [
+      { id: "slang:demo:1", revision: 1, status: "pending", term: "合成词", meaning: "演示词义", evidence: [{ quote: "RAW_MESSAGE_SENTINEL", userId: "123456" }] }
+    ] } });
+    return libraries.get(key);
+  };
   Object.assign(state, {
     cfg: { revision: "r1" }, dirtyScopes: new Set(), conflictedScopes: new Set(), activePage: "account-functions", activeTabs: { qa: "persona" },
     pageMeta: {}, scopeNames: { "account-functions": "账号功能", "qa:persona": "风格" },
     registryState: { loaded: true, selected: "demo-a", tab: "experience", revision: "r1", epoch: 0, items: structuredClone(server.items), groups: [], statuses: [], drafts: new Map(), contexts: {}, operations: new Map(), error: "", refreshing: null, modelLoadedAt: Date.now(), busy: false },
     $: id => document.getElementById(id),
     renderRegistryLists() {}, renderRegistryContexts() {}, renderRegistrySaveState() {}, renderSaveState() {}, renderApiAccountModels() {}, renderAutomationTargetPicker() {}, fillConfig() {},
-    registryFeedback: message => feedback.push(message), confirm: () => true,
+    registryFeedback: message => feedback.push(message), confirm: confirmAction,
     sensitiveApi: async () => ({ center: {} }),
     fetch: async (url, opts = {}) => {
       const method = opts.method || "GET";
       requests.push({ url, method, body: opts.body ? JSON.parse(opts.body) : null, token: opts.headers?.get("x-hermes-qq-admin") });
       if (url === "/api/admin/session") return response({ token: "synthetic-session" });
+      if (url.includes("/expression-library")) {
+        assertRoute(opts.headers.get("x-hermes-qq-admin") === "synthetic-session");
+        const parsed = new URL(url, "https://synthetic.invalid"), parts = parsed.pathname.split("/"), id = decodeURIComponent(parts[4]);
+        const body = opts.body ? JSON.parse(opts.body) : null, scope = body?.conversationId || parsed.searchParams.get("conversation_id");
+        const data = library(id, scope);
+        if (method === "GET") {
+          const snapshot = structuredClone(data); await hooks.beforeLibraryRead?.(id, scope);
+          return response(hooks.libraryResponse || snapshot, hooks.libraryStatus || 200);
+        }
+        assertRoute(method === "POST"); await hooks.beforeLibraryPost?.();
+        if (hooks.libraryPostStatus) return response({ error: "PRIVATE_ERROR_SENTINEL" }, hooks.libraryPostStatus);
+        if (body.expectedStateRevision !== data.revision) return response({ error: "conflict" }, 409);
+        const action = parts.at(-1);
+        if (action === "sync") data.capabilities.collection = "supported";
+        else if (action === "annotate") {
+          const item = data.stickers.find(i => i.id === body.id);
+          data.dailyVisionCalls.attempted++;
+          item.annotation = { revision: (item.annotation?.revision || 0) + 1, status: "candidate", note: "合成单项标注", tags: ["合成"], sentCount: 0 };
+        } else {
+          assertRoute(["review-sticker", "review-language"].includes(action));
+          const item = action === "review-language" ? data.language.candidates.find(i => i.id === body.id) : data.stickers.find(i => i.id === body.id)?.annotation;
+          if (body.expectedRevision !== item?.revision) return response({ error: "conflict" }, 409);
+          item.status = body.status; item.revision++;
+        }
+        data.revision = `s${Number(data.revision.slice(1)) + 1}`;
+        hooks.afterLibraryPost?.(data);
+        return response({ ok: true });
+      }
       if (url === "/api/social-agent/expression-status") {
         assertRoute(method === "GET" && opts.headers.get("x-hermes-qq-admin") === "synthetic-session");
         await hooks.beforeDiagnostic?.();
@@ -103,11 +144,11 @@ function fixture(document, state = {}) {
     }
   });
   function assertRoute(ok) { if (!ok) throw new Error("Unexpected synthetic route or missing session"); }
-  return { state, server, requests, feedback, hooks, document };
+  return { state, server, requests, feedback, hooks, document, libraries, library };
 }
 async function runtime() {
   const document = mockDocument();
-  const t = fixture(document, { document, Headers, Response, structuredClone, Date });
+  const t = fixture(document, { document, Headers, Response, URL, structuredClone, Date });
   vm.runInContext(realSource, vm.createContext(t.state));
   t.edit = (path, value) => {
     const control = document.getElementById("dynamicAccountEditor").querySelectorAll("[data-registry-field]").find(c => c.dataset.registryField === `socialExperience.${path}`);
@@ -121,11 +162,22 @@ async function runtime() {
   return t;
 }
 const plain = value => JSON.parse(JSON.stringify(value));
-const expected = { enabled: false, shadowMode: true, conversationIds: [], turn: { enabled: true, minWaitMs: 150, maxWaitMs: 4500, ordinaryWaitMs: 700, incompleteWaitMs: 2500, maxTurnMs: 8000 }, expression: { enabled: true, maxMessages: 2, minIntervalMs: 200, maxIntervalMs: 800, allowQuotes: true } };
+const expected = { enabled: false, shadowMode: true, conversationIds: [], turn: { enabled: true, minWaitMs: 150, maxWaitMs: 4500, ordinaryWaitMs: 700, incompleteWaitMs: 2500, maxTurnMs: 8000 }, expression: { enabled: true, maxMessages: 2, minIntervalMs: 200, maxIntervalMs: 800, allowQuotes: true }, stickers: { enabled: false, autoSend: false, visionLearning: false, maxDailyVisionCalls: 8, cooldownMs: 60000 }, language: { enabled: false, autoCandidates: true } };
 const cases = [];
 async function test(name, fn) { await fn(); cases.push(name); }
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 async function until(check) { for (let i = 0; i < 200; i++) { if (check()) return; await Promise.resolve(); } throw new Error("synthetic boundary not reached"); }
+function libraryScope(t, id = "demo-a", scopes = ["group:123456", "private:654321"]) {
+  const s = t.state, d = s.registryDraft(id);
+  d.value.socialExperience.conversationIds = [...scopes];
+  d.base = structuredClone(d.value);
+  s.registryItem(id).socialExperience = structuredClone(d.value.socialExperience);
+  t.server.items.find(item => item.id === id).socialExperience = structuredClone(d.value.socialExperience);
+  s.renderRegistryEditor(true);
+  return d;
+}
+function libraryHost(t) { return t.document.getElementById("dynamicAccountEditor").querySelector("[data-experience-library]"); }
+const libraryPosts = t => t.requests.filter(row => row.method === "POST" && row.url.includes("/expression-library/"));
 
 await test("draft-only defaults, controls and no implicit activation", async () => {
   const t = await runtime(), s = t.state, d = s.registryDraft();
@@ -325,12 +377,171 @@ await test("generic registry refresh works without activePage in old VM harnesse
   assert.equal(s.registryState.error, "");
   assert.equal(t.requests.filter(r => r.url === "/api/social-agent/expression-status").length, count);
 });
+await test("media policy defaults stay off and save only the current account root", async () => {
+  const t = await runtime(), s = t.state, d = s.registryDraft();
+  t.edit("stickers.autoSend", true); t.edit("language.autoCandidates", false);
+  assert.equal(d.value.socialExperience.enabled, false); assert.equal(d.value.socialExperience.stickers.enabled, false);
+  assert.equal(d.value.socialExperience.stickers.visionLearning, false); assert.equal(d.value.socialExperience.language.enabled, false);
+  t.edit("stickers.maxDailyVisionCalls", 4); t.edit("stickers.cooldownMs", 90000);
+  await s.saveRegistryEditor();
+  const patch = t.requests.find(r => r.method === "PATCH").body.patch;
+  assert.deepEqual(Object.keys(patch), ["socialExperience"]);
+  assert.equal(patch.socialExperience.stickers.maxDailyVisionCalls, 4);
+  assert.equal(t.server.items[0].socialExperience.language.autoCandidates, false);
+  assert.equal(Object.hasOwn(t.server.items[1], "socialExperience"), false);
+  assert.equal(libraryPosts(t).length, 0);
+  for (const [path, value] of [["stickers.autoSend", "true"], ["stickers.maxDailyVisionCalls", -1], ["stickers.maxDailyVisionCalls", 101], ["stickers.cooldownMs", 0.5], ["stickers.cooldownMs", 86400001], ["language.enabled", "false"]]) {
+    const candidate = structuredClone(expected); s.registrySet(candidate, path, value);
+    assert.throws(() => s.registryValidate({ socialExperience: candidate }, ["socialExperience"]));
+  }
+  for (const [calls, cooldown] of [[0, 0], [100, 86400000]]) {
+    const candidate = structuredClone(expected); candidate.stickers.maxDailyVisionCalls = calls; candidate.stickers.cooldownMs = cooldown;
+    assert.doesNotThrow(() => s.registryValidate({ socialExperience: candidate }, ["socialExperience"]));
+  }
+  const writesBefore = t.requests.filter(r => r.method === "PATCH").length;
+  for (const [path, value, max, error] of [["stickers.maxDailyVisionCalls", 101, "100", /0–100/], ["stickers.cooldownMs", 86400001, "86400000", /24 小时/]]) {
+    const control = t.edit(path, value); assert.equal(control.max, max);
+    await assert.rejects(s.saveRegistryPatch("demo-a", ["socialExperience"], "社交表达"), error);
+    assert(d.dirty.has(`socialExperience.${path}`));
+    t.edit(path, expected.stickers[path.split(".")[1]]);
+  }
+  assert.equal(t.requests.filter(r => r.method === "PATCH").length, writesBefore, "over-limit drafts are rejected before transport");
+});
+await test("library scope uses saved/draft intersection, never unsaved authority", async () => {
+  const t = await runtime(), s = t.state;
+  assert.deepEqual(plain(s.experienceLibraryScopes("demo-a")), []);
+  await s.selectExperienceLibrary("demo-a", "group:123456");
+  assert(!t.requests.some(r => r.url.includes("expression-library")));
+  const d = libraryScope(t);
+  d.value.socialExperience.conversationIds.push("group:999999");
+  assert.deepEqual(plain(s.experienceLibraryScopes("demo-a")), ["group:123456", "private:654321"]);
+  await s.selectExperienceLibrary("demo-a", "group:123456");
+  const state = s.experienceLibraryState("demo-a", "group:123456");
+  assert.equal(state.data.revision, "s1");
+  t.edit("conversationIds", "private:654321");
+  assert(!libraryHost(t).textContent.includes("sticker-a"));
+  await s.mutateExperienceLibrary("demo-a", "group:123456", "sync");
+  assert.equal(libraryPosts(t).length, 0);
+});
+await test("metadata projection creates no remote media, URLs, source text or evidence", async () => {
+  const t = await runtime(), s = t.state; libraryScope(t);
+  const remote = t.library("demo-a", "group:123456");
+  remote.stickers[0].official.desc = '<img src="https://tracking.invalid/secret">';
+  remote.stickers[1].annotation.note = "note https://tracking.invalid/hidden";
+  remote.language.candidates[0].meaning = "meaning https://tracking.invalid/hidden";
+  await s.selectExperienceLibrary("demo-a", "group:123456");
+  const host = libraryHost(t), stored = JSON.stringify(s.experienceLibraryState("demo-a", "group:123456").data);
+  assert(!/https?:|tracking.invalid|RAW_MESSAGE_SENTINEL|evidence|userId/.test(stored));
+  assert(!/https?:|tracking.invalid|RAW_MESSAGE_SENTINEL/.test(host.textContent));
+  assert(host.querySelectorAll("*").every(el => !["IMG", "IFRAME", "VIDEO", "AUDIO", "A"].includes(el.tagName)));
+  assert.match(host.textContent, /官方描述（不可信）/); assert.match(host.textContent, /候选不是事实/);
+  assert.match(host.textContent, /样本 3/); assert.match(host.textContent, /待审核候选/);
+  assert.match(host.textContent, /未知（未确认）/); assert.equal(libraryPosts(t).length, 0);
+});
+await test("sync is metadata-only; annotation requires per-item paid consent and fresh readback", async () => {
+  const t = await runtime(), s = t.state, d = libraryScope(t);
+  t.edit("turn.incompleteWaitMs", 3000); const before = plain(d.value), dirty = [...d.dirty], revision = s.registryState.revision;
+  await s.selectExperienceLibrary("demo-a", "group:123456");
+  await s.mutateExperienceLibrary("demo-a", "group:123456", "sync");
+  assert.deepEqual(libraryPosts(t)[0].body, { conversationId: "group:123456", expectedStateRevision: "s1" });
+  assert.match(libraryHost(t).textContent, /协议支持/);
+  const item = s.experienceLibraryState("demo-a", "group:123456").data.stickers[0];
+  s.confirm = () => false; await s.mutateExperienceLibrary("demo-a", "group:123456", "annotate", item);
+  assert.equal(libraryPosts(t).length, 1);
+  let prompt = ""; s.confirm = text => { prompt = text; return true; };
+  await s.mutateExperienceLibrary("demo-a", "group:123456", "annotate", item);
+  assert.match(prompt, /这一项/); assert.match(prompt, /费用/);
+  assert.deepEqual(libraryPosts(t)[1].body, { conversationId: "group:123456", expectedStateRevision: "s2", id: "sticker-a" });
+  const data = s.experienceLibraryState("demo-a", "group:123456").data;
+  assert.equal(data.stickers[0].annotation.status, "candidate"); assert.equal(data.revision, "s3");
+  assert.equal(data.stickers[1].annotation.revision, 1);
+  assert.deepEqual(plain(d.value), before); assert.deepEqual([...d.dirty], dirty); assert.equal(s.registryState.revision, revision);
+  assert(libraryPosts(t).every(r => /\/(?:sync|annotate)$/.test(r.url)));
+});
+await test("sticker and language reviews pin exact item and state revisions", async () => {
+  const t = await runtime(), s = t.state; libraryScope(t); const scope = "group:123456";
+  await s.selectExperienceLibrary("demo-a", scope);
+  const state = s.experienceLibraryState("demo-a", scope), sticker = state.data.stickers[1];
+  await s.mutateExperienceLibrary("demo-a", scope, "review-sticker", sticker, "confirmed");
+  assert.deepEqual(libraryPosts(t)[0].body, { conversationId: scope, expectedStateRevision: "s1", id: "sticker-b", expectedRevision: 1, status: "confirmed" });
+  await s.mutateExperienceLibrary("demo-a", scope, "review-sticker", sticker, "rejected");
+  assert.equal(libraryPosts(t).length, 1, "stale item revision must not wire");
+  const term = state.data.language.candidates[0];
+  await s.mutateExperienceLibrary("demo-a", scope, "review-language", term, "confirmed");
+  assert.deepEqual(libraryPosts(t)[1].body, { conversationId: scope, expectedStateRevision: "s2", id: "slang:demo:1", expectedRevision: 1, status: "confirmed" });
+  const confirmed = state.data.language.candidates[0];
+  await s.mutateExperienceLibrary("demo-a", scope, "review-language", confirmed, "revoked");
+  assert.equal(state.data.language.candidates[0].status, "revoked");
+  await s.mutateExperienceLibrary("demo-a", scope, "review-language", state.data.language.candidates[0], "confirmed");
+  assert.equal(libraryPosts(t).length, 3, "terminal language candidate cannot resurrect");
+  await s.selectExperienceLibrary("demo-a", "private:654321");
+  assert.match(libraryHost(t).textContent, /群语感仅支持群聊/);
+  assert(!libraryHost(t).textContent.includes("演示词义"));
+  assert.equal(s.experienceLibraryState("demo-a", "private:654321").data.language.candidates.length, 0);
+  await s.mutateExperienceLibrary("demo-a", "private:654321", "review-language", term, "confirmed");
+  assert.equal(libraryPosts(t).length, 3);
+});
+await test("library failures are fixed, retain config drafts and never replay uncertain POSTs", async () => {
+  for (const status of [403, 409, 500]) {
+    const t = await runtime(), s = t.state, d = libraryScope(t), scope = "group:123456";
+    t.edit("stickers.maxDailyVisionCalls", 5); const before = plain(d.value);
+    await s.selectExperienceLibrary("demo-a", scope);
+    t.hooks.libraryPostStatus = status;
+    await s.mutateExperienceLibrary("demo-a", scope, "annotate", s.experienceLibraryState("demo-a", scope).data.stickers[0]);
+    assert.equal(libraryPosts(t).length, 1); assert(!libraryHost(t).textContent.includes("PRIVATE_ERROR_SENTINEL"));
+    assert.match(libraryHost(t).textContent, status === 409 ? /修订冲突/ : /结果不确定/);
+    assert.deepEqual(plain(d.value), before); assert(d.dirty.has("socialExperience.stickers.maxDailyVisionCalls"));
+    t.hooks.libraryPostStatus = 0; await s.loadExperienceLibrary("demo-a", scope);
+    await s.mutateExperienceLibrary("demo-a", scope, "annotate", s.experienceLibraryState("demo-a", scope).data.stickers[0]);
+    assert.equal(libraryPosts(t).length, 1, "same uncertain action/revision never repeats even after fresh read");
+    assert.match(libraryHost(t).textContent, /此修订已尝试过/);
+  }
+  const t = await runtime(), s = t.state; libraryScope(t); const scope = "group:123456";
+  await s.selectExperienceLibrary("demo-a", scope);
+  t.hooks.afterLibraryPost = () => { t.hooks.libraryStatus = 500; };
+  await s.mutateExperienceLibrary("demo-a", scope, "sync");
+  assert.equal(libraryPosts(t).length, 1); assert.match(libraryHost(t).textContent, /已提交但读回未核实/);
+  assert.equal(s.experienceLibraryState("demo-a", scope).data, null);
+});
+await test("delayed library responses cannot cross account/scope; recheck revocation before POST", async () => {
+  const t = await runtime(), s = t.state, gate = deferred(); libraryScope(t); libraryScope(t, "demo-b");
+  t.hooks.beforeLibraryRead = id => id === "demo-a" ? gate.promise : undefined;
+  const pending = s.selectExperienceLibrary("demo-a", "group:123456");
+  await until(() => t.requests.some(r => r.url.includes("demo-a/expression-library")));
+  s.registrySelect("demo-b", "experience"); await s.selectExperienceLibrary("demo-b", "private:654321");
+  gate.resolve(); await pending;
+  assert.equal(libraryHost(t).dataset.accountId, "demo-b"); assert.match(libraryHost(t).textContent, /群语感仅支持群聊/);
+  const scope = "private:654321", state = s.experienceLibraryState("demo-b", scope);
+  const mutation = s.mutateExperienceLibrary("demo-b", scope, "annotate", state.data.stickers[0]);
+  s.registryDraft("demo-b").value.socialExperience.conversationIds = [];
+  await mutation; assert.equal(libraryPosts(t).length, 0, "scope revoked during session await cannot wire");
+});
+await test("daily vision cost counters are read-only; zero is known, absent/invalid is unknown", async () => {
+  const t = await runtime(), s = t.state, d = libraryScope(t), scope = "group:123456";
+  const before = plain(d.value), dirty = [...d.dirty], revision = s.registryState.revision;
+  await s.selectExperienceLibrary("demo-a", scope);
+  assert.match(libraryHost(t).textContent, /已预留 0 · 已尝试 2 · 上限 8/);
+  assert.match(libraryHost(t).textContent, /不是费用金额/);
+  const state = s.experienceLibraryState("demo-a", scope);
+  await s.mutateExperienceLibrary("demo-a", scope, "annotate", state.data.stickers[0]);
+  assert.match(libraryHost(t).textContent, /已预留 0 · 已尝试 3 · 上限 8/);
+  assert(!JSON.stringify(libraryPosts(t)[0].body).includes("dailyVisionCalls"));
+  delete t.library("demo-a", scope).dailyVisionCalls;
+  await s.loadExperienceLibrary("demo-a", scope);
+  assert.match(libraryHost(t).textContent, /已预留 未知 · 已尝试 未知 · 上限 未知/);
+  t.library("demo-a", scope).dailyVisionCalls = { reserved: -1, attempted: "2", limit: false };
+  await s.loadExperienceLibrary("demo-a", scope);
+  assert.deepEqual(plain(state.data.dailyVisionCalls), { reserved: null, attempted: null, limit: null });
+  assert.deepEqual(plain(d.value), before); assert.deepEqual([...d.dirty], dirty); assert.equal(s.registryState.revision, revision);
+});
 console.log(JSON.stringify({ ok: true, cases, offline: true, liveDataTouched: false, bridgeStarted: false }));
 
 if (process.argv.includes("--preview")) {
   const css = fs.readFileSync(new URL("../public/console.css", import.meta.url), "utf8");
   const page = `<!doctype html><html lang="zh-CN" data-theme="dark"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/console.css"><title>社交表达 · 合成预览</title><body><main style="max-width:1000px;margin:auto;padding:24px"><h1>社交表达 · 合成预览</h1><p>仅虚构账号与内存保存，不连接真实机器人。</p><div class="row"><button id="theme">切换明暗</button><button id="other">切换演示账号</button></div><section id="dynamicAccountEditor" class="card"></section><p id="preview-feedback" role="status"></p></main><script>
     const synthetic = (${fixture.toString()})(document, window);
+    for (const item of synthetic.server.items) item.socialExperience = { conversationIds: ['group:123456', 'private:654321'] };
+    registryState.items = structuredClone(synthetic.server.items);
     ${realSource}
     registryFeedback = message => document.getElementById('preview-feedback').textContent = message;
     registrySelect('demo-a', 'experience');

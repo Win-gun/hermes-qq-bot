@@ -1,5 +1,6 @@
-// Isolated OneBot round-trip: no real QQ account or message is used.
-// Requires MIMO_API_KEY in the environment to exercise real TTS.
+// Fake OneBot round-trip, but REAL PAID TTS/ASR. Never run implicitly in offline
+// CI or merely because a credential happens to be present in the environment.
+// Requires explicit operator authorization + HERMES_QQ_LIVE_VOICE_TEST=1.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -8,6 +9,11 @@ import net from "node:net";
 import { spawn } from "node:child_process";
 import { WebSocket } from "ws";
 import { synthesizeSpeechFile } from "../src/voice-service.js";
+
+if (process.env.HERMES_QQ_LIVE_VOICE_TEST !== "1" || !process.env.MIMO_API_KEY) {
+  console.log(JSON.stringify({ skipped: true, reason: "explicit live voice test opt-in and credential required", modelCalls: 0 }));
+  process.exit(0);
+}
 
 const root = path.resolve(import.meta.dirname, "..");
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "hermesqq-voice-route-"));
@@ -31,8 +37,12 @@ const config = JSON.parse(fs.readFileSync(path.join(root, "config.example.json")
 config.listen.port = await freePort();
 config.control.port = await freePort();
 config.accounts.primary.qq = "10001";
-config.accounts.primary.displayName = "Eraser的小跟班";
+config.accounts.primary.displayName = "Synthetic Voice Fixture";
 config.accounts.primary.protocol = "napcat";
+config.accounts.primary.onebotWsUrl = "";
+config.accounts.primary.managed = false;
+config.accounts.primary.protocolContainer = "";
+config.accounts.primary.napcatContainer = "";
 config.accounts.standbys = [];
 config.accounts.failover.enabled = false;
 config.targetGroups = ["*"];

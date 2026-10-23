@@ -21,7 +21,7 @@ const config = JSON.parse(fs.readFileSync(path.join(root, 'config.example.json')
 config.control = { ...config.control, host: '127.0.0.1', port: control };
 config.listen = { ...config.listen, host: '127.0.0.1', port: onebot, path: '/onebot' };
 config.accounts = { version: 2, items: [{ id: 'primary', qq: '10001', displayName: 'Test', selfName: 'Test', style: { systemPrompt: 'synthetic-persona' },
-  enabled: true, protocolEnabled: true, managed: false, protocol: 'napcat', onebotWsUrl: '', onebotPath: '/onebot', features:{chat:true,proactive:true},
+  enabled: true, protocolEnabled: true, managed: false, protocol: 'napcat', onebotWsUrl: '', onebotPath: '/onebot', features:{chat:true,proactive:true}, sendTypes:{text:true,image:true},
   socialAgent: { enabled: false, shadowMode: false, conversationIds: ['group:20001'] } }], failoverGroups: [] };
 // External reverse clients need no actual container. No real protocol operation.
 config.accounts.items[0].managed = true;
@@ -31,14 +31,14 @@ config.dailyMessages = { enabled: false }; config.hourlyChat = { enabled: false 
 config.proactive = { enabled: false }; config.socialPlanner = { enabled: false };
 config.trigger = { ...config.trigger, activeReply: false, replyToKeywords: false };
 config.messageDebounce = { enabled: false }; config.memory = { ...config.memory, privacyFilter:false, aiExtraction: { enabled: false }, learning: { enabled: false } };
-config.vision = { enabled: false }; config.voice = { enabled: false }; config.webSearch = { enabled: false };
+config.vision = { enabled: true, provider: 'custom', model: 'synthetic-vision' }; config.voice = { enabled: false }; config.webSearch = { enabled: false };
 config.taskMode = { enabled: false }; config.learningMode = { enabled: false };
 config.adminNotifications = { enabled: false }; config.targetGroups = ['20001','20002']; config.apiCenter = undefined;
 config.privateChats = { enabled: true, targetUsers: ['30001'], ownerUserIds: ['30001'] };
 config.commands = { ...config.commands, enabled: true, ownerUserIds: ['30001'], adminUserIds: ['30001'] };
 config.responseQueue = { ...config.responseQueue, minDelayMs: 2500 };
 const fake = path.join(home, 'fake-hermes.cjs');
-fs.writeFileSync(fake, `#!${process.execPath}\nprocess.stdout.write('synthetic direct reply');\n`, { mode: 0o700 });
+fs.writeFileSync(fake, `#!${process.execPath}\nprocess.stdout.write(process.argv.includes('--image')?JSON.stringify({note:'开心讨论',tags:['开心']}):'synthetic direct reply');\n`, { mode: 0o700 });
 config.ai = { ...config.ai, command: fake, args: ['-z'], textTransport: 'hermes', provider: 'custom', model: 'synthetic-model', timeoutMs: 5000 };
 let fakeRequests = 0;
 const model = http.createServer(async (req,res) => {
@@ -52,6 +52,8 @@ const model = http.createServer(async (req,res) => {
   const waiting=fs.existsSync(path.join(home,'wait'));
   let decision=waiting?{action:'wait',delayMs:1100}:{action:'reply',messages:['synthetic reply']};
   if (fs.existsSync(path.join(home,'burst'))) decision={action:'reply',messages:['synthetic first bubble','synthetic second bubble']};
+  if (fs.existsSync(path.join(home,'sticker'))) decision={action:'reply',expressionPlan:{version:1,action:'reply',replyToMessageId:null,
+    messages:[{type:'text',content:'synthetic happy reply'},{type:'sticker',stickerId:'fixture-sticker',fallbackText:'synthetic media unavailable'}]}};
   if (payload.messages.at(-1).content.includes('当前问题已完成回复')) decision={action:'reply',messages:['must not send reflection'],continuity:{mood:{valence:0.2}}};
   if (fs.existsSync(path.join(home,'persona'))) {
     const {snapshot}=JSON.parse(payload.messages.at(-1).content.split('\n').at(-1));
@@ -84,6 +86,15 @@ fs.mkdirSync(path.join(home,'data')); fs.writeFileSync(path.join(home,'data','me
 // may spawn. This catches accidental Docker/security/launchctl operations.
 const preload = path.join(home,'fake-host.cjs');
 fs.writeFileSync(preload, `const now=Date.now;Date.now=()=>now()+Number(process.env.SOCIAL_FIXTURE_OFFSET||0);const cp=require('node:child_process');const {syncBuiltinESMExports}=require('node:module');const spawn=cp.spawn;cp.spawnSync=()=>({status:1,stdout:'',stderr:'fixture host operations disabled'});cp.spawn=(cmd,args,opts)=>[process.execPath,${JSON.stringify(fake)}].includes(cmd)?spawn(cmd,args,opts):spawn(process.execPath,['-e','process.exit(91)'],opts);syncBuiltinESMExports();`);
+// Trusted test seams ONLY in this temporary child preload. No real public DNS
+// or HTTP access: the new public-media code still validates/pins the public IP,
+// and the stream is a fixed synthetic PNG. Production has no test bypass flag.
+fs.appendFileSync(preload, `
+const mediaDNS=require('node:dns/promises'),mediaHTTPS=require('node:https'),{EventEmitter}=require('node:events'),{PassThrough}=require('node:stream');
+mediaDNS.lookup=async host=>{if(host!=='cdn.synthetic-stickers.net')throw Error('fixture denies external DNS');return[{address:'1.1.1.1',family:4}];};
+mediaHTTPS.request=(url,opts,callback)=>{if(url.hostname!=='cdn.synthetic-stickers.net')throw Error('fixture denies external HTTPS');
+const req=new EventEmitter();req.destroy=()=>req.emit('close');req.end=()=>setImmediate(()=>{const res=new PassThrough();res.statusCode=200;res.headers={'content-type':'image/png'};callback(res);res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aCusAAAAASUVORK5CYII=','base64'));res.once('end',()=>req.emit('close'));});return req;};syncBuiltinESMExports();
+`);
 let child, socket, tail = '', token;
 const calls = () => fs.existsSync(path.join(home,'calls')) ? fs.readFileSync(path.join(home,'calls'),'utf8').trim().split('\n').length : 0;
 const sends = [];
@@ -106,6 +117,7 @@ async function start() {
     const data = item.action === 'get_login_info' ? { user_id: 10001, nickname: 'Test' }
       : item.action === 'get_group_member_list' ? [{ user_id: 10001 }, { user_id: 30001 }]
         : item.action === 'get_friend_list' ? [{user_id:30001}]
+        : item.action === 'fetch_custom_face_detail' ? [{emoji_id:'fixture-sticker',url:'https://cdn.synthetic-stickers.net/image.png',desc:'synthetic collection'}]
         : item.action.startsWith('send_') ? { message_id: 90000+sends.length } : { online: true, good: true };
     socket.send(JSON.stringify({ status: 'ok', retcode: 0, echo: item.echo, data }));
   });
@@ -234,6 +246,63 @@ try {
   const expressionReceipt = (await request('/api/social-agent/expression-status')).body.recent.at(-1);
   assert.equal(expressionReceipt.confirmed, 2);
   assert.equal(expressionReceipt.uncertain, false);
+  // Exercise the NEW protected library route against a real isolated bridge,
+  // not merely a mocked UI. Collection sync is metadata-only; no model/send.
+  await policy({ enabled: false });
+  const libraryPolicy = await request('/api/accounts');
+  assert.equal((await request('/api/accounts/primary', { method: 'PATCH', body: {
+    expectedRevision: libraryPolicy.body.revision, patch: { socialExperience: { enabled: true, shadowMode: false,
+      conversationIds: ['group:20002'], language: { enabled: true }, stickers: { enabled: true, visionLearning: true, autoSend: true } } }
+  } })).status, 200);
+  const libraryUrl = accountUrl + '/expression-library';
+  assert.equal((await request(libraryUrl+'?conversation_id=group:20002', { auth: false })).status, 403);
+  assert.equal((await request(libraryUrl+'?conversation_id=group:20001')).status, 409, 'unconfigured scope refused');
+  let library = await request(libraryUrl+'?conversation_id=group:20002');
+  assert.equal(library.status, 200, JSON.stringify(library.body));
+  assert.equal(library.body.language.candidates.length, 0);
+  const sendsBeforeLibrary = sends.length, callsBeforeLibrary = calls();
+  const staleSync = { conversationId: 'group:20002', expectedStateRevision: 'a'.repeat(64) };
+  assert.equal((await request(libraryUrl+'/sync', { method: 'POST', body: staleSync })).status, 409);
+  assert.equal((await request(libraryUrl+'/sync', { method: 'POST', origin: 'http://evil.invalid', body: {
+    ...staleSync, expectedStateRevision: library.body.revision } })).status, 403);
+  const synced = await request(libraryUrl+'/sync', { method: 'POST', body: {
+    conversationId: 'group:20002', expectedStateRevision: library.body.revision } });
+  assert.equal(synced.status, 200, JSON.stringify(synced.body));
+  assert.equal(synced.body.capabilities.collection, 'supported');
+  message(1001, '合成词在本群的意思是一起开心', 20002);
+  await until(async () => (await request(libraryUrl+'?conversation_id=group:20002')).body.language?.candidates?.length === 1, 'actual background glossary intake');
+  library = await request(libraryUrl+'?conversation_id=group:20002');
+  const candidate = library.body.language.candidates[0];
+  assert.equal(candidate.status, 'pending');
+  assert.equal((await request(libraryUrl+'/review-language', { method:'POST', body: {
+    conversationId:'group:20002', expectedStateRevision:library.body.revision, id:candidate.id,
+    expectedRevision:candidate.revision, status:'confirmed' } })).status, 200);
+  assert.equal((await request(libraryUrl+'/review-language', { method:'POST', body: {
+    conversationId:'group:20002', expectedStateRevision:library.body.revision, id:candidate.id,
+    expectedRevision:candidate.revision, status:'rejected' } })).status, 409, 'stale editor retains current review');
+  assert.equal(sends.length, sendsBeforeLibrary, 'management and glossary observation send no QQ');
+  assert.equal(calls(), callsBeforeLibrary, 'metadata sync and deterministic glossary intake call no model');
+  library = await request(libraryUrl+'?conversation_id=group:20002');
+  const annotated = await request(libraryUrl+'/annotate', { method:'POST', body: {
+    conversationId:'group:20002', expectedStateRevision:library.body.revision, id:'fixture-sticker' } });
+  assert.equal(annotated.status, 200, JSON.stringify(annotated.body));
+  assert.equal(annotated.body.stickers[0].annotation.status, 'candidate');
+  assert.equal(annotated.body.dailyVisionCalls.attempted, 1);
+  const approved = await request(libraryUrl+'/review-sticker', { method:'POST', body: {
+    conversationId:'group:20002', expectedStateRevision:annotated.body.revision, id:'fixture-sticker',
+    expectedRevision:annotated.body.stickers[0].annotation.revision, status:'confirmed' } });
+  assert.equal(approved.status, 200, JSON.stringify(approved.body));
+  assert.equal(sends.length, sendsBeforeLibrary, 'Vision and approval still never send QQ');
+  fs.unlinkSync(path.join(home,'burst')); fs.writeFileSync(path.join(home,'sticker'),'1');
+  await policy({enabled:true,conversationIds:['group:20002'],turnTimeoutMs:8000});
+  const beforeSticker=sends.length;
+  message(1002,'今天真的很开心',20002);
+  await until(()=>sends.length===beforeSticker+2,'actual shared media renderer reaches fake OneBot',15000);
+  assert.equal(sends.at(-1).params.message.at(-1).type,'image');
+  assert(sends.at(-1).params.message.at(-1).data.file.startsWith('base64://'));
+  await until(async()=> (await request(libraryUrl+'?conversation_id=group:20002')).body.stickers[0].annotation.sentCount===1,'actual image ACK persisted once');
+  await policy({enabled:false}); fs.unlinkSync(path.join(home,'sticker'));
+  console.log('PASS expression library bridge: auth/scope/CAS/intake/review/budget/fake-Vision/host-plan/image-wire/ACK; no external network or QQ');
   console.log('PASS social bridge integration: auth/CAS/default-off/restricted-model/confirmed-send/durable-ACK/dedup/habit-revoke/self-consent-revoke/at-replan-terminal/startup-pause/config-race');
 } finally {
   socket?.close(); child?.kill('SIGTERM'); if (child && child.exitCode===null) await Promise.race([new Promise(resolve=>child.once('exit',resolve)),pause(3000)]);

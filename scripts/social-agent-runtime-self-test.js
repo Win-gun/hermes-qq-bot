@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createSocialAgentRuntime, withSocialAgentUsage } from "../src/social-agent-runtime.js";
+import { createSocialAgentRuntime, withSocialAgentUsage, withSocialExpressionPlan } from "../src/social-agent-runtime.js";
 import { ingestSocialMessage, getSocialSnapshot, markSocialRead, applySocialContinuity } from "../src/social-agent-state.js";
 
 // No disk, network, production config, account, QQ or model is used here.
@@ -494,6 +494,175 @@ await check("persona changes are pinned proposals, never arbitrary settings", as
     assert.equal(code(await invalid.run()), "SOCIAL_INVALID_CONTINUITY");
     assert.equal(invalid.continuity.length, 0);
   }
+});
+
+const expression = (patch = {}) => ({ version: 1, action: "reply", messages: [
+  { type: "sticker", stickerId: "approved_A", fallbackText: "准备失败备用文字" }
+], replyToMessageId: null, ...patch });
+const expressionOptions = () => ({ allowedStickerIds: ["approved_A"], allowedQuoteIds: ["fake-message"], maxMessages: 2, maxTextLength: 2000 });
+const expressionDecision = (patch = {}) => ({ action: "reply", messages: ["[表情]"], throughSeq: 3, ...patch });
+const attachExpression = (decision = expressionDecision(), plan = expression(), options = expressionOptions()) => withSocialExpressionPlan(decision, plan, options);
+
+await check("host expression metadata adds only optional sendIntent field, legacy shape unchanged", async () => {
+  const raw = expressionDecision(), before = structuredClone(raw);
+  assert.equal(attachExpression(raw), raw);
+  assert.deepEqual(raw, before); assert.equal(Object.hasOwn(raw, "expressionPlan"), false);
+  const f = fixture({ model: () => raw });
+  assert.equal(code(await f.run()), "SOCIAL_COMPLETED");
+  const { scope, intent } = f.sends[0];
+  assert.deepEqual(scope, ctx); assert.deepEqual(intent.expressionPlan, expression());
+  assert.deepEqual(intent.messages, ["[表情]"]); // Host chooses metadata plan, not this legacy proxy.
+  assert.equal(intent.throughSeq, 3); assert.equal(intent.seenSeq, 3);
+  assert.deepEqual(Object.keys(intent).sort(), ["expressionPlan", "materialIds", "messages", "seenSeq", "signal", "throughSeq"]);
+  assert.ok(!JSON.stringify([f.root, f.runtime.status()]).includes("approved_A"));
+  const legacy = fixture(); await legacy.run();
+  assert.deepEqual(Object.keys(legacy.sends[0].intent).sort(), ["materialIds", "messages", "seenSeq", "signal", "throughSeq"]);
+  assert.deepEqual(legacy.sends[0].intent.messages, ["fake final"]);
+});
+
+await check("JSON cannot forge expression metadata and model private fields stay invalid", async () => {
+  for (const raw of [
+    { ...expressionDecision(), expressionPlan: expression() },
+    { ...expressionDecision(), expression_plan: expression() },
+    { ...expressionDecision(), messages: [{ type: "sticker", stickerId: "approved_A" }] },
+    { ...expressionDecision(), allowedStickerIds: ["approved_A"] }
+  ]) {
+    const f = fixture({ model: () => JSON.parse(JSON.stringify(raw)) });
+    assert.equal(code(await f.run()), "SOCIAL_INVALID_DECISION"); assert.equal(f.sends.length, 0);
+  }
+  const attached = attachExpression(expressionDecision({ messages: ["legacy text"] }));
+  const cloned = JSON.parse(JSON.stringify(attached));
+  const f = fixture({ model: () => cloned }); await f.run();
+  assert.equal(Object.hasOwn(f.sends[0].intent, "expressionPlan"), false);
+  assert.deepEqual(f.sends[0].intent.messages, ["legacy text"]);
+});
+
+await check("host metadata validator enforces offered sticker IDs, quotes and quotas", () => {
+  for (const options of [undefined, { allowedStickerIds: [] }, { allowedStickerIds: ["foreign_B"] },
+    { ...expressionOptions(), allowedStickerIds: ["a", "b", "c", "d"] },
+    { ...expressionOptions(), maxMessages: 0 }, { ...expressionOptions(), maxTextLength: 1 }]) {
+    assert.throws(() => withSocialExpressionPlan(expressionDecision(), expression(), options), { code: "SOCIAL_INVALID_EXPRESSION_PLAN" });
+  }
+  assert.throws(() => attachExpression(expressionDecision(), expression({ replyToMessageId: "foreign-message" })), { code: "SOCIAL_INVALID_EXPRESSION_PLAN" });
+  assert.equal(attachExpression(expressionDecision(), expression({ replyToMessageId: "fake-message" })).action, "reply");
+  const two = expression({ messages: [{ type: "text", content: "先说一句" }, ...expression().messages] });
+  assert.throws(() => attachExpression(expressionDecision(), two, { ...expressionOptions(), maxMessages: 1 }), { code: "SOCIAL_INVALID_EXPRESSION_PLAN" });
+});
+
+await check("host metadata rejects target/path/identity authority and nonreply actions", () => {
+  for (const field of ["target", "path", "accountId", "logicalId", "conversationId", "tools", "expressionPlan"]) {
+    assert.throws(() => attachExpression(expressionDecision(), expression({ [field]: "foreign" })), { code: "SOCIAL_INVALID_EXPRESSION_PLAN" });
+    assert.throws(() => attachExpression(expressionDecision(), expression({ messages: [{ ...expression().messages[0], [field]: "foreign" }] })), { code: "SOCIAL_INVALID_EXPRESSION_PLAN" });
+  }
+  for (const action of ["observe", "wait", "dive", "tool"]) {
+    assert.throws(() => attachExpression({ action }, expression()), { code: "SOCIAL_INVALID_EXPRESSION_PLAN" });
+    assert.throws(() => attachExpression(expressionDecision(), expression({ action, messages: [] })), { code: "SOCIAL_INVALID_EXPRESSION_PLAN" });
+  }
+  for (const raw of [null, [], "raw string"]) assert.throws(() => attachExpression(raw), { code: "SOCIAL_INVALID_EXPRESSION_PLAN" });
+});
+
+await check("WeakMap attachment cannot bypass strict decision validation", async () => {
+  const raw = attachExpression(); raw.expressionPlan = expression();
+  const f = fixture({ model: () => raw });
+  assert.equal(code(await f.run()), "SOCIAL_INVALID_DECISION"); assert.equal(f.sends.length, 0);
+  // Rejected uses consume the host attachment too; removing the illegal JSON
+  // field later does not resurrect an old attached plan on a new execution.
+  delete raw.expressionPlan;
+  const next = fixture({ model: () => raw }); await next.run();
+  assert.equal(Object.hasOwn(next.sends[0].intent, "expressionPlan"), false);
+});
+
+await check("attached plan is detached from source, options and delayed caller mutation", async () => {
+  const plan = expression({ replyToMessageId: "fake-message" }), expected = structuredClone(plan), options = expressionOptions();
+  const raw = attachExpression(expressionDecision(), plan, options);
+  plan.messages[0].stickerId = "foreign"; plan.messages[0].fallbackText = "changed"; plan.replyToMessageId = "foreign";
+  options.allowedStickerIds[0] = "foreign"; options.allowedQuoteIds.length = 0;
+  const f = fixture({ model: () => raw });
+  f.afterCommit(() => {
+    if (f.usage?.actualCalls === 1) {
+      raw.messages[0] = "caller changed proxy";
+      attachExpression(raw, expression({ messages: [{ type: "text", content: "replacement" }] }));
+    }
+  });
+  assert.equal(code(await f.run()), "SOCIAL_COMPLETED");
+  assert.deepEqual(f.sends[0].intent.expressionPlan, expected);
+  assert.deepEqual(f.sends[0].intent.messages, ["[表情]"]);
+});
+
+await check("host usage and expression metadata compose in either order", async () => {
+  for (const usageFirst of [true, false]) {
+    let raw = expressionDecision();
+    if (usageFirst) raw = withSocialAgentUsage(raw, { inputTokens: 7, outputTokens: 3 });
+    raw = attachExpression(raw);
+    if (!usageFirst) raw = withSocialAgentUsage(raw, { inputTokens: 7, outputTokens: 3 });
+    const f = fixture({ model: () => raw }); await f.run();
+    assert.deepEqual(f.sends[0].intent.expressionPlan, expression());
+    assert.equal(f.usage.inputTokens, 7); assert.equal(f.usage.outputTokens, 3); assert.equal(f.usage.unknownUsageCalls, 0);
+  }
+});
+
+await check("shadow and reflection still suppress expression sends", async () => {
+  const shadow = fixture({ policy: { shadowMode: true }, model: () => attachExpression() });
+  assert.equal(code(await shadow.run()), "SOCIAL_SHADOWED"); assert.equal(shadow.sends.length, 0); assert.equal(shadow.schedules.length, 0);
+  const reflected = fixture({ model: () => attachExpression() });
+  assert.equal(code(await reflected.run({ ...ctx, reflectOnly: true })), "SOCIAL_COMPLETED");
+  assert.equal(reflected.sends.length, 0); assert.equal(reflected.schedules.length, 0);
+});
+
+await check("quiet/route change and cancellation after expression claim block wire", async () => {
+  for (const mode of ["quiet", "cancel", "disable", "shadow"]) {
+    const f = fixture({ model: () => attachExpression() });
+    f.afterCommit(root => {
+      if (root.socialAgents?.bots?.[ctx.logicalId]?.conversations?.[ctx.conversationId]?.runtime?.status !== "intent_claimed") return;
+      if (mode === "quiet") f.setCurrent(false);
+      if (mode === "cancel") f.runtime.cancel(ctx.logicalId);
+      if (mode === "disable") f.policy.enabled = false;
+      if (mode === "shadow") f.policy.shadowMode = true;
+    });
+    assert.equal(code(await f.run()), { quiet: "SOCIAL_STALE", cancel: "SOCIAL_CANCELLED", disable: "SOCIAL_DISABLED", shadow: "SOCIAL_SHADOWED" }[mode]);
+    assert.equal(f.sends.length, 0);
+  }
+});
+
+await check("expression sender retains observed sequence and durable no-replay fence", async () => {
+  const f = fixture({ model: () => attachExpression(expressionDecision({ throughSeq: 2 })), send: (_scope, intent) => {
+    assert.equal(f.state.status, "intent_claimed"); assert.equal(f.state.intentFenceThroughSeq, 2);
+    assert.equal(intent.seenSeq, 3); assert.equal(intent.throughSeq, 2); assert.deepEqual(intent.expressionPlan, expression());
+    throw new Error("unknown send outcome");
+  } });
+  assert.equal(code(await f.run()), "SOCIAL_CALLBACK_FAILED"); assert.equal(f.sends.length, 1);
+  const restarted = createSocialAgentRuntime(f.callbacks);
+  restarted.observe({ ...ctx, resumeDue: true }); await restarted.runDue(); assert.equal(f.sends.length, 1);
+  const future = fixture({ model: () => attachExpression(expressionDecision({ throughSeq: 4 })) });
+  assert.equal(code(await future.run()), "SOCIAL_INVALID_SEQUENCE"); assert.equal(future.sends.length, 0);
+});
+
+await check("post-attachment decision action mutation cannot send or schedule metadata", async () => {
+  const raw = attachExpression(); raw.action = "observe"; delete raw.messages;
+  const f = fixture({ model: () => raw });
+  assert.equal(code(await f.run()), "SOCIAL_INVALID_EXPRESSION_PLAN"); assert.equal(f.sends.length, 0); assert.equal(f.schedules.length, 0);
+});
+
+await check("plain text host expression plan also preserves old decision schema", async () => {
+  const textPlan = expression({ messages: [{ type: "text", content: "宿主已校验正文" }] });
+  const f = fixture({ model: () => attachExpression(expressionDecision({ messages: ["旧字段保持字符串"] }), textPlan, {}) });
+  assert.equal(code(await f.run()), "SOCIAL_COMPLETED");
+  assert.deepEqual(f.sends[0].intent.messages, ["旧字段保持字符串"]);
+  assert.deepEqual(f.sends[0].intent.expressionPlan, textPlan);
+});
+
+await check("expression intent after unread paging keeps actual observed sequence", async () => {
+  const f = fixture({ tools: { read_unread: async () => ({ messages: [
+    { seq: 4, messageId: "message4", userId: "789", text: "fourth input", sentAt: 1, receivedAt: 1 }
+  ], seenSeq: 4 }) }, model: (_, n) => n === 1
+    ? { action: "tool", tool: { name: "read_unread", args: { afterSeq: 3 } } }
+    : attachExpression(expressionDecision({ throughSeq: 4 }), expression({ replyToMessageId: "message4" }),
+      { ...expressionOptions(), allowedQuoteIds: ["message4"] }) });
+  assert.equal(code(await f.run()), "SOCIAL_COMPLETED");
+  assert.equal(f.modelCalls.length, 2); assert.equal(f.sends.length, 1);
+  assert.equal(f.sends[0].intent.seenSeq, 4); assert.equal(f.sends[0].intent.throughSeq, 4);
+  assert.equal(f.sends[0].intent.expressionPlan.replyToMessageId, "message4");
+  assert.equal(f.state.intentFenceThroughSeq, 4);
 });
 
 console.log(`social-agent-runtime: ${checks} checks passed (fake state/model/clock only)`);

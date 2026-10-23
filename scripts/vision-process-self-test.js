@@ -1,0 +1,14 @@
+import assert from "node:assert/strict";
+import { runVisionProcess } from "../src/vision-process.js";
+const run = (code, options) => runVisionProcess(process.execPath, ["-e", code], options);
+assert.equal(await run("process.stdout.write('合成测试')"), "合成测试");
+await assert.rejects(run("process.stderr.write('DO_NOT_RETURN_SECRET');process.exit(1)"), e => e.code === "VISION_PROCESS_FAILED" && !e.message.includes("SECRET"));
+await assert.rejects(run("setInterval(()=>{},1000)", { timeoutMs: 50 }), { code: "VISION_TIMEOUT" });
+const aborted = new AbortController(); aborted.abort();
+await assert.rejects(run("throw Error('never')", { signal: aborted.signal }), { code: "VISION_ABORTED" });
+const c = new AbortController(), pending = run("setInterval(()=>{},1000)", { signal: c.signal });
+setTimeout(() => c.abort(), 50);
+await assert.rejects(pending, { code: "VISION_ABORTED" });
+await assert.rejects(run("process.stdout.write('x'.repeat(10000))", { maxOutputBytes: 100 }), { code: "VISION_OUTPUT_LIMIT" });
+assert.equal(await run("const b=Buffer.from('中文'); process.stdout.write(b.subarray(0,1)); setTimeout(()=>process.stdout.write(b.subarray(1)),10)"), "中文");
+console.log("vision process: PASS (bounded output, UTF-8, timeout, cancellation, safe errors)");

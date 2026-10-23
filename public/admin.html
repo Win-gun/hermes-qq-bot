@@ -5457,7 +5457,9 @@
       result.socialExperience = {
         enabled: false, shadowMode: true, conversationIds: [], ...result.socialExperience,
         turn: { enabled: true, minWaitMs: 150, maxWaitMs: 4500, ordinaryWaitMs: 700, incompleteWaitMs: 2500, maxTurnMs: 8000, ...result.socialExperience?.turn },
-        expression: { enabled: true, maxMessages: 2, minIntervalMs: 200, maxIntervalMs: 800, allowQuotes: true, ...result.socialExperience?.expression }
+        expression: { enabled: true, maxMessages: 2, minIntervalMs: 200, maxIntervalMs: 800, allowQuotes: true, ...result.socialExperience?.expression },
+        stickers: { enabled: false, autoSend: false, visionLearning: false, maxDailyVisionCalls: 8, cooldownMs: 60000, ...result.socialExperience?.stickers },
+        language: { enabled: false, autoCandidates: true, ...result.socialExperience?.language }
       };
       return result;
     }
@@ -5664,6 +5666,171 @@
       }
       return lines.join("\n");
     }
+    function experienceLibraryScopes(id) {
+      const item = registryItem(id); if (!item || item.archived) return [];
+      const saved = registryEffective(item)?.socialExperience?.conversationIds;
+      const current = registryGroup(id) ? saved : registryDraft(id)?.value.socialExperience?.conversationIds;
+      return Array.isArray(saved) && Array.isArray(current) ? [...new Set(saved.filter(scope => typeof scope === "string" && /^(?:group|private):[1-9]\d{0,19}$/.test(scope) && current.includes(scope)))] : [];
+    }
+    function experienceLibraryState(id, scope = null) {
+      registryState.experienceLibraries ||= new Map();
+      if (!registryState.experienceLibraries.has(id)) registryState.experienceLibraries.set(id, { scope: "", scopes: new Map() });
+      const account = registryState.experienceLibraries.get(id);
+      if (scope === null) return account;
+      if (!account.scopes.has(scope)) account.scopes.set(scope, { data: null, loading: null, busy: false, blocked: false, error: "", notice: "", attempts: new Set() });
+      return account.scopes.get(scope);
+    }
+    function experienceLibraryText(value, limit = 240) {
+      return typeof value === "string" ? value.replace(/(?:https?|file|data|javascript):\S+|www\.\S+/gi, "[链接已隐藏]").replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, limit) : "";
+    }
+    function experienceLibraryProjection(result, scope) {
+      if (result?.ok !== true || typeof result.revision !== "string" || !result.revision || !Array.isArray(result.stickers)) throw new Error("invalid_response");
+      const uint = n => Number.isSafeInteger(n) && n >= 0 ? n : null;
+      const text = experienceLibraryText;
+      // Strict projection: URLs, original messages, evidence and model traces
+      // are never retained in the UI cache, much less interpolated as HTML.
+      const stickers = result.stickers.slice(0, 100).filter(row => row && typeof row.id === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(row.id)).map(row => ({
+        id: row.id, official: { desc: text(row.official?.desc), trust: "untrusted" },
+        annotation: row.annotation ? { revision: uint(row.annotation.revision), status: ["candidate", "confirmed", "rejected"].includes(row.annotation.status) ? row.annotation.status : "unknown",
+          note: text(row.annotation.note), tags: Array.isArray(row.annotation.tags) ? row.annotation.tags.slice(0, 16).map(tag => text(tag, 32)) : [], sentCount: uint(row.annotation.sentCount) } : null
+      }));
+      const language = { ok: typeof scope === "string" && scope.startsWith("group:") && result.language?.ok === true && Array.isArray(result.language.candidates) && uint(result.language.revision) !== null,
+        revision: uint(result.language?.revision), stats: null, candidates: [] };
+      if (language.ok) {
+        if (result.language.stats && typeof result.language.stats === "object") {
+          language.stats = {};
+          for (const key of ["messageCount", "averageTextLength", "averageIntervalMs", "imageRatio", "emojiRatio"]) {
+            const n = result.language.stats[key]; language.stats[key] = typeof n === "number" && Number.isFinite(n) && n >= 0 ? n : null;
+          }
+        }
+        language.candidates = (Array.isArray(result.language.candidates) ? result.language.candidates : []).slice(0, 200)
+          .filter(row => row && typeof row.id === "string" && /^[A-Za-z0-9_.:@-]{1,160}$/.test(row.id))
+          .map(row => ({ id: row.id, revision: uint(row.revision), status: ["pending", "confirmed", "rejected", "revoked"].includes(row.status) ? row.status : "unknown", term: text(row.term, 24), meaning: text(row.meaning, 120) }));
+      }
+      const dailyVisionCalls = { reserved: uint(result.dailyVisionCalls?.reserved), attempted: uint(result.dailyVisionCalls?.attempted), limit: uint(result.dailyVisionCalls?.limit) };
+      return { revision: result.revision, stickers, language, dailyVisionCalls, collection: ["unknown", "supported", "unsupported"].includes(result.capabilities?.collection) ? result.capabilities.collection : "unknown" };
+    }
+    async function loadExperienceLibrary(id, scope, verify = null) {
+      if (!experienceLibraryScopes(id).includes(scope)) { if (verify) throw new Error("scope_changed"); return; }
+      const state = experienceLibraryState(id, scope); if (state.loading || state.busy && !verify) return state.loading;
+      state.error = ""; state.notice = "";
+      state.loading = (async () => {
+        try {
+          const path = `/api/social-agent/accounts/${encodeURIComponent(id)}/expression-library?conversation_id=${encodeURIComponent(scope)}`;
+          const result = experienceLibraryProjection(await api(path), scope);
+          if (!experienceLibraryScopes(id).includes(scope)) throw new Error("scope_changed");
+          if (verify) verify(result);
+          state.data = result; state.blocked = false;
+        } catch {
+          state.data = null; state.blocked = true;
+          state.error = verify ? "操作已提交但读回未核实；不会自动重试，请刷新核对。" : "管理数据读取失败或会话失效；请刷新重试。";
+        } finally { state.loading = null; renderExperienceLibrary(); }
+      })();
+      renderExperienceLibrary(); return state.loading;
+    }
+    async function selectExperienceLibrary(id, scope) {
+      if (scope && !experienceLibraryScopes(id).includes(scope)) return;
+      experienceLibraryState(id).scope = scope; renderExperienceLibrary();
+      if (scope) await loadExperienceLibrary(id, scope);
+    }
+    async function mutateExperienceLibrary(id, scope, action, item = null, status = "") {
+      if (!experienceLibraryScopes(id).includes(scope) || !["sync", "annotate", "review-sticker", "review-language"].includes(action)) return;
+      if (action === "review-language" && !scope.startsWith("group:")) return;
+      const state = experienceLibraryState(id, scope), data = state.data;
+      if (!data || state.loading || state.busy || state.blocked) return;
+      const rows = action === "review-language" ? data.language.candidates : data.stickers;
+      const current = item ? rows.find(row => row.id === item.id) : null;
+      const annotation = action === "review-language" ? current : current?.annotation;
+      if (action !== "sync" && !current) return;
+      if (action.startsWith("review-")) {
+        if (!Number.isSafeInteger(annotation?.revision) || annotation.revision < 1 || annotation.revision !== (action === "review-language" ? item?.revision : item?.annotation?.revision)) return;
+        if (action === "review-sticker" && !["confirmed", "rejected"].includes(status)) return;
+        if (action === "review-language" && !(annotation.status === "pending" && ["confirmed", "rejected"].includes(status) || annotation.status === "confirmed" && status === "revoked")) return;
+      }
+      const key = JSON.stringify([action, data.revision, current?.id, annotation?.revision, status]);
+      if (state.attempts.has(key)) { state.error = "此修订已尝试过该操作；结果不确定时不会重放，请刷新核对。"; renderExperienceLibrary(); return; }
+      if (action === "annotate" && !confirm("仅标注当前这一项表情：服务端将下载图片并调用视觉模型，可能产生费用。不会自动发送或收藏。确认继续？")) return;
+      state.busy = true; state.error = ""; state.notice = ""; renderExperienceLibrary();
+      let submitted = false;
+      try {
+        await ensureAdminSession();
+        if (!experienceLibraryScopes(id).includes(scope)) throw new Error("scope_changed");
+        const body = { conversationId: scope, expectedStateRevision: data.revision };
+        if (current) body.id = current.id;
+        if (action.startsWith("review-")) { body.expectedRevision = annotation.revision; body.status = status; }
+        state.attempts.add(key);
+        const result = await api(`/api/social-agent/accounts/${encodeURIComponent(id)}/expression-library/${action}`, { method: "POST", body: JSON.stringify(body) });
+        submitted = true;
+        if (result.ok !== true) throw new Error("invalid_response");
+        await loadExperienceLibrary(id, scope, latest => {
+          if (latest.revision === data.revision) throw new Error("unconfirmed_revision");
+          if (action === "sync") return;
+          const row = action === "review-language" ? latest.language.candidates.find(row => row.id === current.id) : latest.stickers.find(row => row.id === current.id)?.annotation;
+          const before = annotation?.revision ?? 0;
+          if (!row || row.revision == null || row.revision <= before || row.status !== (action === "annotate" ? "candidate" : status)) throw new Error("unconfirmed_action");
+        });
+        if (!state.error) state.notice = "操作已读回核实；未自动发送或新增收藏，配置草稿不变。";
+      } catch (error) {
+        state.blocked = true; state.data = null;
+        state.error = error.status === 409 ? "修订冲突；未自动重试，请刷新核对最新状态。" : submitted ? "操作已提交但结果未核实；不会自动重试，请刷新核对。" : "操作失败或结果不确定；不会自动重试，请刷新核对。";
+      } finally { state.busy = false; renderExperienceLibrary(); }
+    }
+    function renderExperienceLibrary(host = $("dynamicAccountEditor")?.querySelector("[data-experience-library]")) {
+      if (!host) return;
+      host.replaceChildren();
+      const node = (tag, text, className = "") => { const el = document.createElement(tag); if (text !== undefined) el.textContent = text; el.className = className; return el; };
+      host.append(node("h4", "表情库与群语感 · 分会话管理"));
+      const id = host.dataset.accountId;
+      if (!id) { host.append(node("p", "请到接管组成员账号选择会话管理；策略仍在接管组中保存。", "hint")); return; }
+      const account = experienceLibraryState(id), scopes = experienceLibraryScopes(id);
+      const picker = node("select"); picker.setAttribute("aria-label", "表情与语感会话范围");
+      for (const scope of ["", ...scopes]) { const option = node("option", scope || "请选择一个已保存的会话范围"); option.value = scope; picker.append(option); }
+      const scope = scopes.includes(account.scope) ? account.scope : ""; picker.value = scope;
+      picker.addEventListener("change", () => selectExperienceLibrary(id, picker.value));
+      const label = node("label", "管理会话"); label.append(picker); host.append(label);
+      host.append(node("p", "仅列出已保存策略与当前草稿共同允许的会话；新增范围请先用当前账号的保存按钮保存。同步只读官方元数据，不下载图片、不发送、不自动收藏。", "hint"));
+      if (!scope) { host.append(node("p", "选择范围后读取管理数据；不会自动启用任何功能。", "hint")); return; }
+      const state = experienceLibraryState(id, scope), data = state.data;
+      const feedback = node("p", state.error || (state.loading ? "正在读取管理数据…" : state.busy ? "操作中，请勿重复提交…" : state.notice || (data ? "已读取本会话的管理数据。" : "尚未读取管理数据。")), state.error ? "warning" : "hint"); feedback.setAttribute("role", "status"); host.append(feedback);
+      const toolbar = node("div", undefined, "row"); toolbar.style.flexWrap = "wrap";
+      const refresh = registryButton("刷新管理数据", () => loadExperienceLibrary(id, scope)); refresh.disabled = state.busy || !!state.loading; toolbar.append(refresh);
+      const sync = registryButton("同步表情元数据（不下载）", () => mutateExperienceLibrary(id, scope, "sync")); sync.disabled = !data || state.busy || !!state.loading || state.blocked; toolbar.append(sync); host.append(toolbar);
+      if (!data) return;
+      const capability = { unknown: "未知（未确认）", supported: "协议支持", unsupported: "协议不支持" }[data.collection];
+      host.append(node("p", `官方表情列表读取能力：${capability}。这不代表新增收藏或发送权限。`, "hint"));
+      const calls = data.dailyVisionCalls, counter = n => Number.isSafeInteger(n) && n >= 0 ? String(n) : "未知";
+      host.append(node("p", `今日视觉调用（服务端只读）：已预留 ${counter(calls.reserved)} · 已尝试 ${counter(calls.attempted)} · 上限 ${counter(calls.limit)}。这是调用计数，不是费用金额；预留不等于已调用，尝试不保证成功。`, "hint"));
+      const disabled = state.busy || !!state.loading || state.blocked;
+      for (const item of data.stickers) {
+        const row = node("details", undefined, "panel-details settings-block"); row.style.overflowWrap = "anywhere";
+        row.append(node("summary", `表情 ${item.id} · ${{ candidate: "候选标注", confirmed: "已确认标注", rejected: "已拒绝标注" }[item.annotation?.status] || "未确认"}`));
+        row.append(node("p", `官方描述（不可信）：${item.official.desc || "未提供"}`, "hint"));
+        if (item.annotation) row.append(node("p", `视觉标注（参考数据）：${item.annotation.note || "未提供"}；标签：${item.annotation.tags.join("、") || "无"}；已确认发送次数：${item.annotation.sentCount ?? "未知"}；最近确认发送：${Number.isSafeInteger(item.annotation.lastSentAt) && item.annotation.lastSentAt > 0 ? new Date(item.annotation.lastSentAt).toLocaleString() : "暂无记录"}`, "hint"));
+        const actions = node("div", undefined, "row"); actions.style.flexWrap = "wrap";
+        const annotate = registryButton("单项视觉标注（可能收费）", () => mutateExperienceLibrary(id, scope, "annotate", item)); annotate.disabled = disabled; actions.append(annotate);
+        if (Number.isSafeInteger(item.annotation?.revision) && item.annotation.revision > 0) for (const [status, text] of [["confirmed", "确认此标注"], ["rejected", "拒绝此标注"]]) {
+          const review = registryButton(text, () => mutateExperienceLibrary(id, scope, "review-sticker", item, status)); review.disabled = disabled || item.annotation.status === status; actions.append(review);
+        }
+        row.append(actions); host.append(row);
+      }
+      if (!data.stickers.length) host.append(node("p", "本范围暂无表情元数据；可显式同步，不会自动下载。", "hint"));
+      host.append(node("h4", "群语感 · 聚合观察与词义审核"));
+      if (!scope.startsWith("group:")) { host.append(node("p", "群语感仅支持群聊；私聊不读取或审核语言候选。", "hint")); return; }
+      if (!data.language.ok) { host.append(node("p", "群语感数据暂不可用，请刷新重试。", "warning")); return; }
+      const stats = data.language.stats, number = n => typeof n === "number" && Number.isFinite(n) ? String(Math.round(n * 100) / 100) : "未知";
+      host.append(node("p", stats ? `样本 ${number(stats.messageCount)} · 平均长度 ${number(stats.averageTextLength)} · 平均间隔 ${number(stats.averageIntervalMs)} ms · 图片比例 ${number(stats.imageRatio)} · 表情比例 ${number(stats.emojiRatio)}` : "暂无聚合统计（不是零，也不是失败）。", "hint"));
+      host.append(node("p", "候选不是事实；统计不代表全群同意互损或人格、权限变更。此处不展示消息原文及来源身份。", "hint"));
+      for (const item of data.language.candidates) {
+        const row = node("details", undefined, "panel-details settings-block"); row.style.overflowWrap = "anywhere";
+        row.append(node("summary", `${item.term || "未提供词条"} · ${{ pending: "待审核候选", confirmed: "管理员已确认", rejected: "已拒绝", revoked: "已撤销" }[item.status] || "状态未知"}`));
+        row.append(node("p", `释义（${item.status === "confirmed" ? "管理员确认" : "候选 / 非事实"}）：${item.meaning || "未提供"}`, "hint"));
+        const actions = node("div", undefined, "row"); actions.style.flexWrap = "wrap";
+        const decisions = item.status === "pending" ? [["confirmed", "确认此词义"], ["rejected", "拒绝此词义"]] : item.status === "confirmed" ? [["revoked", "撤销此词义"]] : [];
+        for (const [status, text] of decisions) { const review = registryButton(text, () => mutateExperienceLibrary(id, scope, "review-language", item, status)); review.disabled = disabled || !Number.isSafeInteger(item.revision) || item.revision < 1; actions.append(review); }
+        row.append(actions); host.append(row);
+      }
+      if (!data.language.candidates.length) host.append(node("p", "本群暂无词义候选。", "hint"));
+    }
     function registryFields(host, value, tab, change, { policy = false, disabled = false } = {}) {
       const field = (label, path, options = {}) => registryField(host, label, path, registryGet(value, path), change, { disabled, ...options });
       if (tab === "identity") {
@@ -5686,11 +5853,14 @@
           // Old shared policies can lack the root too; initialize only on edit.
           value.socialExperience ||= structuredClone(settings);
           change(path, path === "socialExperience.shadowMode" ? next === "true" : next);
+          if (path === "socialExperience.conversationIds") renderExperienceLibrary();
         };
         const add = (target, label, path, options = {}) => {
           const current = registryGet(settings, path);
           const control = registryField(target, label, `socialExperience.${path}`, path === "shadowMode" ? String(current) : current, edit, { disabled, ...options });
           if (options.type === "number") { control.min = path === "expression.maxMessages" || path === "turn.maxTurnMs" ? "1" : "0"; control.step = "1"; }
+          if (path === "stickers.maxDailyVisionCalls") control.max = "100";
+          if (path === "stickers.cooldownMs") control.max = "86400000";
           return control;
         };
         add(main, "启用社交表达", "enabled", { type: "checkbox", hint: "默认关闭；修改模式或参数不会代替你打开此开关。" });
@@ -5701,6 +5871,15 @@
         add(main, "最大气泡数", "expression.maxMessages", { type: "number" });
         add(main, "气泡最短间隔（毫秒）", "expression.minIntervalMs", { type: "number" });
         add(main, "气泡最长间隔（毫秒）", "expression.maxIntervalMs", { type: "number" });
+        const mediaTitle = document.createElement("h4"); mediaTitle.className = "settings-block"; mediaTitle.textContent = "表情与群语感设置 · 随当前账号保存";
+        const media = document.createElement("div"); media.className = "form-grid";
+        add(media, "启用表情库", "stickers.enabled", { type: "checkbox" });
+        add(media, "允许自动发表情", "stickers.autoSend", { type: "checkbox", hint: "默认关闭；确认标注不等于授权自动发送，仍受观察模式、范围及发送权限约束。" });
+        add(media, "允许视觉学习（可能收费）", "stickers.visionLearning", { type: "checkbox", hint: "单项标注仍须逐次明确确认，不批量标注。" });
+        add(media, "每日视觉调用上限", "stickers.maxDailyVisionCalls", { type: "number" });
+        add(media, "表情冷却（毫秒）", "stickers.cooldownMs", { type: "number" });
+        add(media, "启用群语感学习", "language.enabled", { type: "checkbox", hint: "默认关闭，仅群聊；统计和候选不代表全群同意或人格变更。" });
+        add(media, "自动生成语感候选", "language.autoCandidates", { type: "checkbox", hint: "仅在群语感学习已启用时生效；候选仍需管理员审核。" });
         const advanced = document.createElement("details"); advanced.className = "panel-details settings-block";
         const summary = document.createElement("summary"); summary.textContent = "高级 · 合并与引用"; advanced.append(summary);
         const fields = document.createElement("div"); fields.className = "form-grid"; advanced.append(fields);
@@ -5710,13 +5889,16 @@
         add(fields, "整轮最长等待（毫秒）", "turn.maxTurnMs", { type: "number" });
         add(fields, "启用多气泡表达", "expression.enabled", { type: "checkbox" });
         add(fields, "允许引用消息", "expression.allowQuotes", { type: "checkbox" });
-        section.append(advanced);
+        section.append(advanced, mediaTitle, media);
         const diagnostic = document.createElement("p"); diagnostic.className = "hint"; diagnostic.setAttribute("role", "status");
         diagnostic.dataset.experienceDiagnostic = ""; diagnostic.dataset.accountId = policy ? "" : registryState.selected;
         diagnostic.style.whiteSpace = "pre-line"; diagnostic.style.overflowWrap = "anywhere";
         diagnostic.textContent = registryExperienceDiagnostic(diagnostic.dataset.accountId);
         const refresh = registryButton("刷新运行摘要（只读）", refreshExperienceStatus);
-        section.append(diagnostic, refresh); host.append(section);
+        section.append(diagnostic, refresh);
+        const library = document.createElement("section"); library.className = "settings-block";
+        library.dataset.experienceLibrary = ""; library.dataset.accountId = policy ? "" : registryState.selected;
+        section.append(library); host.append(section); renderExperienceLibrary(library);
       } else if (tab === "connection") {
         if (!policy) {
           field("协议", "protocol", { options: [["snowluma", "SnowLuma"], ["napcat", "NapCat"]] });
@@ -5750,6 +5932,12 @@
         const t = p.turn, e = p.expression;
         if (t.minWaitMs > t.maxWaitMs || t.maxWaitMs > t.maxTurnMs || [t.ordinaryWaitMs, t.incompleteWaitMs].some(n => n < t.minWaitMs || n > t.maxWaitMs)) throw new Error("等待参数须满足：最短等待 ≤ 普通 / 未完等待 ≤ 等待上限 ≤ 整轮最长等待");
         if (e.minIntervalMs > e.maxIntervalMs) throw new Error("气泡最短间隔不能大于最长间隔");
+        if (p.stickers !== undefined) {
+          for (const flag of [p.stickers?.enabled, p.stickers?.autoSend, p.stickers?.visionLearning]) if (typeof flag !== "boolean") throw new Error("表情库开关须为布尔值");
+          if (!Number.isSafeInteger(p.stickers.maxDailyVisionCalls) || p.stickers.maxDailyVisionCalls < 0 || p.stickers.maxDailyVisionCalls > 100) throw new Error("每日视觉调用上限须为 0–100 的整数");
+          if (!Number.isSafeInteger(p.stickers.cooldownMs) || p.stickers.cooldownMs < 0 || p.stickers.cooldownMs > 86400000) throw new Error("表情冷却须为 0–86400000 毫秒（24 小时）的整数");
+        }
+        if (p.language !== undefined && [p.language?.enabled, p.language?.autoCandidates].some(flag => typeof flag !== "boolean")) throw new Error("群语感开关须为布尔值");
       }
       if (keys.includes("style") && (typeof value.style?.systemPrompt !== "string" || value.style.systemPrompt.length > 12000)) throw new Error("风格提示词须为文本，最多 12000 字符；允许留空");
       if (keys.includes("displayName") && (!String(value.displayName || "").trim() || String(value.displayName).length > 100)) throw new Error("账号名称须为 1–100 字");
@@ -5977,6 +6165,8 @@
         const action = host.querySelector("[data-registry-participation]"); if (action) action.textContent = paused ? "恢复参与" : "暂停参与";
         const diagnostic = host.querySelector("[data-experience-diagnostic]");
         if (diagnostic?.dataset?.accountId) diagnostic.textContent = registryExperienceDiagnostic(diagnostic.dataset.accountId);
+        const library = host.querySelector("[data-experience-library]");
+        if (library?.dataset?.accountId && (!library.contains(document.activeElement) || !experienceLibraryScopes(library.dataset.accountId).includes(experienceLibraryState(library.dataset.accountId).scope))) renderExperienceLibrary(library);
         return;
       }
       host.replaceChildren();

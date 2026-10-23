@@ -118,6 +118,7 @@ function harness(config = fixtureConfig(), mutation = {}) {
   const context = vm.createContext({
     Date: FakeDate, structuredClone, randomBytes, AbortController,
     socialExperienceFor, evaluateConversationTurn, parseReplyPlan, replyPlanPrompt, executeReplyPlan,
+    expressionStickersFor: () => null,
     expressionDiagnostics: new ExpressionDiagnostics(),
     logicalBotId, botConversationKey, botControlRevision, replyDeliveryConfig,
     accountKernel: new AccountRuntime(config), kernelConfigRevision: 1, pendingReplyHandoffs: [],
