@@ -36,6 +36,9 @@ fs.writeFileSync(fakeHermes, `#!${process.execPath}\nif (process.env.OPENAI_API_
 const fakeSecurity = path.join(home, "fake-security.cjs");
 fs.writeFileSync(fakeSecurity, String.raw`const child = require("node:child_process");
 const { syncBuiltinESMExports } = require("node:module");
+// This disposable child exercises macOS Keychain HTTP flows on every CI OS.
+// Emulate both the platform and security command; never relax production guards.
+Object.defineProperty(process, "platform", { value: "darwin" });
 const original = child.spawnSync;
 const values = new Map();
 child.spawnSync = (command, args, options) => {
