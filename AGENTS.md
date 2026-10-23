@@ -258,6 +258,20 @@ Old configs opt into coherent extraction via `memory.learning.enabled`; retain
 original IDs/times and never ACK sources omitted from a model's pinned batch.
 Run `npm run test:memory-verification` along with affected memory/account tests.
 
+Idle discovery is specified in `docs/SOCIAL-DISCOVERY.md`: it defaults off and
+observation-only, shares the repository writer and autonomous budget, and must
+not turn a manual collection into a QQ send. Run `npm run test:discovery` after
+changes; synthetic content labels are not human humor acceptance.
+Social Agent contracts and rollout gates are in `docs/SOCIAL-AGENT.md`. Social
+policy is account-owned and defaults off/observation-only with explicit scopes.
+Continuity, consent, unread watermarks and contact receipts belong to logical
+identities in the same background memory repository. Never grant core persona
+changes, private reads or contact authority from model prose. Cross-conversation
+contact requires administrator policy AND verified recipient consent; revocation,
+quiet and logical-route checks apply again at wire time. Source completion is not
+production authorization. Run `npm run test:social-agent`; human blind evaluation
+and real QQ pilots remain separate acceptance gates, never self-awarded scores.
+
 Core source upgrade contracts and outstanding acceptance gates are tracked in
 `docs/CORE-UPGRADE.md`. The memory repository is the sole cooperating writer;
 read-only tools must not acquire its lock. AI extraction claims each batch

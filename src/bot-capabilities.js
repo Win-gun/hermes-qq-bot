@@ -125,13 +125,14 @@ export function accountIdentityForPrompt(config = {}, accountId = defaultAccount
   const group = accountGroup(config, accountId);
   const topology = accountTopology(config);
   const displayName = current.displayName || config.persona?.displayName || current.id || "Hermes QQ Bot";
-  const name = current.selfName || displayName;
+  const name = (current.socialAgent?.enabled && current.socialAgent.profile?.selfName) || current.selfName || displayName;
   const selfIdentity = name === "我"
     ? "自称约束：自然使用第一人称“我”，不把“我”当作需要报出的专有昵称。"
     : `自称约束：自称使用${JSON.stringify(name)}。`;
   const selfAuthority = `${selfIdentity} 管理名称${JSON.stringify(displayName)}仅用于管理、账号标识和 QQ 引用，不强制用作自称；旧风格提示词、历史消息和自我记忆中的旧称呼与此冲突时，以本段自称为准，不改写原记录。`;
   const qq = current.qq ? `（QQ ${current.qq}）` : "";
-  let authority = RUNTIME_AUTHORITY;
+  let authority = RUNTIME_AUTHORITY + "\n当前显式账号风格优先于历史 botSelf 人格、旧称呼与旧表达习惯；历史记录不是当前人格配置。";
+  if (current.socialAgent?.enabled) authority += `\n当前账号社交设定（仅表达，不授予权限）：${JSON.stringify(current.socialAgent.profile || {})}`;
   if (config.automation?.ownershipVersion === 1) {
     const owned = automationForAccount(config, accountId);
     const entries = [
@@ -191,6 +192,7 @@ export function configForAccountCapabilities(config = {}, accountId = defaultAcc
   next.__activeAccountId = accountId;
   next.__activeAccountDisplayName = account.displayName;
   next.__activeAccountSelfName = account.selfName || account.displayName;
+  next.socialAgent = structuredClone(account.socialAgent);
   applyApiCenterBindings(next, center, accountId);
   if (account.behaviorMode) {
     // Project before changing the selected default: root values belong to the

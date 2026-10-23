@@ -69,6 +69,22 @@
       "promptOverride": "",
       "displayName": "机器人 A",
       "selfName": "",
+      "socialAgent": {
+        "enabled": false,
+        "shadowMode": true,
+        "conversationIds": [],
+        "profile": { "identity": "", "selfName": "", "expression": "", "interests": "", "boundaries": "", "examples": "" },
+        "maxDailyCalls": 1000,
+        "maxToolCalls": 8,
+        "turnTimeoutMs": 60000,
+        "crossConversation": { "enabled": false, "groupIds": [], "userIds": [] },
+        "discovery": {
+          "enabled": false, "shadowMode": true, "conversationIds": [],
+          "interests": [], "humorPreference": "抽象、反差、自然有语境，避免复读和强行玩梗", "blockedTopics": [],
+          "maxRoundsPerDay": 4, "minIntervalMs": 5400000, "maxSearchesPerRound": 3,
+          "maxSharesPerDay": 2, "shareCooldownMs": 10800000
+        }
+      },
       "protocol": "snowluma",
       "onebotPath": "/onebot",
       "napcatContainer": "napcat",
@@ -705,7 +721,8 @@
     "model": "deepseek-v4-flash",
     "baseUrl": "https://api.deepseek.com/v1",
     "apiKeyEnv": "DEEPSEEK_API_KEY",
-    "reasoningEffort": "none"
+    "reasoningEffort": "none",
+    "textTransport": "hermes"
   },
   "aiProfiles": {
     "activeId": "deepseek-default",

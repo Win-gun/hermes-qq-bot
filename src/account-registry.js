@@ -1,4 +1,21 @@
 import { randomUUID } from "node:crypto";
+import { socialAgentConfig } from "./social-agent-state.js";
+import { validateDiscoveryPolicy } from "./social-discovery-state.js";
+
+// Validate writes before normalizing. In particular, never coerce enable flags
+// or silently broaden a malformed scope into a working autonomous policy.
+export function validateSocialAgentPolicy(value) {
+  const plain = x => x && typeof x === "object" && !Array.isArray(x);
+  if (!plain(value) || Object.keys(value).some(k => !["enabled", "shadowMode", "conversationIds", "profile", "maxDailyCalls", "maxToolCalls", "turnTimeoutMs", "crossConversation", "discovery"].includes(k))) throw new Error("socialAgent 策略字段无效");
+  if (value.discovery !== undefined && !validateDiscoveryPolicy(value.discovery).ok) throw new Error("采风策略无效");
+  for (const k of ["enabled", "shadowMode"]) if (value[k] !== undefined && typeof value[k] !== "boolean") throw new Error(`${k} 必须是开关`);
+  if (value.conversationIds !== undefined && (!Array.isArray(value.conversationIds) || value.conversationIds.length > 128 || value.conversationIds.some(x => typeof x !== "string" || !/^(group|private):[1-9]\d{0,19}$/.test(x)))) throw new Error("社交范围必须是显式规范会话 ID");
+  if (value.profile !== undefined && (!plain(value.profile) || Object.entries(value.profile).some(([k,v]) => !["identity", "selfName", "expression", "interests", "boundaries", "examples"].includes(k) || typeof v !== "string" || v.length > (k === "examples" ? 2000 : 800)))) throw new Error("社交身份字段无效");
+  for (const [k,min,max] of [["maxDailyCalls",1,10000],["maxToolCalls",0,8],["turnTimeoutMs",1000,60000]]) if (value[k] !== undefined && (!Number.isInteger(value[k]) || value[k] < min || value[k] > max)) throw new Error(`${k} 超出预算范围`);
+  const cross = value.crossConversation;
+  if (cross !== undefined && (!plain(cross) || Object.keys(cross).some(k => !["enabled", "groupIds", "userIds"].includes(k)) || (cross.enabled !== undefined && typeof cross.enabled !== "boolean") || [["groupIds",/^group:[1-9]\d{0,19}$/,128],["userIds",/^[1-9]\d{0,19}$/,512]].some(([k,re,max]) => cross[k] !== undefined && (!Array.isArray(cross[k]) || cross[k].length > max || cross[k].some(x => typeof x !== "string" || !re.test(x)))))) throw new Error("跨会话授权策略无效");
+  return socialAgentConfig(value);
+}
 
 const clone = (value) => structuredClone(value);
 const object = (value) => value && typeof value === "object" && !Array.isArray(value);
@@ -8,8 +25,9 @@ const ID = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
 const RESERVED_IDS = new Set([...Object.getOwnPropertyNames(Object.prototype), "prototype"]);
 export const ACCOUNT_FEATURES = ["chat", "task", "proactive", "automation", "webSearch", "vision", "asr", "learning"];
 export const ACCOUNT_SEND_TYPES = ["text", "image", "record", "video", "file"];
-export const ACCOUNT_POLICY_KEYS = ["displayName", "selfName", "style", "styleProfileId", "promptOverride", "features", "sendTypes", "scope", "modelBindings", "voice", "behaviorMode"];
+export const ACCOUNT_POLICY_KEYS = ["displayName", "selfName", "style", "styleProfileId", "promptOverride", "features", "sendTypes", "scope", "modelBindings", "voice", "behaviorMode", "socialAgent"];
 const ITEM_KEYS = new Set(["id", "qq", "displayName", "selfName", "style", "styleProfileId", "promptOverride", "enabled", "protocolEnabled", "archived", "managed", "protocol", "onebotPath", "onebotWsUrl", "napcatContainer", "protocolContainer", "webuiPort", "noVncPort", "vncPort", "snowlumaImage", "snowlumaVolumes", "behaviorMode", "features", "sendTypes", "scope", "modelBindings", "voice"]);
+ITEM_KEYS.add("socialAgent");
 const bools = (keys, values, fallback) => Object.fromEntries(keys.map((key) => [key, values?.[key] ?? fallback]));
 const featureDefaults = (config, mode = "all") => ({ chat: mode !== "task", task: mode !== "chat",
   proactive: config.proactive?.enabled !== false, automation: config.automation?.enabled === true,
@@ -68,7 +86,8 @@ function normalizeItem(raw, config, index, legacy = false) {
     sendTypes: { ...bools(ACCOUNT_SEND_TYPES, raw.sendTypes, true), ...(raw.sendTypes || {}) },
     scope: { groups: true, private: true, groupMode: "all", groupIds: [], ...(raw.scope || {}) },
     modelBindings: { chat: "", task: "", vision: "", asr: "", tts: "", search: "", ...(raw.modelBindings || {}) },
-    voice: { mode: "inherit", preset: "", ...(raw.voice || {}) }
+    voice: { mode: "inherit", preset: "", ...(raw.voice || {}) },
+    socialAgent: validateSocialAgentPolicy(raw.socialAgent ?? {})
   };
 }
 
@@ -207,6 +226,7 @@ export function registryConfig(config = {}, { strict = false } = {}) {
 // edits so clearing/selecting them snapshots the effective legacy text once.
 // Explicit canonical style wins if a client supplies both representations.
 export function mergeAccountPatch(account, patch, config = {}) {
+  if (patch?.socialAgent !== undefined) validateSocialAgentPolicy(patch.socialAgent);
   if (!object(patch) || Object.keys(patch).some((key) => !ITEM_KEYS.has(key)) || (patch.id && patch.id !== account.id)) throw new Error("账号设置字段无效");
   for (const key of ["enabled", "protocolEnabled", "archived", "managed"]) {
     if (patch[key] !== undefined && typeof patch[key] !== "boolean") throw new Error(`账号 ${key} 必须是开关`);

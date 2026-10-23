@@ -45,7 +45,7 @@ await assert.rejects(searchWithMimoPlugin({ query: "新闻", model: "mimo-v2.6-f
 // global searchBinding after correctly projecting an account's MiMo provider.
 // No bridge startup, network, environment credentials or Keychain access.
 const bridgeSource = readFileSync(new URL("../src/bridge.js", import.meta.url), "utf8");
-const searchStart = bridgeSource.indexOf("async function webSearch(query, config) {");
+const searchStart = bridgeSource.indexOf("async function webSearch(query, config, { signal } = {}) {");
 const searchEnd = bridgeSource.indexOf("async function buildWebSearchContext(", searchStart);
 assert.ok(searchStart >= 0 && searchEnd > searchStart, "bridge search call site must be available");
 const fixture = JSON.parse(readFileSync(new URL("../config.example.json", import.meta.url), "utf8"));

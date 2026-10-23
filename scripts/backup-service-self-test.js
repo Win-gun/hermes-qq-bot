@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { beginDiscoveryRound, recoverDiscoveryState } from "../src/social-discovery-state.js";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import vm from "node:vm";
+import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { accountItems, registryConfig } from "../src/account-registry.js";
 import {
@@ -28,6 +30,62 @@ let tests = 0;
 function check(condition, message) {
   tests += 1;
   if (!condition) throw new Error(message);
+}
+
+// Social fixtures are data only: never dispatch a model, timer, QQ action or
+// authenticated tool. They exercise the actual safe/full archive restore path.
+const planStatuses = ["pending", "claimed", "waiting", "running", "future_status", "paused",
+  "completed", "failed", "cancelled", "expired", "superseded"];
+const runtimeStatuses = ["pending", "claimed", "waiting", "diving", "running", "intent_claimed", "schedule_claimed",
+  "uncertain", "future_status", "paused", "idle", "shadow", "completed", "failed", "cancelled"];
+const memoryFixture = { groups: { 123: { users: { 42: { nickname: "测试" } } } }, socialAgents: { version: 1, bots: {
+  "account:fixture": {
+    plans: Object.fromEntries(planStatuses.map((status, index) => [`plan-${index}`, { id: `plan-${index}`, status,
+      revision: 4, sourceConversationId: "group:123", targetConversationId: "group:123", runAt: 100, expiresAt: 200,
+      ...(status === "paused" ? { previousStatus: "claimed", reason: "already_paused" } : {}) }])),
+    conversations: Object.fromEntries(runtimeStatuses.map((status, index) => [`group:${123 + index}`, {
+      nextSeq: 10, readThroughSeq: 6, messages: [{ seq: 7, messageId: `human-${index}`, userId: "42", text: "fixture source", sentAt: 10, receivedAt: 11 }],
+      experiences: [{ userId: "42", text: "fixture experience", kind: "bot_reply", messageId: `bot-${index}`, sentAt: 12 }],
+      habits: [{ id: `habit:group:${123 + index}:1`, text: "fixture habit", evidenceMessageIds: [`human-${index}`] }],
+      mood: { valence: 0.2, arousal: 0, engagement: 0.1, updatedAt: 10 },
+      runtime: { status, seenSeq: 9, lastProcessedSeq: 9, intentFenceThroughSeq: 8, dueAt: 20, turnId: `turn-${index}`,
+        ...(status === "paused" ? { previousStatus: "intent_claimed", reason: "already_paused" } : {}) },
+    }])),
+    runtimeUsage: { days: { fixture: { reservedCalls: 2, actualCalls: 1, pending: { claim1: { at: 10 } } } } },
+    users: { 42: { contacts: [{ claimId: "contact1", status: "claimed", claimedAt: 12 }],
+      consents: { "group:123": { allowed: true, evidenceConversationId: "private:42", messageId: "consent-fixture" } } } },
+  },
+  "group:fixture-failover": { plans: { second: { id: "second", status: "waiting", revision: 1 } },
+    conversations: { "private:42": { readThroughSeq: 2, experiences: [], runtime: { status: "waiting", dueAt: 50 } } } },
+} } };
+
+assert.equal(beginDiscoveryRound(memoryFixture, { logicalId: "account:fixture", roundId: "backup-discovery",
+  now: Date.parse("2026-10-24T04:00:00Z"), policy: { enabled: true, shadowMode: true, conversationIds: ["group:123"] } }).ok, true);
+
+function checkSocialRestore(target) {
+  const actual = JSON.parse(fs.readFileSync(path.join(target, "data", "memory.json"), "utf8"));
+  const expected = structuredClone(memoryFixture);
+  const interruptedAt = actual.socialAgents.bots["account:fixture"].discovery.rounds[0].finishedAt;
+  assert.equal(actual.socialAgents.bots["account:fixture"].discovery.rounds[0].status, "interrupted");
+  assert.equal(recoverDiscoveryState(expected, { now: interruptedAt }).ok, true);
+  for (const bot of Object.values(expected.socialAgents.bots)) {
+    for (const plan of Object.values(bot.plans)) {
+      if (!["completed", "failed", "cancelled", "expired", "superseded", "paused"].includes(plan.status)) {
+        plan.previousStatus = plan.status; plan.status = "paused"; plan.reason = "backup_restore"; plan.revision++;
+      }
+    }
+    for (const conv of Object.values(bot.conversations)) {
+      const runtime = conv.runtime;
+      if (!["idle", "shadow", "completed", "failed", "cancelled", "paused"].includes(runtime.status)) {
+        runtime.previousStatus = runtime.status; runtime.status = "paused"; runtime.reason = "backup_restore";
+      }
+    }
+  }
+  assert.deepEqual(actual, expected, "only restore statuses/revisions change; watermarks, evidence, terminal state and receipts survive");
+  check(true, "restored social plans/runtime must be paused without evidence loss or terminal-state rewriting");
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state, "data", "memory.json"), "utf8")), memoryFixture,
+    "backup/export/restore must never modify the source memory");
+  check(true, "social restore gate must operate only on extracted staging");
 }
 
 function tamperFullManifest(source, password, mutate, name) {
@@ -79,7 +137,8 @@ try {
     accounts: { primary: { id: "primary", protocol: "napcat", token: "sensitive-token-value-abcdefghijklmnopqrstuvwxyz" }, standbys: [] }
   };
   fs.writeFileSync(path.join(state, "config.json"), JSON.stringify(config));
-  fs.writeFileSync(path.join(state, "data", "memory.json"), JSON.stringify({ groups: { 123: { users: { 42: { nickname: "测试" } } } } }));
+  const sourceMemoryBytes = JSON.stringify(memoryFixture);
+  fs.writeFileSync(path.join(state, "data", "memory.json"), sourceMemoryBytes);
   fs.writeFileSync(path.join(state, "data", "chat-archive", "groups", "123", "messages.jsonl"), '{"text":"hello"}\n');
   fs.writeFileSync(path.join(state, "data", "chat-archive", "groups", "123", "search-index.json"), '{"disposable":"cache"}');
   fs.writeFileSync(path.join(state, "data", "tasks", "task_1", "outputs", "report.md"), "# report\n");
@@ -116,6 +175,47 @@ try {
   check(restoredSafeConfig.ai.directApiKey === "", "safe restore must stay sanitized");
   check(restoredSafeConfig.taskMode.workspaceBaseDir === path.join(safeRestore, "data", "tasks"), `safe restore must rewrite state paths for the new computer (got ${restoredSafeConfig.taskMode.workspaceBaseDir})`);
   check(fs.existsSync(path.join(safeRestore, "data", "memory.json")), "safe restore must include memory");
+  checkSocialRestore(safeRestore);
+  check(fs.readFileSync(path.join(state, "data", "memory.json"), "utf8") === sourceMemoryBytes,
+    "source memory must remain byte-for-byte unchanged");
+  // Restoring the same archive again still pauses only its staged work, without
+  // mutating the source archive, resetting read watermarks or duplicating data.
+  const archiveHash = crypto.createHash("sha256").update(fs.readFileSync(safe.path)).digest("hex");
+  const socialRepeat = path.join(root, "social-repeat-restore");
+  await restoreBackup({ path: safe.path, stateRoot: socialRepeat });
+  checkSocialRestore(socialRepeat);
+  check(crypto.createHash("sha256").update(fs.readFileSync(safe.path)).digest("hex") === archiveHash,
+    "restore must never rewrite the checksummed backup container");
+  const pausedBackup = await createBackup({ type: "safe", stateRoot: socialRepeat, destinationDir: backups });
+  const pausedRoundtrip = path.join(root, "social-paused-roundtrip");
+  await restoreBackup({ path: pausedBackup.path, stateRoot: pausedRoundtrip });
+  checkSocialRestore(pausedRoundtrip); // no repeated revision bump or previousStatus loss
+  // Pre-social memory remains compatible and does not acquire social defaults.
+  const oldMemorySource = path.join(root, "old-memory-source");
+  fs.mkdirSync(path.join(oldMemorySource, "data"), { recursive: true });
+  fs.writeFileSync(path.join(oldMemorySource, "config.json"), JSON.stringify({ accounts: { version: 2, items: [], failoverGroups: [] } }));
+  const oldMemory = { groups: { 123: { users: {}, facts: ["legacy fixture"] } } };
+  fs.writeFileSync(path.join(oldMemorySource, "data", "memory.json"), JSON.stringify(oldMemory));
+  const preSocialBackup = await createBackup({ type: "safe", stateRoot: oldMemorySource, destinationDir: backups });
+  const oldMemoryTarget = path.join(root, "old-memory-restore");
+  await restoreBackup({ path: preSocialBackup.path, stateRoot: oldMemoryTarget });
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(oldMemoryTarget, "data", "memory.json"), "utf8")), oldMemory);
+  check(true, "pre-social backup restore must preserve legacy memory without adding fields");
+  // Malformed executable social state fails closed in staging BEFORE existing
+  // target files or fake Keychain handles can be touched.
+  fs.writeFileSync(path.join(oldMemorySource, "data", "memory.json"), JSON.stringify({ groups: {},
+    socialAgents: { version: 1, bots: { "account:fixture": { plans: [] } } } }));
+  const invalidSocialBackup = await createBackup({ type: "safe", stateRoot: oldMemorySource, destinationDir: backups });
+  const targetConfigBefore = fs.readFileSync(path.join(oldMemoryTarget, "config.json"));
+  const targetMemoryBefore = fs.readFileSync(path.join(oldMemoryTarget, "data", "memory.json"));
+  const keychainUntouched = () => { throw new Error("restore safety gate unexpectedly reached Keychain"); };
+  await assert.rejects(() => restoreBackup({ path: invalidSocialBackup.path, stateRoot: oldMemoryTarget,
+    voiceSecretStore: { getVoiceSecret: keychainUntouched, setVoiceSecret: keychainUntouched, deleteVoiceSecret: keychainUntouched },
+    apiSecretStore: { getApiSecret: keychainUntouched, setApiSecret: keychainUntouched, deleteApiSecret: keychainUntouched },
+  }), /社交状态格式无效/);
+  assert.deepEqual(fs.readFileSync(path.join(oldMemoryTarget, "config.json")), targetConfigBefore);
+  assert.deepEqual(fs.readFileSync(path.join(oldMemoryTarget, "data", "memory.json")), targetMemoryBefore);
+  check(true, "invalid staged social state must reject restore without modifying the existing target");
   check(fs.existsSync(path.join(safeRestore, "data", "chat-archive", "groups", "123", "messages.jsonl"))
     && !fs.existsSync(path.join(safeRestore, "data", "chat-archive", "groups", "123", "search-index.json")), "restore preserves archive evidence without stale search cache");
   check(!fs.existsSync(path.join(safeRestore, "hermes", ".env")), "safe backup must exclude Hermes secret files");
@@ -137,6 +237,7 @@ try {
     check(fullInfo.manifest.type === "full" && fullInfo.header.encrypted, "full backup must be encrypted");
     check(fullInfo.manifest.components.includes("diagnostic-logs") && fullInfo.manifest.files.some((item) => item.path === "diagnostic-logs/bridge.log"), "encrypted full backup must include optional logs");
     await restoreBackup({ path: full.path, password: "correct horse battery staple", stateRoot: fullRestore, hermesHome: path.join(fullRestore, "hermes") });
+    checkSocialRestore(fullRestore);
     const restoredFullConfig = JSON.parse(fs.readFileSync(path.join(fullRestore, "config.json"), "utf8"));
     check(restoredFullConfig.ai.directApiKey === config.ai.directApiKey, "full restore must retain secrets inside encrypted package");
     check(fs.readFileSync(path.join(fullRestore, "hermes", ".env"), "utf8").includes("DEEPSEEK_API_KEY"), "full restore must include app Hermes credentials");

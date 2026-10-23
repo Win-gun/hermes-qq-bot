@@ -1,4 +1,27 @@
 /* Shared by the browser console and the desktop setup page. No remote assets. */
+.discovery-panel .discovery-runtime { white-space: pre-line; padding-block: 12px; border-block: 1px solid var(--line); line-height: 1.8; overflow-wrap: anywhere; }
+.discovery-panel .form-grid { margin-block: 16px; }
+.discovery-panel .row { margin-top: 16px; flex-wrap: wrap; }
+.discovery-panel .discovery-latest { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
+.discovery-panel .discovery-item a { display: block; overflow-wrap: anywhere; margin-bottom: 8px; }
+.discovery-panel .discovery-item h4 { margin-block: 8px; }
+.discovery-panel input[type="checkbox"] { width: 20px; height: 20px; }
+.discovery-panel .field:has(input[type="checkbox"]) { min-height: 64px; }
+.discovery-panel :is(button, select, textarea, input):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.social-panel { margin-top: var(--page-gap); min-width: 0; }
+.social-panel > select { width: 100%; max-width: 36rem; margin: 6px 0 16px; }
+.social-panel > .row { flex-wrap: wrap; }
+.social-panel .social-profile { grid-column: 1 / -1; min-width: 0; border-top: 1px solid var(--line); padding-top: 12px; }
+.social-panel details > .form-grid { margin-top: 12px; }
+.social-panel .social-record { border-top: 1px solid var(--line); padding: 12px 0; overflow-wrap: anywhere; }
+.social-panel .social-record p { margin: 0 0 8px; }
+.social-panel textarea { min-height: 88px; }
+.social-panel > label { display: block; color: var(--muted); }
+.social-panel button:focus-visible, .social-panel summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (max-width: 680px) {
+  .social-panel .form-grid { grid-template-columns: minmax(0, 1fr); }
+  .social-panel .row > button { width: 100%; min-height: 44px; }
+}
 :root {
   color-scheme: dark;
   --bg: #111214;
@@ -226,6 +249,14 @@ details > .card { border: 0; padding: 0; background: transparent; }
 #apiAccountModels .list-item:hover { border-color: var(--line); background: var(--bg); }
 .panel-step { display: inline-grid; place-items: center; width: 24px; height: 24px; margin-right: 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--accent); background: var(--accent-subtle); font-size: 12px; }
 .api-editor .row { margin-top: 16px; }
+.api-key-table-wrap { overflow-x: auto; margin-top: 12px; }
+.api-key-table { width: 100%; min-width: 760px; border-collapse: collapse; text-align: left; font-size: 13px; }
+.api-key-table th, .api-key-table td { padding: 12px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.api-key-table th { color: var(--muted); font-weight: 500; }
+.api-key-table td:first-child { max-width: 180px; overflow-wrap: anywhere; }
+.api-key-table code { white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.api-key-table time { white-space: nowrap; }
+.api-key-table button { white-space: nowrap; }
 
 /* Accounts and the dynamic beta6 account editor share the same components. */
 .account-health { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 16px 0; }

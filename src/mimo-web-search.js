@@ -65,7 +65,7 @@ export async function searchWithMimoPlugin({ query, model, baseUrl = "", apiKey,
   const response = await fetchImpl(endpoint, {
     method: "POST",
     headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-    body: JSON.stringify(body), signal: signal || AbortSignal.timeout(timeoutMs)
+    body: JSON.stringify(body), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs)
   });
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) throw new Error("MiMo 凭据无效或联网服务插件尚未开通");

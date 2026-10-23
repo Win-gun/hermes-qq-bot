@@ -25,10 +25,13 @@ jobs:
       - run: npm run test:memory
       - run: npm run test:memory-guards
       - run: npm run test:memory-verification
+      - run: npm run test:social-agent
+      - run: npm run test:discovery
       - run: npm run test:kernel
       - run: npm run test:retrieval
       - run: npm run test:social
       - run: npm run test:reply
+      - run: npm run test:text-completion
       - run: npm run test:accounts
       - run: npm run test:account-isolation
       - run: npm run test:features

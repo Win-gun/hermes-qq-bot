@@ -2,6 +2,7 @@
 // attachment and must never be exposed as plain QQ chat text.
 export function sanitizeChatReply(text) {
   return String(text || "")
+    .replace(/\[\[DISCOVERY_USED:[\s\S]*?(?:\]\]|$)/giu, "")
     .replace(/MEDIA:\s*(?:file:\/\/)?\/(?:Users|home|var|tmp)\/[^\r\n]*/giu, "")
     .replace(/\n{3,}/gu, "\n\n")
     .trim();

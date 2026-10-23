@@ -1,6 +1,7 @@
 // Pure rule helpers. Callers own persistence, authorization, execution and deduplication.
 // Shape: { id, enabled?, timezone?, scope: { groupIds?, conversationIds? },
 //   trigger: { type: "schedule", time: "HH:mm", daysOfWeek?, windowMinutes? }
+//          | { type: "at", at: "ISO-8601 with timezone", windowMinutes? }
 //          | { type: "command", text: "/name" },
 //   action: { kind: "message" | "summary" | "task" }, accountId? | groupId?, prompt }
 
@@ -12,6 +13,27 @@ const COMMAND_PATTERN = /^\/[a-z][a-z0-9_-]{0,47}$/;
 const ACCOUNT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const CONVERSATION_PATTERN = /^(group|private):([0-9]{1,20})$/;
 const formatterCache = new Map();
+
+// Social one-time plans contain no draft text. Even a due plan only authorizes
+// fresh planning, never delivery. Restarted pending work is paused by the host.
+export function publicSocialPlans(root, logicalId) {
+  return Object.values(root?.socialAgents?.bots?.[logicalId]?.plans || {}).map(plan =>
+    Object.fromEntries(["id", "accountId", "sourceConversationId", "targetConversationId", "runAt", "expiresAt", "status", "revision"].map(key => [key, plan[key]])));
+}
+
+export function createSocialPlan(root, { logicalId, accountId, conversationId, targetConversationId = conversationId, runAt, now, id }) {
+  if (!/^(group|private):[1-9]\d{0,19}$/.test(conversationId) || !Number.isSafeInteger(runAt) || runAt <= now || runAt > now + 86400000) throw new Error("SOCIAL_INVALID_PLAN");
+  const bot = root.socialAgents?.bots?.[logicalId];
+  if (!bot) throw new Error("SOCIAL_STATE_MISSING");
+  bot.plans ||= {};
+  for (const plan of Object.values(bot.plans)) if (plan.sourceConversationId === conversationId && plan.status === "pending") { plan.status = "superseded"; plan.revision += 1; }
+  // Bounded metadata, never evict an actionable or uncertain plan.
+  const terminal = Object.values(bot.plans).filter(p => !["pending", "claimed", "paused"].includes(p.status));
+  while (Object.keys(bot.plans).length >= 128 && terminal.length) delete bot.plans[terminal.shift().id];
+  if (Object.keys(bot.plans).length >= 128) throw new Error("SOCIAL_PLAN_CAPACITY");
+  if (targetConversationId !== conversationId && !/^private:[1-9]\d{0,19}$/.test(targetConversationId)) throw new Error("SOCIAL_INVALID_PLAN_TARGET");
+  return bot.plans[id] = { id, accountId, sourceConversationId: conversationId, targetConversationId, runAt, expiresAt: Math.min(runAt + 3600000, now + 86400000), status: "pending", revision: 1 };
+}
 
 function fail(message) {
   throw new TypeError(message);
@@ -99,6 +121,23 @@ function validatedDate(now) {
   return date;
 }
 
+// Date.parse accepts rolled-over calendar dates; reject them before parsing.
+function normalizeAt(value) {
+  const parts = typeof value === "string" && /^(\d{4})-(\d{2})-(\d{2})T([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(?:\.(\d{1,3}))?(Z|[+-](?:0\d|1[0-4]):[0-5]\d)$/.exec(value);
+  if (!parts) fail("trigger.at must be strict ISO datetime with seconds and explicit timezone");
+  const [, year, month, day, , , , , offset] = parts;
+  const calendar = new Date(`${year}-${month}-${day}T00:00:00Z`);
+  if (!Number(year) || !Number.isFinite(calendar.getTime()) || calendar.toISOString().slice(0, 10) !== `${year}-${month}-${day}` || /^[+-]14:(?!00)/.test(offset)) fail("trigger.at has an invalid calendar date or timezone offset");
+  const canonical = new Date(value).toISOString();
+  if (!/^\d{4}-/.test(canonical) || canonical.startsWith("0000")) fail("trigger.at is outside supported years 0001-9999");
+  return canonical;
+}
+
+function atDue(rule, now) {
+  const start = Date.parse(rule.trigger.at);
+  return now.getTime() >= start && now.getTime() < start + rule.trigger.windowMinutes * 60000;
+}
+
 export function normalizeAutomationRule(input) {
   const rule = record(input, "rule");
   knownKeys(rule, ["id", "enabled", "timezone", "scope", "trigger", "action", "accountId", "groupId", "prompt"], "rule");
@@ -134,13 +173,18 @@ export function normalizeAutomationRule(input) {
     const windowMinutes = trigger.windowMinutes === undefined ? 3 : trigger.windowMinutes;
     if (!Number.isInteger(windowMinutes) || windowMinutes < 1 || windowMinutes > 15) fail("trigger.windowMinutes must be an integer from 1 to 15");
     normalizedTrigger = { type: "schedule", time: trigger.time, daysOfWeek: [...days].sort(), windowMinutes };
+  } else if (trigger.type === "at") {
+    knownKeys(trigger, ["type", "at", "windowMinutes"], "trigger");
+    const windowMinutes = trigger.windowMinutes === undefined ? 3 : trigger.windowMinutes;
+    if (!Number.isInteger(windowMinutes) || windowMinutes < 1 || windowMinutes > 15) fail("trigger.windowMinutes must be an integer from 1 to 15");
+    normalizedTrigger = { type: "at", at: normalizeAt(trigger.at), windowMinutes };
   } else if (trigger.type === "command") {
     knownKeys(trigger, ["type", "text"], "trigger");
     if (typeof trigger.text !== "string" || !COMMAND_PATTERN.test(trigger.text) || ["/bot", "/task", "/voice"].includes(trigger.text)) {
       fail("trigger.text must be a lowercase, argument-free slash command (excluding reserved bot commands)");
     }
     normalizedTrigger = { type: "command", text: trigger.text };
-  } else fail("trigger.type must be schedule or command");
+  } else fail("trigger.type must be schedule, at or command");
 
   const action = record(rule.action, "action");
   knownKeys(action, ["kind"], "action");
@@ -198,7 +242,7 @@ function checkedRules(input) {
 export function dueAutomationRules(now, rules, conversationId) {
   const date = validatedDate(now);
   const id = canonicalConversationId(conversationId);
-  return checkedRules(rules).filter((rule) => rule.enabled && rule.scope.conversationIds.includes(id) && scheduleDate(rule, date) !== null);
+  return checkedRules(rules).filter((rule) => rule.enabled && rule.scope.conversationIds.includes(id) && (rule.trigger.type === "at" ? atDue(rule, date) : scheduleDate(rule, date) !== null));
 }
 
 export function matchAutomationCommand(text, rules, conversationId) {
@@ -213,6 +257,11 @@ export function automationOccurrenceKey(rule, conversationId, now) {
   const id = canonicalConversationId(conversationId);
   if (!normalized.scope.conversationIds.includes(id)) fail("conversationId is outside rule scope");
   const date = validatedDate(now);
+  if (normalized.trigger.type === "at") {
+    if (!atDue(normalized, date)) fail("at rule is not due at now");
+    // Third element is the absolute instant, independent of polling time/zone.
+    return JSON.stringify([normalized.id, id, normalized.trigger.at]);
+  }
   if (normalized.trigger.type === "schedule") {
     const occurrenceDate = scheduleDate(normalized, date);
     if (occurrenceDate === null) fail("schedule rule is not due at now");

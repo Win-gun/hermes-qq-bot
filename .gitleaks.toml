@@ -9,10 +9,10 @@ useDefault = true
 id = "generic-api-key"
 
 [[rules.allowlists]]
-description = "Two fixed mock Keychain reference IDs in backup tests"
+description = "Two fixed mock Keychain reference IDs in isolated backup, API and console tests"
 condition = "AND"
 regexTarget = "secret"
-paths = ['''(^|/)scripts/backup-service-self-test\.js$''']
+paths = ['''(^|/)scripts/(backup-service-self-test|api-center-integration-self-test|console-ui-self-test|console-preview-server)\.js$''']
 regexes = ['''^(ec021717-671a-4c86-9ca0-c44265deee81|91b65f87-976e-4e74-9d8b-8fae04fe992c)$''']
 
 # Fixed, non-credential cache-policy labels and redaction sentinels. Scope both

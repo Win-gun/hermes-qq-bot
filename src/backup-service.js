@@ -10,6 +10,7 @@ import * as defaultApiSecretStore from "./api-secret-store.js";
 import { isValidApiSecretRef } from "./api-secret-store.js";
 import { accountItems, registryConfig } from "./account-registry.js";
 import { readMemorySnapshot } from "./memory-repository.js";
+import { recoverDiscoveryState } from "./social-discovery-state.js";
 
 export const BACKUP_MAGIC = Buffer.from("HERMESQQBACKUP1\n", "utf8");
 export const BACKUP_FORMAT_VERSION = 1;
@@ -1036,6 +1037,59 @@ export function completeRestore(rollbackDir) {
   secretRollbacks.delete(path.resolve(rollbackDir));
 }
 
+// Restore-only safety gate. This path is ALWAYS the private extracted staging
+// payload, never an online MemoryRepository or the destination's live memory.
+// Ordinary backups already include noncredential social state in memory.json.
+// Keep source archives, watermarks, evidence, receipts and budget reservations
+// intact; restored process-local work must require fresh explicit authorization.
+function pauseStagedSocialWork(payloadDir) {
+  const file = path.join(payloadDir, "state", "data", "memory.json");
+  if (!fs.existsSync(file)) return;
+  const memory = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (memory?.socialAgents === undefined) return; // pre-social backups unchanged
+  const record = value => value !== null && typeof value === "object" && !Array.isArray(value);
+  const invalid = () => { throw new Error("备份中的社交状态格式无效，恢复已停止"); };
+  const social = memory.socialAgents;
+  if (!record(social) || social.version !== 1 || !record(social.bots)) invalid();
+  const planTerminal = new Set(["completed", "failed", "cancelled", "expired", "superseded"]);
+  const runtimeTerminal = new Set([...planTerminal, "idle", "shadow"]);
+  let changed = false;
+  const pause = (item, terminal, plan = false) => {
+    if (!record(item)) invalid();
+    if (item.status === "paused" || terminal.has(item.status)) return;
+    if (plan) {
+      if (item.revision !== undefined && (!Number.isSafeInteger(item.revision)
+        || item.revision < 0 || item.revision >= Number.MAX_SAFE_INTEGER)) invalid();
+      item.revision = (item.revision ?? 0) + 1;
+    }
+    // Runtime uses previousStatus to retain uncertain send/schedule fences.
+    if (item.status !== undefined) item.previousStatus = item.status;
+    item.status = "paused";
+    item.reason = "backup_restore";
+    changed = true;
+  };
+  for (const bot of Object.values(social.bots)) {
+    if (!record(bot)) invalid();
+    if (bot.plans !== undefined) {
+      if (!record(bot.plans)) invalid();
+      for (const plan of Object.values(bot.plans)) pause(plan, planTerminal, true);
+    }
+    if (bot.conversations !== undefined) {
+      if (!record(bot.conversations)) invalid();
+      for (const conversation of Object.values(bot.conversations)) {
+        if (!record(conversation)) invalid();
+        if (conversation.runtime !== undefined) {
+          if (!record(conversation.runtime)) invalid();
+          if (Object.keys(conversation.runtime).length) pause(conversation.runtime, runtimeTerminal);
+        }
+      }
+    }
+  }
+  const beforeDiscovery = JSON.stringify(social);
+  recoverDiscoveryState(memory, { now: Date.now() });
+  if (changed || JSON.stringify(social) !== beforeDiscovery) writeJson(file, memory);
+}
+
 export async function restoreBackup(options = {}) {
   const stateRoot = path.resolve(options.stateRoot);
   const extracted = await extractContainer({ file: path.resolve(options.path), password: options.password || "" });
@@ -1048,6 +1102,9 @@ export async function restoreBackup(options = {}) {
     const disk = fs.statfsSync(path.dirname(stateRoot));
     const available = Number(disk.bavail) * Number(disk.bsize);
     if (available < Number(extracted.manifest.totalBytes || 0) * 2) throw new Error("目标磁盘剩余空间不足以安全恢复并保留回滚数据");
+    // Checksums were verified by extraction. Mutate ONLY the isolated copy and
+    // finish this gate before any Docker/Keychain changes or target replacement.
+    pauseStagedSocialWork(extracted.payloadDir);
     const stagedConfigPath = path.join(extracted.payloadDir, "state", "config.json");
     const config = registryConfig(localConfig(readJson(stagedConfigPath, {}), stateRoot, options.hermesHome ? path.resolve(options.hermesHome) : ""));
     let voiceCredentialRequired = extracted.manifest.voiceCredentialRequired === true;

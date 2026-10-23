@@ -606,7 +606,7 @@ function configUiRuntime() {
     return source.replace(`const ${name}`, `globalThis.${name}`);
   });
   new vm.Script([...constants, ...["api", "currentScope", "scopeForElement", "setVal", "getVal", "renderSaveState", "markDirty",
-    "learningModePatch", "collectScopedPatch", "fillConfig", "refreshAll", "refreshAccountRegistry", "saveConfig"].map(adminFunction)].join("\n"))
+    "learningModePatch", "collectScopedPatch", "fillConfig", "refreshAll", "refreshAccountRegistry", "validateActivityPatch", "verifyActivitySaved", "verifyConfigSaved", "saveConfig"].map(adminFunction)].join("\n"))
     .runInContext(context, { timeout: 1000 });
   state.fillConfig();
   const edit = (id, value, { mark = true } = {}) => {
@@ -682,11 +682,14 @@ await group("global-save-clean-normalization-and-refresh-window", async () => {
   check("a clean-form save also protects its submission during refresh", () => {
     assert.equal(s.getVal("taskMode.maxTurns"), 15); assert(s.dirtyScopes.has("tasks"));
   });
-  await t.waitForPatch(0); t.reply(0, t.commit(0, "r2", (server) => { server.taskMode.maxTurns = 16; })); await saving;
-  check("unchanged submission becomes clean and accepts normalized server values", () => {
-    assert(!s.dirtyScopes.has("tasks")); assert.equal(s.getVal("taskMode.maxTurns"), 16);
+  const rejected = assert.rejects(saving, /保存核对不一致/);
+  await t.waitForPatch(0); t.reply(0, t.commit(0, "r2", (server) => { server.taskMode.maxTurns = 16; })); await rejected;
+  check("numeric normalization is rejected and retains the submitted draft", () => {
+    assert(s.dirtyScopes.has("tasks")); assert.equal(s.getVal("taskMode.maxTurns"), 15);
+    assert.match(s.scopeFeedback.get("tasks"), /未通过保存核对/);
     assert.equal(s.getVal("chatArchive.baseDir"), "new other-region draft"); assert(s.dirtyScopes.has("archive"));
   });
+  await s.refreshAll({ silent: true });
   t.edit("taskMode.maxTurns", 17);
   let release, reached;
   const refreshing = new Promise(resolve => { reached = resolve; });
@@ -781,6 +784,27 @@ await group("global-save-failure-and-behavior-account-isolation", async () => {
   });
 });
 
+await group("activity-save-validation-and-readback", async () => {
+  const t = configUiRuntime(), s = t.state;
+  s.activePage = "qa"; s.activeTabs.qa = "behavior";
+  t.edit("trigger.activeProbability", 9);
+  await assert.rejects(s.saveConfig(), /普通聊天接话概率/);
+  check("percentage instead of decimal is refused without dispatch and retains draft", () => {
+    assert.equal(t.pending.length, 0); assert(s.dirtyScopes.has("qa:behavior"));
+    assert.equal(s.getVal("trigger.activeProbability"), 9); assert.match(s.scopeFeedback.get("qa:behavior"), /0.09/);
+  });
+  t.edit("trigger.activeProbability", 0.17);
+  const work = s.saveConfig(); await t.waitForPatch(0);
+  const committed = t.commit(0, "r2");
+  committed.config.trigger.activeProbability = 0.12;
+  const rejection = assert.rejects(work, /保存核对不一致/);
+  t.reply(0, committed); await rejection;
+  check("a server-normalized different value cannot masquerade as a successful save", () => {
+    assert(s.dirtyScopes.has("qa:behavior")); assert.equal(s.getVal("trigger.activeProbability"), 0.17);
+    assert.match(s.scopeFeedback.get("qa:behavior"), /保存核对不一致/);
+  });
+});
+
 await group("global-save-post-write-sync-failure", async () => {
   const t = configUiRuntime(), s = t.state;
   t.edit("taskMode.maxTurns", 24); const saving = s.saveConfig();
@@ -794,7 +818,7 @@ await group("global-save-post-write-sync-failure", async () => {
   });
   const stale = configUiRuntime(), c = stale.state;
   stale.edit("taskMode.maxTurns", 25); const delayed = c.saveConfig();
-  const delayedRejected = assert.rejects(delayed, /最新配置未能同步/);
+  const delayedRejected = assert.rejects(delayed, /offline registry failure/);
   await stale.waitForPatch(0);
   const newerResponse = stale.commit(0, "r3");
   // A different pane has read a revision between this write's expected and
@@ -825,15 +849,18 @@ function apiRuntime() {
   const state = {
     structuredClone, apiCenterDraft: sampleCenter(), apiCenterSaved: sampleCenter(),
     apiCenterDirty: false, apiCenterConflicted: false, apiCenterRevision: "r1", apiCredentialStatus: {},
-    apiCenterLastLoaded: 0, registryState: {}, dirtyScopes: new Set(), conflictedScopes: new Set(),
-    $: (id) => { if (!nodes.has(id)) nodes.set(id, { textContent: "" }); return nodes.get(id); },
+    apiCenterLastLoaded: 0, apiCenterReadRequest: 0, apiCenterSaveEpoch: 0, registryState: {}, dirtyScopes: new Set(), conflictedScopes: new Set(),
+    selectedApiConnection: "c1", selectedApiProfile: "p1", apiCredentialEntries: [], apiCredentialRequest: 0,
+    $: (id) => { if (!nodes.has(id)) nodes.set(id, { textContent: "", value: "", classList: { toggle() {} } }); return nodes.get(id); },
     sensitiveApi: async (url, method, body) => { requests.push({ url, method, body: structuredClone(body) }); return response(url, method, body); },
     confirm: () => true, setBusy: () => {}, toast: (message) => feedback.push(message),
     renderSaveState: () => {}, renderApiConnection: () => {}, renderApiProfile: () => {},
-    renderApiSearch: () => {}, renderApiCapabilityCards: () => {}, refreshAll: async () => {}
+    renderApiSearch: () => {}, renderApiCapabilityCards: () => {}, refreshAll: async () => {}, refreshApiCredentials: async () => {}
   };
+  state.apiCurrentConnection = () => state.apiCenterDraft.connections.find((item) => item.id === state.selectedApiConnection);
+  state.apiCurrentProfile = () => state.apiCenterDraft.profiles.find((item) => item.id === state.selectedApiProfile);
   const context = vm.createContext(state);
-  new vm.Script(["mergeApiCenterDraft", "refreshApiCenter", "saveApiCenter"].map(adminFunction).join("\n"))
+  new vm.Script(["apiConnectionCredentialsSaved", "newApiProfileForConnection", "testApiEditor", "deleteApiCredentialEntry", "mergeApiCenterDraft", "refreshApiCenter", "saveApiCenter"].map(adminFunction).join("\n"))
     .runInContext(context, { timeout: 1000 });
   return { state, requests, feedback, nodes, respond: (fn) => { response = fn; } };
 }
@@ -956,6 +983,157 @@ await group("api-delayed-area-save", async () => {
   });
 });
 
+await group("api-credentials-saved-connection", async () => {
+  const test = apiRuntime(); const s = test.state;
+  const connection = s.apiCenterDraft.connections[0];
+  connection.credentialSource = "keychain";
+  s.apiCenterDraft.profiles[0].name = "unrelated unsaved model";
+  s.apiCenterDirty = true;
+  check("unsaved connection cannot store credentials", () => {
+    assert.equal(s.apiConnectionCredentialsSaved(connection), false);
+  });
+  test.respond(async (_url, _method, body) => {
+    const center = structuredClone(body.center);
+    center.connections[0].credentialRef = "ec021717-671a-4c86-9ca0-c44265deee81";
+    return { center, revision: "r2" };
+  });
+  await s.saveApiCenter("apiConnectionSave");
+  check("saved connection accepts credentials despite another unsaved region", () => {
+    assert.equal(s.apiCenterDirty, true);
+    assert.equal(s.apiCenterDraft.profiles[0].name, "unrelated unsaved model");
+    assert.equal(s.apiConnectionCredentialsSaved(s.apiCenterDraft.connections[0]), true);
+  });
+  for (const [field, value] of Object.entries({ name: "changed name", provider: "changed-provider",
+    baseUrl: "https://example.invalid/v2", credentialSource: "existing", apiKeyEnv: "NEW_ENV",
+    credentialRef: "91b65f87-976e-4e74-9d8b-8fae04fe992c" })) {
+    check(`unsaved current connection ${field} still blocks credential writes`, () => {
+      assert.equal(s.apiConnectionCredentialsSaved({ ...s.apiCenterDraft.connections[0], [field]: value }), false);
+    });
+  }
+  check("missing, removed and new connection references cannot be used", () => {
+    assert.equal(s.apiConnectionCredentialsSaved(undefined), false);
+    assert.equal(s.apiConnectionCredentialsSaved({ ...s.apiCenterDraft.connections[0], id: "new-connection" }), false);
+    s.apiCenterSaved.connections = [];
+    assert.equal(s.apiConnectionCredentialsSaved(s.apiCenterDraft.connections[0]), false);
+  });
+});
+
+await group("api-new-profile-selected-connection", () => {
+  const test = apiRuntime(); const s = test.state;
+  const saved = structuredClone(s.apiCenterSaved);
+  const bindings = structuredClone(s.apiCenterDraft.bindings);
+  let focused = 0;
+  s.$("apiProfileModel").focus = () => { focused++; };
+  s.apiCenterChanged = () => { s.apiCenterDirty = true; s.dirtyScopes.add("api-center"); };
+  s.Date = { now: () => 123456 };
+  s.newApiProfileForConnection("c2");
+  check("new model draft uses selected connection without switching bindings", () => {
+    const profile = s.apiCenterDraft.profiles.find((item) => item.id === s.selectedApiProfile);
+    assert.equal(profile.connectionId, "c2");
+    assert.equal(profile.name, "Spare · 问答");
+    assert.equal(profile.model, "");
+    assert.equal(s.apiCenterDirty, true);
+    assert.equal(focused, 1);
+    assert.deepEqual(plain(s.apiCenterDraft.bindings), bindings);
+    assert.deepEqual(plain(s.apiCenterSaved), saved);
+    assert.equal(test.requests.length, 0);
+  });
+  s.newApiProfileForConnection("c2");
+  check("rapid new drafts have unique identifiers", () => {
+    assert.equal(new Set(s.apiCenterDraft.profiles.map((item) => item.id)).size, s.apiCenterDraft.profiles.length);
+  });
+  s.newApiProfileForConnection("removed-connection");
+  check("stale selection falls back to an available connection", () => {
+    assert.equal(s.apiCenterDraft.profiles.find((item) => item.id === s.selectedApiProfile).connectionId, "c1");
+  });
+  s.apiCenterDraft.connections = [];
+  const count = s.apiCenterDraft.profiles.length;
+  s.newApiProfileForConnection("removed-connection");
+  check("missing connections cannot create an invalid profile", () => {
+    assert.equal(s.apiCenterDraft.profiles.length, count);
+    assert.equal(test.feedback.at(-1), "请先添加服务连接");
+  });
+});
+
+await group("api-editor-draft-tests", async () => {
+  const test = apiRuntime(); const s = test.state;
+  s.apiCenterDraft.connections[0].credentialSource = "keychain";
+  s.apiCenterDraft.connections[0].baseUrl = "https://example.invalid/v1";
+  s.$("apiKeyInput").value = "test-only-unsaved-secret";
+  const before = structuredClone(s.apiCenterDraft), saved = structuredClone(s.apiCenterSaved);
+  test.respond(async () => ({ ok: true, durationMs: 10, detail: "模型列表可访问" }));
+  await s.testApiEditor("connection");
+  check("connection test submits unbound draft and transient key without saving", () => {
+    const request = test.requests.at(-1);
+    assert.equal(request.url, "/api/api-center/test");
+    assert.equal(request.body.target, "connection"); assert.equal(request.body.connectionId, "c1");
+    assert.equal(request.body.secret, "test-only-unsaved-secret");
+    assert.equal(s.$("apiKeyInput").value, "");
+    assert.deepEqual(request.body.center, before);
+    assert.deepEqual(plain(s.apiCenterDraft), before); assert.deepEqual(plain(s.apiCenterSaved), saved);
+    assert.match(s.$("apiConnectionTestResult").textContent, /成功/);
+  });
+  s.selectedApiConnection = "c2"; s.$("apiKeyInput").value = "test-only-other-connection-secret";
+  await s.testApiEditor("profile");
+  check("model test selects the edited unbound profile and never takes another connection's key", () => {
+    assert.equal(test.requests.at(-1).body.profileId, "p1");
+    assert.equal(test.requests.at(-1).body.target, "profile");
+    assert.equal(test.requests.at(-1).body.secret, undefined);
+    assert.equal(s.$("apiKeyInput").value, "test-only-other-connection-secret");
+    assert.match(s.$("apiProfileTestResult").textContent, /成功/);
+  });
+  s.apiCenterDraft.profiles[0].model = "";
+  const count = test.requests.length; await s.testApiEditor("profile");
+  check("blank model is explained before sending a model test", () => {
+    assert.equal(test.requests.length, count); assert.match(s.$("apiProfileTestResult").textContent, /模型 ID/);
+  });
+  s.selectedApiConnection = "c1"; s.$("apiKeyInput").value = "";
+  let resolve; test.respond(() => new Promise((done) => { resolve = done; }));
+  const pending = s.testApiEditor("connection");
+  s.apiCenterDraft.connections[0].baseUrl = "https://changed.invalid/v1";
+  resolve({ ok: true, durationMs: 1 }); await pending;
+  check("old test success cannot validate a newly edited URL", () => {
+    assert.match(s.$("apiConnectionTestResult").textContent, /已修改/);
+  });
+});
+
+await group("api-credential-list-state", async () => {
+  const test = apiRuntime(); const s = test.state;
+  s.renderApiCredentialList = () => {};
+  new vm.Script(adminFunction("refreshApiCredentials")).runInContext(vm.createContext(s));
+  s.apiCenterDirty = true; s.apiCenterDraft.profiles[0].name = "unsaved model";
+  const draft = structuredClone(s.apiCenterDraft);
+  test.respond(async () => ({ credentials: [{ connectionId: "c1", connectionName: "Connection", status: "configured", preview: "test••••only", createdAt: null }] }));
+  await s.refreshApiCredentials();
+  check("credential refresh updates masked metadata while retaining drafts", () => {
+    assert.equal(test.requests.at(-1).url, "/api/api-center/credentials");
+    assert.equal(s.apiCredentialEntries[0].preview, "test••••only");
+    assert.deepEqual(plain(s.apiCenterDraft), draft); assert.equal(s.apiCenterDirty, true);
+  });
+  test.respond(async () => { throw new Error("synthetic-read-failure"); }); await s.refreshApiCredentials();
+  check("credential errors clear stale metadata and show retry state", () => {
+    assert.equal(s.apiCredentialEntries.length, 0); assert.match(s.$("apiKeyManagerState").textContent, /读取失败/);
+    assert.equal(s.$("apiKeyRefresh").disabled, false);
+  });
+  const count = test.requests.length;
+  await s.deleteApiCredentialEntry({ connectionId: "c1", credentialRef: "unmatched", inUse: false }, {});
+  check("stale credential references cannot be deleted from the list", () => assert.equal(test.requests.length, count));
+});
+
+await group("api-password-owner", () => {
+  const test = apiRuntime(); const s = test.state;
+  s.apiKeyInputConnectionId = "c1";
+  s.apiCenterDraft.connections[0].credentialSource = "keychain";
+  s.apiCenterDraft.connections[1].credentialSource = "keychain";
+  s.apiSelectOptions = () => {}; s.apiDefaultEditorProfile = () => s.apiCurrentProfile();
+  new vm.Script(adminFunction("renderApiConnection")).runInContext(vm.createContext(s));
+  s.$("apiKeyInput").value = "test-only-first-connection-secret";
+  s.renderApiConnection();
+  check("same connection refresh preserves its pending key", () => assert.equal(s.$("apiKeyInput").value, "test-only-first-connection-secret"));
+  s.selectedApiConnection = "c2"; s.renderApiConnection();
+  check("switching connections clears the previous connection's pending key", () => assert.equal(s.$("apiKeyInput").value, ""));
+});
+
 await group("registry-focused-controls", () => {
   for (const name of ["renderRegistryEditor", "renderRegistryContexts"]) {
     for (const tagName of ["INPUT", "TEXTAREA", "SELECT", "BUTTON", "SUMMARY", "A"]) {
@@ -1015,14 +1193,20 @@ function scopedUiRuntime() {
     registryField: (host, label, path, value, change, options = {}) => { const control = node(); fields.push({ label, path, value, change, options, control }); host.append(control); return control; },
     renderAutomationTargetPicker() {}, showAutomationDraft() {}, renderAutomationAccountState() {}, renderSaveState() {}, renderRegistrySaveState() {}, renderRegistryLists() {}, renderRegistryEditor() {}, registryFeedback() {},
     confirm: () => true, toast() {},
-    refreshAccountRegistry: async () => {},
+    refreshAccountRegistry: async () => {
+      for (const [id, draft] of state.registryState.drafts) {
+        Object.assign(state.registryItem(id), structuredClone(draft.base));
+        state.rebaseRegistryDraft(id, draft, state.registryItem(id), draft.revision);
+      }
+      return { items: state.registryState.items };
+    },
     registryRequest: async (url, method, body) => { requests.push({ url, method, body: structuredClone(body) }); return { revision: "r2" }; },
     sensitiveApi: async () => { throw new Error("No fixture response"); }
   };
   state.automationAccounts.drafts.set("a", { routine: state.routineState, dirty: true, rules: state.automationRulesDraft });
   const context = vm.createContext(state);
   state.automationBaseline = result => JSON.stringify({ owner: result.owner, enabled: result.enabled, rules: result.rules, routines: result.routines });
-  const names = ["registryStyle", "registryEditable", "registryDraft", "registryItem", "registryGroup", "registryGet", "registrySet", "registrySelect", "rebaseRegistryDraft", "registryTabKeys", "registryValidate", "registryPatch", "saveRegistryPatch", "registryDraftStatus", "saveRegistryContext", "routineTarget", "routinePatch", "renderRoutineState", "renderRoutines", "refreshRoutines", "saveRoutines"];
+  const names = ["registryStyle", "registryEditable", "registryDraft", "registryItem", "registryGroup", "registryGet", "registrySet", "registrySelect", "rebaseRegistryDraft", "registryTabKeys", "registryValidate", "registryPatch", "confirmRegistrySave", "saveRegistryPatch", "registryDraftStatus", "saveRegistryContext", "routineTarget", "routinePatch", "renderRoutineState", "renderRoutines", "refreshRoutines", "saveRoutines"];
   new vm.Script(names.map(adminFunction).join("\n")).runInContext(context);
   return { state, nodes, fields, requests, context };
 }
@@ -1186,7 +1370,11 @@ await group("account-save-state-and-self-name", async () => {
   check("real HTTP 409 reports conflict instead of generic failure", () => assert.equal(s.registryDraftStatus("a", "identity").kind, "conflict"));
   draft.conflict = false; draft.saveState = null; draft.value.selfName = "提交的自称";
   s.registryRequest = async () => { await new Promise(resolve => { release = resolve; }); return { revision: "r3" }; };
-  s.refreshAccountRegistry = async () => s.rebaseRegistryDraft("a", draft, s.registryItem("a"), "r3");
+  s.refreshAccountRegistry = async () => {
+    Object.assign(s.registryItem("a"), structuredClone(draft.base));
+    s.rebaseRegistryDraft("a", draft, s.registryItem("a"), "r3");
+    return { items: s.registryState.items };
+  };
   const delayed = s.saveRegistryPatch("a", s.registryTabKeys("identity"), "基本");
   draft.value.selfName = "请求期间继续编辑"; draft.dirty.add("selfName");
   release(); await delayed;
@@ -1282,6 +1470,152 @@ await group("api-account-summary-refresh", async () => {
   failed = true; await state.refreshAccountRegistry();
   check("failed account refresh removes stale model claims", () => {
     assert.match(text(host), /刷新失败/); assert.doesNotMatch(text(host), /mimo-live|deepseek-live/);
+  });
+});
+
+await group("api-old-get-after-save-and-request-order", async () => {
+  const t = apiRuntime(), s = t.state;
+  let releaseOld;
+  t.respond((_url, method, body) => method === "GET"
+    ? new Promise(resolve => { releaseOld = resolve; })
+    : { center: body.center, revision: "r2" });
+  const oldRead = s.refreshApiCenter();
+  s.apiCenterDraft.connections[0].name = "saved B"; s.apiCenterDirty = true;
+  await s.saveApiCenter("apiConnectionSave");
+  releaseOld({ center: sampleCenter(), revision: "r1" }); await oldRead;
+  check("pre-save GET arriving after PATCH cannot roll back clean saved API draft or revision", () => {
+    assert.equal(s.apiCenterRevision, "r2"); assert.equal(s.apiCenterDraft.connections[0].name, "saved B");
+    assert.equal(s.apiCenterSaved.connections[0].name, "saved B"); assert.equal(s.apiCenterDirty, false);
+  });
+  const releases = [];
+  t.respond(() => new Promise(resolve => releases.push(resolve)));
+  const first = s.refreshApiCenter(), second = s.refreshApiCenter();
+  const newest = sampleCenter(); newest.connections[0].name = "newest";
+  releases[1]({ center: newest, revision: "r4" }); await second;
+  releases[0]({ center: sampleCenter(), revision: "r3" }); await first;
+  check("older overlapping API GET cannot replace a newer GET", () => assert.equal(s.apiCenterRevision, "r4"));
+});
+
+// Real save, readback, rebase and status functions; only transport and DOM are
+// fixtures. Each request is bounded by a small microtask drain, never a timer.
+function registryReadbackRuntime() {
+  const t = scopedUiRuntime(), s = t.state, messages = [];
+  const server = { revision: "r1", items: structuredClone(s.registryState.items) };
+  Object.assign(s.registryState, { epoch: 0, operations: new Map(), modelLoadedAt: Date.now(), modelError: "" });
+  Object.assign(s, { conflictedScopes: new Set(), fillConfig() {}, renderRegistryContexts() {}, renderApiAccountModels() {},
+    registryFeedback: message => messages.push(message),
+    api: async url => {
+      if (t.beforeRead) await t.beforeRead(url);
+      if (url.startsWith("/api/accounts?")) return structuredClone(server);
+      assert.match(url, /^\/api\/config\?/); return { revision: server.revision };
+    },
+    sensitiveApi: async () => ({ center: {} }),
+    registryRequest: async (_url, _method, body) => {
+      if (t.beforePatch) await t.beforePatch();
+      Object.assign(server.items[0], structuredClone(body.patch)); server.revision = "r2";
+      ++s.registryState.epoch;
+      if (t.afterPatch) t.afterPatch(server);
+      return { revision: "r2" };
+    }
+  });
+  new vm.Script(adminFunction("refreshAccountRegistry")).runInContext(t.context);
+  return Object.assign(t, { server, messages });
+}
+
+await group("registry-save-confirmation-races-and-failures", async () => {
+  {
+    const t = registryReadbackRuntime(), s = t.state, d = s.registryDraft("a"), listStates = [];
+    s.renderRegistryLists = () => listStates.push(d.dirty.size);
+    d.value.style.systemPrompt = "confirmed clean save"; d.dirty.add("style.systemPrompt");
+    await s.saveRegistryPatch("a", ["style"], "风格");
+    check("confirmed clean save redraws account list without a stale draft badge", () => {
+      assert(listStates.length > 0); assert.equal(listStates.at(-1), 0);
+    });
+  }
+  for (const contextSave of [false, true]) for (const failure of ["read-failure", "mismatch", "success"]) {
+    const t = registryReadbackRuntime(), s = t.state, d = s.registryDraft("a");
+    d.value.style.systemPrompt = "submitted B"; d.dirty.add("style.systemPrompt");
+    d.value.features.chat = false; d.dirty.add("features.chat");
+    let releasePatch;
+    t.beforePatch = () => new Promise(resolve => { releasePatch = resolve; });
+    if (failure === "read-failure") t.beforeRead = () => { throw new Error("readback unavailable"); };
+    if (failure === "mismatch") t.afterPatch = server => { server.items[0].style.systemPrompt = "wrong server value"; };
+    const saving = contextSave ? s.saveRegistryContext("qa") : s.saveRegistryPatch("a", ["style"], "风格");
+    const rejected = failure === "success" ? saving : assert.rejects(saving, /readback unavailable|保存核对不一致/);
+    d.value.style.systemPrompt = "newer C"; d.dirty.add("style.systemPrompt");
+    releasePatch(); await rejected;
+    check(`${contextSave ? "context" : "tab"} ${failure} preserves new and unrelated drafts`, () => {
+      assert.equal(d.value.style.systemPrompt, "newer C"); assert(d.dirty.has("style.systemPrompt"));
+      assert.equal(d.value.features.chat, false); assert(d.dirty.has("features.chat"));
+      assert.equal(d.base.style.systemPrompt, "submitted B");
+      if (failure === "success") assert.equal(d.conflict, false);
+      else {
+        assert.match(t.messages.at(-1), /已提交，但未通过保存核对/); assert(!t.messages.some(message => /已保存/.test(message)));
+        assert.equal(d.saveState.status, "unverified"); assert.match(s.registryDraftStatus("a", "style").text, /已提交但未核实/);
+      }
+    });
+  }
+  // A submitted, unchanged leaf also stays dirty on failure (not only C).
+  for (const contextSave of [false, true]) {
+    const t = registryReadbackRuntime(), s = t.state, d = s.registryDraft("a");
+    d.value.style.systemPrompt = "submitted B"; d.dirty.add("style.systemPrompt");
+    t.beforeRead = () => { throw new Error("readback unavailable"); };
+    await assert.rejects(contextSave ? s.saveRegistryContext("qa") : s.saveRegistryPatch("a", ["style"], "风格"));
+    check(`unchanged ${contextSave ? "context" : "tab"} submission stays dirty on read failure`, () => {
+      assert.equal(d.value.style.systemPrompt, "submitted B"); assert(d.dirty.has("style.systemPrompt"));
+    });
+  }
+  const t = registryReadbackRuntime(), s = t.state, d = s.registryDraft("a");
+  let releaseOld; let reads = 0;
+  t.beforeRead = async url => {
+    if (url.startsWith("/api/accounts?") && ++reads === 1) await new Promise(resolve => { releaseOld = resolve; });
+  };
+  const oldRead = s.refreshAccountRegistry();
+  for (let turn = 0; turn < 100 && !releaseOld; turn++) await Promise.resolve();
+  assert.ok(releaseOld, "old registry read reached boundary");
+  d.value.style.systemPrompt = "submitted B"; d.dirty.add("style.systemPrompt");
+  let finished = false;
+  const saving = s.saveRegistryPatch("a", ["style"], "风格").then(() => { finished = true; });
+  for (let turn = 0; turn < 30; turn++) await Promise.resolve();
+  assert.equal(finished, false);
+  releaseOld(); await oldRead; await saving;
+  check("shared pre-save registry refresh cannot substitute for a fresh post-save read", () => {
+    assert(reads >= 3); assert.equal(d.dirty.has("style.systemPrompt"), false);
+    assert.equal(s.registryItem("a").style.systemPrompt, "submitted B");
+  });
+});
+
+await group("generic-numeric-boolean-acknowledgement-mismatches", async () => {
+  const cases = [
+    ["qa", "socialPlanner.timeoutMs", 1234], ["qa", "socialPlanner.shadowMode", true],
+    ["qa", "messageDebounce.baseWaitMs", 1234], ["qa", "messageDebounce.enabled", true],
+    ["qa", "responseQueue.liveContext.windowMs", 1234], ["qa", "responseQueue.liveContext.enabled", true],
+    ["tasks", "taskMode.maxTurns", 12], ["archive", "chatArchive.enabled", true],
+    ["archive", "chatArchive.maxRetrieveItems", 1234],
+    ["memory", "memory.integrity.maxEntriesPerUser", 123], ["memory", "memory.integrity.enabled", true],
+    ["vision", "vision.maxImagesPerMessage", 3], ["vision", "vision.enabled", true]
+  ];
+  for (const [page, field, value] of cases) for (const boundary of ["ack", "readback"]) {
+    const t = configUiRuntime(), s = t.state;
+    s.activePage = page; t.edit(field, value); s.markDirty(page === "qa" ? "qa:behavior" : page);
+    const work = s.saveConfig(), rejected = assert.rejects(work, /保存核对不一致/, `${field} ${boundary}`);
+    await t.waitForPatch(0);
+    const response = t.commit(0, "r2");
+    const target = boundary === "ack" ? response.config : s.server;
+    const parts = field.split("."); let parent = target;
+    for (const part of parts.slice(0, -1)) parent = parent[part];
+    // Exercise dropped values at readback, clipped/flipped values at ACK.
+    if (boundary === "readback") delete parent[parts.at(-1)];
+    else parent[parts.at(-1)] = typeof value === "boolean" ? !value : value + 1;
+    t.reply(0, response); await rejected;
+    check(`${field} ${boundary} mismatch cannot clear or claim success`, () => {
+      assert(s.dirtyScopes.has(page === "qa" ? "qa:behavior" : page));
+      assert.equal(s.getVal(field), value); assert(!t.feedback.some(message => /已保存/.test(message)));
+    });
+  }
+  const t = configUiRuntime();
+  check("scalar validation intentionally permits text and QQ ID list canonicalization", () => {
+    t.state.verifyConfigSaved({ scope: { groupIds: [12345] }, name: " padded " }, { scope: { groupIds: ["12345"] }, name: "padded" });
   });
 });
 

@@ -506,6 +506,7 @@ function proxy(req, res) {
   // independently checks its own loopback origin for protected mutations.
   if (req.headers.origin && (/^\/api\/voice\/(?:credential|test)(?:\?|$)/.test(req.url || "")
     || /^\/api\/api-center(?:\/|\?|$)/.test(req.url || "")
+    || /^\/api\/social-agent(?:\/|\?|$)/.test(req.url || "")
     || /^\/api\/(?:accounts|account-groups|tasks)(?:\/|\?|$)/.test(req.url || "")
     || /^\/api\/config(?:\?|$)/.test(req.url || "")
     || /^\/api\/memory\/verification(?:\/|\?|$)/.test(req.url || "")

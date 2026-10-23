@@ -91,4 +91,47 @@ for (const rule of [
 ]) assert.equal(validateAutomationRules([rule]).valid, false);
 assert.throws(() => dueAutomationRules(midnight, [schedule, { ...schedule }], 123), /duplicate id/);
 
-console.log(JSON.stringify({ ok: true, assertions: "normalization, duplicate/ambiguous validation, timezone/DST/date boundaries, scope, disabled, command safety, limits" }));
+const at = { ...schedule, id: "once", trigger: { type: "at", at: "2026-10-23T08:30:00+08:00" } };
+const start = Date.parse("2026-10-23T00:30:00Z");
+const once = normalizeAutomationRule(at);
+assert.deepEqual(once.trigger, { type: "at", at: "2026-10-23T00:30:00.000Z", windowMinutes: 3 });
+assert.equal(at.trigger.at, "2026-10-23T08:30:00+08:00", "input unchanged");
+for (const [delta, due] of [[-1, false], [0, true], [1, true], [179999, true], [180000, false], [86400000, false]]) {
+  assert.equal(dueAutomationRules(start + delta, [at], 123).length, due ? 1 : 0, `at window boundary ${delta}`);
+  if (!due) assert.throws(() => automationOccurrenceKey(at, 123, start + delta), /not due/);
+}
+assert.deepEqual(dueAutomationRules(start, [{ ...at, enabled: false }], 123), []);
+assert.deepEqual(dueAutomationRules(start, [at], 456), []);
+assert.deepEqual(matchAutomationCommand("/digest", [at], 123), []);
+for (const windowMinutes of [1, 15]) {
+  const rule = { ...at, trigger: { ...at.trigger, windowMinutes } };
+  assert.equal(dueAutomationRules(start + windowMinutes * 60000 - 1, [rule], 123).length, 1);
+  assert.equal(dueAutomationRules(start + windowMinutes * 60000, [rule], 123).length, 0);
+}
+for (const value of ["0001-01-01T00:00:00+14:00", "9999-12-31T23:59:59-14:00"]) assert.throws(() => normalizeAutomationRule({ ...at, trigger: { type: "at", at: value } }), /trigger.at/);
+const key = automationOccurrenceKey(at, 123, start);
+assert.deepEqual(JSON.parse(key), ["once", "group:123", once.trigger.at]);
+assert.equal(key, automationOccurrenceKey({ ...at, timezone: "America/Los_Angeles", trigger: { ...at.trigger, at: once.trigger.at, windowMinutes: 15 } }, 123, start + 179999), "same absolute occurrence despite zone, spelling, window, and now");
+assert.notEqual(key, automationOccurrenceKey({ ...at, trigger: { ...at.trigger, at: "2026-10-24T00:30:00Z" } }, 123, start + 86400000));
+// Model the caller's durable claim immediately before wire, not while scanning.
+const claims = new Set(); let attempts = 0;
+function tick(now, allowed = true, wireFails = false) {
+  for (const rule of dueAutomationRules(now, [at], 123)) {
+    if (!allowed) continue;
+    const occurrence = automationOccurrenceKey(rule, 123, now);
+    if (claims.has(occurrence)) continue;
+    claims.add(occurrence); attempts++;
+    if (wireFails) return; // uncertain/failed wire retains claim, never replays
+  }
+}
+tick(start - 1); tick(start, false); assert.equal(claims.size, 0);
+tick(start + 1, true, true); tick(start + 2); tick(start + 179999); tick(start + 180000);
+assert.equal(attempts, 1); assert.equal(claims.size, 1);
+for (const value of ["2026-02-29T12:00:00Z", "2026-04-31T12:00:00Z", "2026-13-01T12:00:00Z", "2026-01-00T12:00:00Z", "0000-01-01T12:00:00Z", "2026-10-23", "2026-10-23T08:30:00", "2026-10-23T24:00:00Z", "2026-10-23T08:30:60Z", "2026-10-23T08:30:00+14:01", "2026-10-23T08:30:00+24:00", "2026-10-23T08:30:00.1234Z", null, 123]) {
+  assert.throws(() => normalizeAutomationRule({ ...at, trigger: { type: "at", at: value } }), /trigger.at/, String(value));
+}
+assert.equal(normalizeAutomationRule({ ...at, trigger: { type: "at", at: "2028-02-29T12:00:00-05:00" } }).trigger.at, "2028-02-29T17:00:00.000Z");
+for (const windowMinutes of [0, 16, -1, 1.5, "3", null]) assert.throws(() => normalizeAutomationRule({ ...at, trigger: { ...at.trigger, windowMinutes } }), /windowMinutes/);
+for (const kind of ["message", "summary", "task"]) assert.equal(normalizeAutomationRule({ ...at, action: { kind } }).action.kind, kind);
+assert.throws(() => normalizeAutomationRule({ ...at, trigger: { ...at.trigger, runAt: start } }), /not supported/);
+console.log(JSON.stringify({ ok: true, assertions: "normalization, timezone/DST, scope, commands, limits; strict at calendar/offsets, finite window, stable key, caller claim timing and no replay simulation" }));

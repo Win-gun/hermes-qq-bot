@@ -136,7 +136,8 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
 
   let center = previewCenterShape({ version: 1, connections: [
     { id: "preview-chat", name: "DeepSeek · 演示连接", provider: "deepseek", baseUrl: "", credentialSource: "existing", apiKeyEnv: "PREVIEW_NOT_CONFIGURED" },
-    { id: "preview-mimo", name: "MiMo · 演示连接", provider: "xiaomi", baseUrl: "", credentialSource: "existing", apiKeyEnv: "PREVIEW_NOT_CONFIGURED" }
+    { id: "preview-mimo", name: "MiMo · 演示连接", provider: "xiaomi", baseUrl: "", credentialSource: "existing", apiKeyEnv: "PREVIEW_NOT_CONFIGURED" },
+    { id: "preview-keychain", name: "已保存密钥 · 演示连接", provider: "custom", baseUrl: "https://example.invalid/v1", credentialSource: "keychain", apiKeyEnv: "", credentialRef: "ec021717-671a-4c86-9ca0-c44265deee81" }
   ], profiles: [
     { id: "preview-chat", name: "日常问答", kind: "chat", connectionId: "preview-chat", model: "deepseek-v4-flash", command: "preview-disabled", args: [], reasoningEffort: "medium", timeoutMs: 60000 },
     { id: "preview-mimo-chat", name: "MiMo 问答", kind: "chat", connectionId: "preview-mimo", model: "mimo-v2.6-flash", command: "preview-disabled", args: [], reasoningEffort: "none", timeoutMs: 60000 },
@@ -246,6 +247,13 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
     }
     if (get && rawPath === "/api/automation/routines") return req.headers["x-hermes-qq-admin"] === "preview-session-not-a-credential" ? reply(routinesView()) : reply({ ok: false, error: "admin_session_required" }, 403);
     if (get && rawPath === "/api/api-center") return reply(centerView());
+    if (get && rawPath === "/api/api-center/credentials") {
+      if (req.headers["x-hermes-qq-admin"] !== "preview-session-not-a-credential") return reply({ ok: false, error: "admin_session_required" }, 403);
+      return reply({ ok: true, preview: true, credentials: center.connections.filter((entry) => entry.credentialSource === "keychain").map((entry) => ({
+        connectionId: entry.id, connectionName: entry.name, credentialRef: entry.credentialRef, status: "configured", preview: "DEMO••••0001",
+        createdAt: new Date(startedAt - 86400000).toISOString(), updatedAt: new Date(startedAt).toISOString(), inUse: false, usedBy: []
+      })) });
+    }
     if (get && rawPath === "/api/status") return reply({ ok: true, preview: true, serverTime: Date.now(), health: health(), config: configView(), showQrcode: false, qrcodeExists: false, qrcode: { exists: false }, primaryProtocol: "snowluma", logs: { tail: "[PREVIEW] 两个虚构账号 · 内存草稿 · 不执行模型或 QQ 操作\n[PREVIEW] 控制台 UI QA 就绪", errorTail: "" } });
     if (get && rawPath === "/api/tasks") return reply({ ok: true, tasks, running: 0, queued: 0 });
     if (get && rawPath === "/api/reviewer/status") return reply({ ok: true, enabled: false, shadowMode: true, config: { enabled: false, shadowMode: true, runtimeDisabled: true }, metrics: { reviewed: 8, passed: 7, corrected: 1, rejected: 0, failed: 0, totalDurationMs: 2400, recent: [] } });
@@ -390,7 +398,7 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
     if (rawPath === "/api/host/backup/cancel") { backupProgress = { status: "cancelled", percent: 0, detail: "模拟取消" }; return reply(simulated); }
     const backupName = rawPath.match(/^\/api\/host\/backups\/([^/]+)$/)?.[1];
     if (backupName && req.method === "DELETE") { const at = backups.findIndex((item) => item.name === backupName); if (at >= 0) backups.splice(at, 1); return reply(simulated); }
-    if (/^\/api\/(?:ai|voice|api-center)\/test$/.test(rawPath) || rawPath === "/send") return reply({ ...simulated, reply: "隔离 UI 预览回复；未执行模型。", output: "隔离预览", durationMs: 12 });
+    if (/^\/api\/(?:ai|voice|api-center)\/test$/.test(rawPath) || rawPath === "/send") return reply({ ...simulated, detail: "隔离预览模拟成功，未调用真实服务", reply: "隔离 UI 预览回复；未执行模型。", output: "隔离预览", durationMs: 12 });
     if (rawPath.startsWith("/api/")) return reply({ ...simulated, ok: false, unsupported: true, empty: true, items: [], data: {} });
     return reply({ ok: false, preview: true, error: "not_found" }, 404);
   }
@@ -431,7 +439,7 @@ function verifyRenderShapes(source, fixtures, check) {
     structuredClone, $: element, document: { createElement: (tag) => new Element(tag) },
     cfg: fixtures.config, apiCenterDraft: copy(fixtures.center.center), apiCenterSaved: copy(fixtures.center.center), apiCredentialStatus: fixtures.center.credentialStatus,
     registryState: { loaded: true, items: copy(fixtures.config.accounts.items), groups: [], error: "" },
-    selectedApiConnection: "", selectedApiProfile: "", selectedApiSearch: "", apiTests: {},
+    selectedApiConnection: "", selectedApiProfile: "", selectedApiSearch: "", apiTests: {}, apiKeyInputConnectionId: "",
     taskData: fixtures.tasks, reviewerData: fixtures.reviewer, memoryIntegrityData: fixtures.integrity,
     memoryData: fixtures.memory, selectedGroupId: "20001", selectedGroupMemory: fixtures.group,
     archiveStatusData: fixtures.archiveStatus, archiveConversationData: fixtures.archive,

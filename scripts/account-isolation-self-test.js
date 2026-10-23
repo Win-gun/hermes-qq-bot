@@ -15,6 +15,7 @@ import { automationForAccount } from "../src/account-automation.js";
 import { AccountRuntime, logicalBotId, botConversationKey, botControlRevision } from "../src/account-runtime.js";
 import { replyDeliveryConfig } from "../src/reply-execution.js";
 import { reconcileMemoryInPlace } from "../src/memory-state.js";
+import { socialAgentConfig } from "../src/social-agent-state.js";
 
 // Read source only. Never import/start main(), open sockets, spawn a service,
 // read live config/state, or persist anything. The complete real message callback
@@ -82,7 +83,7 @@ function fixtureConfig() {
 }
 
 const realFunctions = [
-  "asStringId", "asArray", "clampText", "safePathSegment", "now", "accountProtocol", "oneBotBinding", "oneBotBindingCurrent", "clearOneBotActionsForSocket",
+  "asStringId", "asArray", "clampText", "safePathSegment", "now", "canonicalSocialConversation", "accountProtocol", "oneBotBinding", "oneBotBindingCurrent", "clearOneBotActionsForSocket",
   "groupMemory", "groupSettings", "normalizeBehaviorMode", "behaviorMode", "behaviorModeLabel", "behaviorModeDescription", "applyBehaviorMode", "socialPlannerConfig",
   "configuredAccountDefinitions", "accountFailoverConfig", "accountById", "configForReplyAccount", "configForGroupAccount",
   "syncAccountKernel", "accountExecutionRevision", "accountRuntimeContext", "accountRuntimeContextCurrent", "accountRuntimeIdentityCurrent", "botStateKey",
@@ -143,6 +144,16 @@ function harness(config = fixtureConfig(), mutation = {}) {
     markInboundSeen: (key, value) => { const previous = seen.get(key); seen.set(key, value); return previous; },
     shouldHandleGroup: () => true, shouldHandlePrivate: () => true, isPrivateOwner: () => false,
     handleOwnerPrivateControlCommand: async () => false,
+    // Existing isolation fixtures leave the additive social agent disabled.
+    // Resolve the real policy instead of swallowing any new planner calls.
+    socialAgentConfig,
+    socialPolicy: id => socialAgentConfig(effectiveAccount(config, id)?.socialAgent),
+    socialEnabled: (id, conversationId) => {
+      const policy = socialAgentConfig(effectiveAccount(config, id)?.socialAgent);
+      return policy.enabled && policy.conversationIds.includes(context.canonicalSocialConversation(conversationId));
+    },
+    socialScopes: new Map(), socialKey: ctx => JSON.stringify([ctx.logicalId, ctx.conversationId]),
+    socialRuntime: { cancel: noop, observe: forbidden("unexpected social agent planner") },
     taskRuntime: { get: () => null }, handleTaskControl: async () => false,
     replyCoordinator: { observeMessage: () => ({ absorbed: false }), dropSenderJobs: noop, enqueue: (job) => jobs.push(job),
       refreshLogicalBot: noop, invalidateLogicalBot: noop },
