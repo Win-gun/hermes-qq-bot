@@ -7,6 +7,19 @@ import { ReplyCoordinator } from "../src/reply-coordinator.js";
 import { parseReplyPlan } from "../src/reply-plan.js";
 
 const policy = { enabled: true, shadowMode: false, conversationIds: ["group:10001"] };
+const legacy = validateSocialExperiencePolicy(policy);
+assert.equal(legacy.stickers.groupLearning, false);
+assert.equal(legacy.stickers.autonomousEligibility, false);
+assert.equal(legacy.stickers.maxDailyDownloads, 16);
+assert.equal(legacy.reactions.enabled, false);
+assert.deepEqual(legacy.reactions.emojiIds, ["76"]);
+for (const bad of [{ stickers: { groupLearning: "true" } }, { stickers: { autonomousEligibility: 1 } },
+  { stickers: { maxDailyDownloads: 101 } }, { reactions: { enabled: "yes" } }, { reactions: { maxDaily: 201 } },
+  { reactions: { emojiIds: [76] } }, { reactions: { emojiIds: ["file:///tmp/a"] } },
+  { reactions: { emojiIds: ["1", "2", "3", "4"] } }, { reactions: { cooldownMs: 86400001 } }]) {
+  assert.throws(() => validateSocialExperiencePolicy(bad));
+}
+assert.deepEqual(validateSocialExperiencePolicy({ reactions: { emojiIds: ["76", "76"] } }).reactions.emojiIds, ["76"]);
 assert.equal(socialExperienceFor({}, "10001").active, false);
 assert.equal(socialExperienceFor({ socialExperience: policy }, "10001").active, true);
 assert.equal(socialExperienceFor({ socialExperience: policy }, "10002").active, false);
@@ -32,6 +45,12 @@ updated.accounts.items[0].socialExperience = validateSocialExperiencePolicy({ ..
 runtime.updateConfig(updated);
 assert.notEqual(runtime.revision("alpha"), first);
 assert.equal(runtime.revision("beta"), peer, "editing expression cannot invalidate a peer's reply");
+const beforeLearning = runtime.revision("alpha");
+updated.accounts.items[0].socialExperience.stickers.groupLearning = true;
+updated.accounts.items[0].socialExperience.reactions.enabled = true;
+runtime.updateConfig(updated);
+assert.notEqual(runtime.revision("alpha"), beforeLearning);
+assert.equal(runtime.revision("beta"), peer);
 const diagnostics = new ExpressionDiagnostics(2);
 for (let i = 0; i < 4; i++) diagnostics.record("turns", "account:alpha", { reason: "incomplete", waitMs: 2500,
   content: "PRIVATE", explanation: "PRIVATE", secret: "PRIVATE" });

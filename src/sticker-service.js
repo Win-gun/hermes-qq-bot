@@ -17,7 +17,7 @@ const digestOK = v => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
 
 // Unknown persisted fields remain inert data. Never repair a malformed known
 // field into an empty library. All new values are explicit allowlist projections.
-function validateStore(store, logicalId) {
+export function validateStickerStore(store, logicalId) {
   if (!plain(store) || store.version !== 1 || !map(store.bots)) throw fail('STICKER_SCHEMA');
   // The envelope is shared; individual account libraries are fault domains.
   // Do not traverse, repair or normalize a different logical identity's data.
@@ -29,10 +29,13 @@ function validateStore(store, logicalId) {
     if (Object.keys(bot.stickers).length > 500) throw fail('STICKER_CAPACITY');
     let annotations = 0, receipts = 0;
     for (const [id, asset] of Object.entries(bot.stickers)) {
-      if (!idOK(id) || !plain(asset) || asset.id !== id || typeof asset.url !== 'string' || typeof asset.desc !== 'string'
+      if (!idOK(id) || !plain(asset) || asset.id !== id || typeof asset.desc !== 'string'
         || asset.trust !== 'untrusted' || typeof asset.active !== 'boolean' || !integer(asset.revision) || asset.revision < 1
         || !map(asset.annotations) || (asset.sha256 !== undefined && !digestOK(asset.sha256))) throw fail('STICKER_SCHEMA');
-      try { publicMediaUrl(asset.url); } catch { throw fail('STICKER_SCHEMA'); }
+      if (asset.url !== undefined) { try { publicMediaUrl(asset.url); } catch { throw fail('STICKER_SCHEMA'); } }
+      else if (asset.source !== 'group-observed' || !digestOK(asset.cacheSha256) || asset.sha256 !== asset.cacheSha256) throw fail('STICKER_SCHEMA');
+      if (asset.source !== undefined && !['collection', 'group-observed'].includes(asset.source)) throw fail('STICKER_SCHEMA');
+      if (asset.cacheSha256 !== undefined && (!digestOK(asset.cacheSha256) || asset.cacheSha256 !== asset.sha256)) throw fail('STICKER_SCHEMA');
       annotations += Object.keys(asset.annotations).length;
       if (annotations > 1000) throw fail('STICKER_CAPACITY');
       for (const [scope, a] of Object.entries(asset.annotations)) {
@@ -46,10 +49,30 @@ function validateStore(store, logicalId) {
         for (const [messageId, receipt] of Object.entries(a.receipts)) {
           if (!/^-?[1-9]\d{0,19}$/.test(messageId) || !plain(receipt) || !integer(receipt.at)) throw fail('STICKER_SCHEMA');
         }
+        if (a.evidence !== undefined && (!Array.isArray(a.evidence) || !a.evidence.length || a.evidence.length > 8
+          || !integer(a.evidenceRevision) || a.evidenceRevision < 1 || a.evidence.some(e => !plain(e)
+            || !/^-?[1-9]\d{0,19}$/.test(e.messageId) || !/^[1-9]\d{0,19}$/.test(e.userId)
+            || !integer(e.sentAt) || !integer(e.receivedAt)))) throw fail('STICKER_SCHEMA');
+        if (a.automatic !== undefined && (!plain(a.automatic) || typeof a.automatic.eligible !== 'boolean'
+          || !digestOK(a.automatic.sha256) || !integer(a.automatic.evidenceRevision)
+          || a.automatic.qualificationVersion !== 1
+          || typeof a.usage !== 'string' || !Array.isArray(a.avoid) || a.avoid.some(x => typeof x !== 'string'))) throw fail('STICKER_SCHEMA');
       }
     }
   }
   return store;
+}
+
+// Host-produced qualification is separate from an administrator's decision.
+export function stickerAutoEligible(asset, a, ctx) {
+  const p = ctx.policy;
+  return !!(asset.source === 'group-observed' && a && a.status === 'candidate' && !a.blocked && !a.denied
+    && asset.active && !asset.blocked && !asset.denied && p?.enabled && !p.shadowMode && p.stickers?.enabled
+    && p.stickers.groupLearning === true && p.stickers.autonomousEligibility === true
+    && p.conversationIds?.includes(ctx.conversationId) && ctx.conversationId.startsWith('group:')
+    && a.automatic?.eligible === true && a.automatic.sha256 === asset.sha256 && a.sha256 === asset.sha256
+    && a.automatic.evidenceRevision === a.evidenceRevision && a.automatic.qualificationVersion === 1
+    && a.evidence?.length && a.usage?.trim());
 }
 
 /** Isolated, host-only API. NOT a model tool surface.
@@ -65,7 +88,7 @@ function validateStore(store, logicalId) {
  * Official desc and vision note/tags are untrusted redacted text, not authority.
  * No send/add/modify API exists. markSent is ONLY for host-confirmed OneBot ACKs.
  */
-export function createStickerService({ request, transact, readState, isCurrent, describeImage, downloadImage = createPublicMediaReader(), clock = Date.now }) {
+export function createStickerService({ request, transact, readState, isCurrent, describeImage, mediaCache, policyFor = ctx => ctx.policy, downloadImage = createPublicMediaReader(), clock = Date.now }) {
   if ([request, transact, readState, isCurrent, describeImage, downloadImage, clock].some(f => typeof f !== 'function')) throw fail('STICKER_DEPENDENCY');
   const context = (ctx, signal) => {
     if (!plain(ctx) || !logicalOK(ctx.logicalId) || !scopeOK(ctx.conversationId)) throw fail('STICKER_CONTEXT');
@@ -75,7 +98,7 @@ export function createStickerService({ request, transact, readState, isCurrent, 
       if (ctx.logicalId !== logicalId || ctx.conversationId !== conversationId || isCurrent(ctx) !== true) throw fail('STICKER_STALE');
     };
     guard();
-    return { logicalId, conversationId, guard };
+    return { logicalId, conversationId, guard, ctx: { logicalId, conversationId, revision: ctx.revision, policy: policyFor(ctx) } };
   };
   function store(root, c, create = false) {
     if (!plain(root) || !plain(root.memory)) throw fail('STICKER_SCHEMA');
@@ -83,7 +106,7 @@ export function createStickerService({ request, transact, readState, isCurrent, 
       if (!create) return { version: 1, bots: {} };
       root.memory.socialExpressionAssets = { version: 1, bots: {} };
     }
-    return validateStore(root.memory.socialExpressionAssets, c.logicalId);
+    return validateStickerStore(root.memory.socialExpressionAssets, c.logicalId);
   }
   const now = () => { const n = clock(); if (!integer(n)) throw fail('STICKER_CLOCK'); return n; };
   const getBot = (root, c, create = false) => {
@@ -107,7 +130,7 @@ export function createStickerService({ request, transact, readState, isCurrent, 
     c.guard();
     return result;
   };
-  const projected = (asset, scope) => ({ id: asset.id, official: { url: asset.url, desc: asset.desc, trust: 'untrusted' },
+  const projected = (asset, scope, ctx) => ({ id: asset.id, source: asset.source || 'collection', autoEligible: stickerAutoEligible(asset, asset.annotations[scope], ctx), official: { url: asset.url, desc: asset.desc, trust: 'untrusted' },
     annotation: asset.annotations[scope] ? structuredClone(asset.annotations[scope]) : null });
   async function image(c, url, signal) {
     publicMediaUrl(url);
@@ -115,9 +138,21 @@ export function createStickerService({ request, transact, readState, isCurrent, 
     const result = validateImage(downloaded?.buffer, downloaded?.mimeType);
     return { ...result, sha256: hash(result.buffer) };
   }
+  async function assetImage(c, asset, signal) {
+    if (mediaCache && asset.cacheSha256) {
+      const cached = await mediaCache.read(c.logicalId, asset.cacheSha256); c.guard();
+      if (cached) {
+        const checked = validateImage(cached.buffer, cached.mimeType), sha256 = hash(checked.buffer);
+        if (sha256 !== asset.cacheSha256) throw fail('STICKER_CONFLICT');
+        return { ...checked, sha256 };
+      }
+    }
+    return image(c, asset.url, signal);
+  }
   function approved(root, c, id) {
     const asset = assetAt(root, c, id), a = asset.annotations[c.conversationId];
-    if (!a || a.status !== 'confirmed' || a.conversationId !== c.conversationId) throw fail('STICKER_NOT_CONFIRMED');
+    if (!a || a.blocked || a.denied || asset.blocked || asset.denied || a.conversationId !== c.conversationId
+      || (a.status !== 'confirmed' && !stickerAutoEligible(asset, a, c.ctx))) throw fail('STICKER_NOT_CONFIRMED');
     return { asset, a };
   }
   function requireReceiptRoom(root, c) {
@@ -155,30 +190,33 @@ export function createStickerService({ request, transact, readState, isCurrent, 
         bot.capabilities.collection = 'supported';
         for (const entry of entries) {
           const previous = bot.stickers[entry.id];
+          if (previous?.source === 'group-observed') throw fail('STICKER_CONFLICT');
           // A new URL/remark invalidates prior approvals; keep tombstones and
           // receipts for audit, but require fresh vision + admin confirmation.
           if (previous && (previous.url !== entry.url || previous.desc !== entry.desc || !previous.active)) {
-            for (const a of Object.values(previous.annotations)) { a.status = 'candidate'; delete a.actor; a.revision++; }
+            for (const a of Object.values(previous.annotations)) { if (a.status !== 'rejected') { a.status = 'candidate'; delete a.actor; } a.revision++; }
           }
           bot.stickers[entry.id] = { ...previous, ...entry, active: true, revision: (previous?.revision || 0) + 1, annotations: previous?.annotations || {} };
         }
         // Exactly count=100 cannot prove completeness; never delete from it.
-        if (entries.length < 100) for (const a of Object.values(bot.stickers)) if (!seen.has(a.id)) { a.active = false; a.revision++; }
+        if (entries.length < 100) for (const a of Object.values(bot.stickers)) if (a.source !== 'group-observed' && !seen.has(a.id)) { a.active = false; a.revision++; }
       });
       return { supported: true, count: entries.length, complete: entries.length < 100 };
     },
     async annotate(ctx, { id, signal } = {}) {
       const c = context(ctx, signal), original = structuredClone(assetAt(readState(), c, id));
-      const media = await image(c, original.url, signal); c.guard();
+      const media = await assetImage(c, original, signal); c.guard();
       const description = await describeImage(ctx, media, { signal }); c.guard();
       const note = text(description?.note);
       if (!note || !plain(description) || (description.tags !== undefined && (!Array.isArray(description.tags) || description.tags.some(t => typeof t !== 'string')))) throw fail('STICKER_VISION');
       return commit(c, root => {
         const asset = assetAt(root, c, id), old = asset.annotations[c.conversationId];
         if (asset.revision !== original.revision || (old?.revision || 0) !== (original.annotations[c.conversationId]?.revision || 0)) throw fail('STICKER_CONFLICT');
-        const annotation = { conversationId: c.conversationId, revision: (old?.revision || 0) + 1, status: 'candidate',
+        const annotation = { ...old, conversationId: c.conversationId, revision: (old?.revision || 0) + 1, status: old?.status === 'rejected' ? 'rejected' : 'candidate',
           note, tags: (description.tags || []).slice(0, 16).map(t => text(t, 32)), sha256: media.sha256,
           sentCount: old?.sentCount || 0, receipts: old?.receipts || {}, updatedAt: now() };
+        if (annotation.status !== 'rejected') delete annotation.actor;
+        delete annotation.automatic;
         asset.annotations[c.conversationId] = annotation;
         return structuredClone(annotation);
       });
@@ -190,12 +228,13 @@ export function createStickerService({ request, transact, readState, isCurrent, 
         const a = assetAt(root, c, id).annotations[c.conversationId];
         if (!a || a.revision !== expectedRevision) throw fail('STICKER_CONFLICT');
         a.status = status; a.actor = actor; a.revision++; a.updatedAt = now();
+        if (status === 'confirmed') { delete a.blocked; delete a.denied; }
         return structuredClone(a);
       });
     },
     list(ctx) {
       const c = context(ctx), bot = getBot(readState(), c);
-      return Object.values(bot?.stickers || {}).filter(a => a.active).map(a => projected(a, c.conversationId));
+      return Object.values(bot?.stickers || {}).filter(a => a.active && (a.source !== 'group-observed' || a.annotations[c.conversationId])).map(a => projected(a, c.conversationId, c.ctx));
     },
     candidates(ctx, { query = '', serious = false, limit = 3 } = {}) {
       const c = context(ctx), bot = getBot(readState(), c);
@@ -204,7 +243,8 @@ export function createStickerService({ request, transact, readState, isCurrent, 
       const q = text(query).toLowerCase();
       return Object.values(bot?.stickers || {}).filter(asset => {
         const a = asset.annotations[c.conversationId];
-        return asset.active && a?.status === 'confirmed' && (!q || `${a.note} ${a.tags.join(' ')}`.toLowerCase().includes(q));
+        return asset.active && !asset.blocked && !asset.denied && !a?.blocked && !a?.denied
+          && (a?.status === 'confirmed' || stickerAutoEligible(asset, a, c.ctx)) && (!q || `${a.note} ${a.tags.join(' ')} ${a.usage || ''}`.toLowerCase().includes(q));
       }).sort((a, b) => a.id.localeCompare(b.id)).slice(0, limit).map(a => ({ id: a.id, ...structuredClone(a.annotations[c.conversationId]) }));
     },
     async prepare(ctx, { id, signal } = {}) {
@@ -212,7 +252,7 @@ export function createStickerService({ request, transact, readState, isCurrent, 
         const c = context(ctx, signal), root = readState(), { asset, a } = approved(root, c, id);
         requireReceiptRoom(root, c); // Do not send an image whose ACK cannot fit.
         const revision = a.revision, assetRevision = asset.revision, expectedHash = a.sha256;
-        const media = await image(c, asset.url, signal); c.guard();
+        const media = await assetImage(c, asset, signal); c.guard();
         const latest = readState(), current = approved(latest, c, id);
         requireReceiptRoom(latest, c); // Another ACK may have filled it during download.
         if (current.a.revision !== revision || current.asset.revision !== assetRevision || media.sha256 !== expectedHash) throw fail('STICKER_CONFLICT');

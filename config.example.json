@@ -75,7 +75,8 @@
         "conversationIds": [],
         "turn": { "enabled": true, "minWaitMs": 150, "maxWaitMs": 4500, "ordinaryWaitMs": 700, "incompleteWaitMs": 2500, "maxTurnMs": 8000 },
         "expression": { "enabled": true, "maxMessages": 2, "minIntervalMs": 200, "maxIntervalMs": 800, "allowQuotes": true },
-        "stickers": { "enabled": false, "autoSend": false, "visionLearning": false, "maxDailyVisionCalls": 8, "cooldownMs": 60000 },
+        "stickers": { "enabled": false, "autoSend": false, "visionLearning": false, "groupLearning": false, "autonomousEligibility": false, "maxDailyVisionCalls": 8, "maxDailyDownloads": 16, "cooldownMs": 60000 },
+        "reactions": { "enabled": false, "cooldownMs": 60000, "maxDaily": 30, "emojiIds": ["76"] },
         "language": { "enabled": false, "autoCandidates": true }
       },
       "socialAgent": {

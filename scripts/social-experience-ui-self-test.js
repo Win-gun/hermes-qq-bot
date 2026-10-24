@@ -2,6 +2,7 @@
 // Offline contract tests: real admin functions, synthetic DOM/transport only.
 // --preview renders the same editor with an in-memory account API on loopback.
 import assert from "node:assert/strict";
+import { validateSocialExperiencePolicy } from "../src/social-experience-policy.js";
 import fs from "node:fs";
 import vm from "node:vm";
 import http from "node:http";
@@ -162,7 +163,7 @@ async function runtime() {
   return t;
 }
 const plain = value => JSON.parse(JSON.stringify(value));
-const expected = { enabled: false, shadowMode: true, conversationIds: [], turn: { enabled: true, minWaitMs: 150, maxWaitMs: 4500, ordinaryWaitMs: 700, incompleteWaitMs: 2500, maxTurnMs: 8000 }, expression: { enabled: true, maxMessages: 2, minIntervalMs: 200, maxIntervalMs: 800, allowQuotes: true }, stickers: { enabled: false, autoSend: false, visionLearning: false, maxDailyVisionCalls: 8, cooldownMs: 60000 }, language: { enabled: false, autoCandidates: true } };
+const expected = validateSocialExperiencePolicy({});
 const cases = [];
 async function test(name, fn) { await fn(); cases.push(name); }
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
@@ -200,6 +201,30 @@ await test("draft-only defaults, controls and no implicit activation", async () 
   assert(host.contains(mode));
   t.document.activeElement = null; s.syncRegistryDraftControls(host, d.value);
   assert.equal(mode.value, "false");
+});
+await test("group learning and reactions save independently per account without production effects", async () => {
+  const t = await runtime(), s = t.state;
+  t.edit("conversationIds", "group:123456");
+  for (const key of ["stickers.groupLearning", "stickers.autonomousEligibility", "reactions.enabled"]) t.edit(key, true);
+  t.edit("stickers.maxDailyDownloads", 12); t.edit("reactions.maxDaily", 9);
+  const draft = s.registryDraft(), patch = s.registryPatch(draft, ["socialExperience"]);
+  assert.equal(patch.socialExperience.enabled, false, "editing does not enable root");
+  assert.equal(patch.socialExperience.stickers.autoSend, false, "learning does not grant sending");
+  assert.equal(patch.socialExperience.stickers.groupLearning, true);
+  assert.equal(patch.socialExperience.stickers.autonomousEligibility, true);
+  assert.equal(patch.socialExperience.stickers.maxDailyDownloads, 12);
+  assert.equal(patch.socialExperience.reactions.enabled, true);
+  assert.equal(patch.socialExperience.reactions.maxDaily, 9);
+  s.registrySelect("demo-b", "experience");
+  assert.equal(s.registryDraft().value.socialExperience.stickers.groupLearning, false);
+  assert.equal(s.registryDraft().value.socialExperience.reactions.enabled, false);
+  s.registrySelect("demo-a", "experience");
+  assert.equal(s.registryDraft().value.socialExperience.reactions.maxDaily, 9);
+  assert(t.requests.every(row => row.method === "GET"));
+  for (const [key, value] of [["maxDailyDownloads", 101], ["maxDailyDownloads", -1]]) {
+    const bad = structuredClone(patch); bad.socialExperience.stickers[key] = value;
+    assert.throws(() => s.registryValidate(bad, ["socialExperience"]));
+  }
 });
 await test("save only the account root; preserve other tabs/accounts across navigation", async () => {
   const t = await runtime(), s = t.state, d = s.registryDraft();
@@ -434,7 +459,7 @@ await test("metadata projection creates no remote media, URLs, source text or ev
   assert(!/https?:|tracking.invalid|RAW_MESSAGE_SENTINEL|evidence|userId/.test(stored));
   assert(!/https?:|tracking.invalid|RAW_MESSAGE_SENTINEL/.test(host.textContent));
   assert(host.querySelectorAll("*").every(el => !["IMG", "IFRAME", "VIDEO", "AUDIO", "A"].includes(el.tagName)));
-  assert.match(host.textContent, /官方描述（不可信）/); assert.match(host.textContent, /候选不是事实/);
+  assert.match(host.textContent, /来源描述（不可信）/); assert.match(host.textContent, /候选不是事实/);
   assert.match(host.textContent, /样本 3/); assert.match(host.textContent, /待审核候选/);
   assert.match(host.textContent, /未知（未确认）/); assert.equal(libraryPosts(t).length, 0);
 });
@@ -533,6 +558,22 @@ await test("daily vision cost counters are read-only; zero is known, absent/inva
   await s.loadExperienceLibrary("demo-a", scope);
   assert.deepEqual(plain(state.data.dailyVisionCalls), { reserved: null, attempted: null, limit: null });
   assert.deepEqual(plain(d.value), before); assert.deepEqual([...d.dirty], dirty); assert.equal(s.registryState.revision, revision);
+});
+await test("learned source and reaction acceptance stay distinct from administrator approval and chat ACK", async () => {
+  const t=await runtime(); libraryScope(t); const scope="group:123456", raw=t.library("demo-a",scope);
+  raw.learning={ok:true,queued:1,active:1,dailyDownloads:2,downloadLimit:16,rawContext:"DO_NOT_SHOW"};
+  raw.reactions={ok:true,capability:"unsupported",daily:1,maxDaily:30,accepted:0,uncertain:1,targetMessageId:"DO_NOT_SHOW"};
+  raw.cache={available:true,bytes:1048576,maxBytes:134217728,entries:1,path:"/PRIVATE_PATH"};
+  raw.stickers.push({id:"gs_fixture",source:"group-observed",autoEligible:true,usage:"庆祝时表达赞同",avoid:["认真求助"],
+    official:{desc:"",trust:"untrusted"},annotation:{revision:1,status:"candidate",note:"庆祝",tags:["开心"],sentCount:0,lastSentAt:0}});
+  await t.state.selectExperienceLibrary("demo-a",scope);
+  const host=libraryHost(t), data=t.state.experienceLibraryState("demo-a",scope).data;
+  assert.match(host.textContent,/群聊学习/); assert.match(host.textContent,/自动可用（无需审批）/);
+  assert.match(host.textContent,/庆祝时表达赞同/); assert.match(host.textContent,/排队 1/);
+  assert.match(host.textContent,/1 \/ 128 MiB/); assert.match(host.textContent,/当前协议不支持/);
+  assert.match(host.textContent,/受理不代表已确认对端显示/);
+  assert(!JSON.stringify(data).includes("DO_NOT_SHOW")); assert(!JSON.stringify(data).includes("PRIVATE_PATH"));
+  assert.equal(libraryPosts(t).length,0,"viewing statuses does not initiate learning or reactions");
 });
 console.log(JSON.stringify({ ok: true, cases, offline: true, liveDataTouched: false, bridgeStarted: false }));
 

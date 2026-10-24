@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { createStickerService } from "./sticker-service.js";
+import { createGroupStickerLearning } from "./group-sticker-learning.js";
 import { validateSocialExperiencePolicy } from "./social-experience-policy.js";
 import { listGroupLanguage, reviewGroupSlang } from "./group-language-learning.js";
 
@@ -31,7 +32,9 @@ function stable(value, depth = 0, budget = { n: 0 }) {
 const publicAnnotation = a => a ? { ...Object.fromEntries(["conversationId", "revision", "status", "note", "tags",
   "sha256", "sentCount", "updatedAt", "actor"].filter(k => a[k] !== undefined).map(k => [k, clone(a[k])])),
   lastSentAt: Object.values(a.receipts || {}).reduce((latest, receipt) => Math.max(latest, receipt.at), 0) } : null;
-const publicSticker = a => ({ id: a.id, official: { desc: a.official.desc, trust: "untrusted" }, annotation: publicAnnotation(a.annotation) });
+const publicSticker = a => ({ id: a.id, source: a.source, autoEligible: a.autoEligible === true,
+  usage: a.annotation?.usage || "", avoid: clone(a.annotation?.avoid || []),
+  official: { desc: a.official.desc, trust: "untrusted" }, annotation: publicAnnotation(a.annotation) });
 
 /** Host-only adapter; NEVER expose this object or ctx handles as model tools.
  * readState() -> {memory:<published memory root>}; transact(syncBuilder) receives
@@ -49,9 +52,11 @@ const publicSticker = a => ({ id: a.id, official: { desc: a.official.desc, trust
  * to prepare/send again. Once attempted, receipt writes are never auto-retried.
  */
 export function createExpressionLibrary({ readState, transact, capture, isCurrent, request, describeImage,
-  downloadImage, clock = Date.now } = {}) {
+  downloadImage, mediaCache, resolveImage, clock = Date.now } = {}) {
   if ([readState, transact, capture, isCurrent, request, describeImage, clock].some(x => typeof x !== "function")
-    || (downloadImage !== undefined && typeof downloadImage !== "function")) throw fail("EXPRESSION_DEPENDENCY");
+    || (downloadImage !== undefined && typeof downloadImage !== "function")
+    || (resolveImage !== undefined && typeof resolveImage !== "function")
+    || (mediaCache !== undefined && (!mediaCache || typeof mediaCache.put !== "function" || typeof mediaCache.read !== "function"))) throw fail("EXPRESSION_DEPENDENCY");
   const issued = new WeakSet(), contexts = new WeakMap(), offered = new WeakMap(), prepared = new WeakMap(), receipts = new WeakMap();
   const annotating = new Set();
   function now() { const n = clock(); if (!Number.isSafeInteger(n) || n < 1 || n > 8640000000000000) throw fail("EXPRESSION_STATE"); return n; }
@@ -75,6 +80,7 @@ export function createExpressionLibrary({ readState, transact, capture, isCurren
       isCurrent: value => { if (value !== ctx) return false; try { fact ? info(ctx) : guard(ctx, signal); return true; } catch { return false; } },
       request: async (...args) => { guard(ctx, signal); return request(...args); },
       describeImage: description || describeImage,
+      mediaCache, policyFor: () => info(ctx).policy,
       ...(downloadImage ? { downloadImage } : {}),
       transact: builder => transact(root => {
         fact ? info(ctx) : guard(ctx, signal);
@@ -87,7 +93,7 @@ export function createExpressionLibrary({ readState, transact, capture, isCurren
     // Service validates ONLY this logical library. Read on the passed draft,
     // not the separately published root, so every builder's CAS is latest-root.
     const s = createStickerService({ readState: () => root, transact: () => { throw fail("EXPRESSION_STATE"); },
-      request, describeImage, ...(downloadImage ? { downloadImage } : {}), clock: now,
+      request, describeImage, mediaCache, policyFor: () => info(ctx).policy, ...(downloadImage ? { downloadImage } : {}), clock: now,
       isCurrent: value => value === ctx && issued.has(value) });
     const stickers = s.list(ctx);
     const bot = root.memory.socialExpressionAssets?.bots?.[c.logicalId];
@@ -105,7 +111,7 @@ export function createExpressionLibrary({ readState, transact, capture, isCurren
     if (parts(root, ctx).revision !== expected) throw fail("EXPRESSION_CONFLICT");
   }
   function write(ctx, expected, builder, { signal, fact = false } = {}) {
-    return transact(root => { fact ? info(ctx) : guard(ctx, signal); check(root, ctx, expected); return builder(root); });
+    return transact(root => { fact ? info(ctx) : guard(ctx, signal); if (expected !== undefined) check(root, ctx, expected); return builder(root); });
   }
   // Budget reservations consume admission, but are not reported as model attempts.
   // Only actual describeImage dispatch settles as attempted (failures included).
@@ -140,7 +146,7 @@ export function createExpressionLibrary({ readState, transact, capture, isCurren
       return { day, id };
     }, options);
     let invoked = false;
-    try { guard(ctx, options.signal); check(readState(), ctx, expected); invoked = true; return await describeImage(ctx, media, options); }
+    try { guard(ctx, options.signal); if (expected !== undefined) check(readState(), ctx, expected); invoked = true; return await describeImage(ctx, media, options); }
     finally {
       // Accounting is an exact host claim, not a stale-content commit. Capture a
       // fresh CAS for this independent fact write even after policy/route abort.
@@ -228,13 +234,16 @@ export function createExpressionLibrary({ readState, transact, capture, isCurren
     const list = service(ctx).list(ctx), raw = root.memory.socialExpressionAssets?.bots?.[c.logicalId]?.stickers || {};
     return list.filter(a => {
       const v = a.annotation;
-      if (!v || v.status !== "confirmed") return false;
+      if (!v || (v.status !== "confirmed" && !a.autoEligible) || v.blocked || v.denied || raw[a.id].blocked || raw[a.id].denied) return false;
       const times = Object.values(raw[a.id].annotations[c.conversationId].receipts).map(r => r.at);
       if (times.some(time => time > at || at - time < c.policy.stickers.cooldownMs)) return false;
       const note = v.note.normalize("NFKC").toLowerCase();
+      if ((v.avoid || []).some(t => t.trim().length >= 2 && q.includes(t.normalize("NFKC").toLowerCase()))) return false;
       return note.length >= 2 && (note.includes(q) || q.includes(note))
-        || v.tags.some(t => t.trim().length >= 2 && q.includes(t.normalize("NFKC").toLowerCase()));
-    }).slice(0, limit).map(a => ({ id: a.id, note: a.annotation.note, tags: clone(a.annotation.tags) }));
+        || v.tags.some(t => t.trim().length >= 2 && q.includes(t.normalize("NFKC").toLowerCase()))
+        || (v.usage?.trim().length >= 2 && q.includes(v.usage.normalize("NFKC").toLowerCase()));
+    }).slice(0, limit).map(a => ({ id: a.id, note: a.annotation.note, tags: clone(a.annotation.tags),
+      source: a.source, autoEligible: a.autoEligible === true, usage: a.annotation.usage || "", avoid: clone(a.annotation.avoid || []) }));
   }
   function candidates(ctx, { query = "", serious = false, limit = 3 } = {}) {
     try {
@@ -275,5 +284,7 @@ export function createExpressionLibrary({ readState, transact, capture, isCurren
       ledger.set(key, operation); return await operation;
     } catch (e) { return error(safeCode(e)); }
   }
-  return Object.freeze({ open, snapshot, operate, candidates, prepare, markSent });
+  const learning = createGroupStickerLearning({ readState, transact, guard, clock: now, resolveImage, mediaCache,
+    ...(downloadImage ? { downloadImage } : {}), describeImage: (ctx, media, options) => describe(ctx, media, options) });
+  return Object.freeze({ open, snapshot, operate, candidates, prepare, markSent, ...learning });
 }

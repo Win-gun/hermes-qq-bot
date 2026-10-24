@@ -5458,7 +5458,9 @@
         enabled: false, shadowMode: true, conversationIds: [], ...result.socialExperience,
         turn: { enabled: true, minWaitMs: 150, maxWaitMs: 4500, ordinaryWaitMs: 700, incompleteWaitMs: 2500, maxTurnMs: 8000, ...result.socialExperience?.turn },
         expression: { enabled: true, maxMessages: 2, minIntervalMs: 200, maxIntervalMs: 800, allowQuotes: true, ...result.socialExperience?.expression },
-        stickers: { enabled: false, autoSend: false, visionLearning: false, maxDailyVisionCalls: 8, cooldownMs: 60000, ...result.socialExperience?.stickers },
+        stickers: { enabled: false, autoSend: false, visionLearning: false, groupLearning: false, autonomousEligibility: false,
+          maxDailyVisionCalls: 8, maxDailyDownloads: 16, cooldownMs: 60000, ...result.socialExperience?.stickers },
+        reactions: { enabled: false, cooldownMs: 60000, maxDaily: 30, emojiIds: ["76"], ...result.socialExperience?.reactions },
         language: { enabled: false, autoCandidates: true, ...result.socialExperience?.language }
       };
       return result;
@@ -5690,9 +5692,13 @@
       // Strict projection: URLs, original messages, evidence and model traces
       // are never retained in the UI cache, much less interpolated as HTML.
       const stickers = result.stickers.slice(0, 100).filter(row => row && typeof row.id === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(row.id)).map(row => ({
-        id: row.id, official: { desc: text(row.official?.desc), trust: "untrusted" },
+        id: row.id, source: row.source === "group-observed" ? "group-observed" : "collection",
+        autoEligible: row.autoEligible === true, usage: text(row.usage),
+        avoid: Array.isArray(row.avoid) ? row.avoid.slice(0, 16).map(value => text(value, 100)) : [],
+        official: { desc: text(row.official?.desc), trust: "untrusted" },
         annotation: row.annotation ? { revision: uint(row.annotation.revision), status: ["candidate", "confirmed", "rejected"].includes(row.annotation.status) ? row.annotation.status : "unknown",
-          note: text(row.annotation.note), tags: Array.isArray(row.annotation.tags) ? row.annotation.tags.slice(0, 16).map(tag => text(tag, 32)) : [], sentCount: uint(row.annotation.sentCount) } : null
+          note: text(row.annotation.note), tags: Array.isArray(row.annotation.tags) ? row.annotation.tags.slice(0, 16).map(tag => text(tag, 32)) : [],
+          sentCount: uint(row.annotation.sentCount), lastSentAt: uint(row.annotation.lastSentAt) } : null
       }));
       const language = { ok: typeof scope === "string" && scope.startsWith("group:") && result.language?.ok === true && Array.isArray(result.language.candidates) && uint(result.language.revision) !== null,
         revision: uint(result.language?.revision), stats: null, candidates: [] };
@@ -5708,7 +5714,16 @@
           .map(row => ({ id: row.id, revision: uint(row.revision), status: ["pending", "confirmed", "rejected", "revoked"].includes(row.status) ? row.status : "unknown", term: text(row.term, 24), meaning: text(row.meaning, 120) }));
       }
       const dailyVisionCalls = { reserved: uint(result.dailyVisionCalls?.reserved), attempted: uint(result.dailyVisionCalls?.attempted), limit: uint(result.dailyVisionCalls?.limit) };
-      return { revision: result.revision, stickers, language, dailyVisionCalls, collection: ["unknown", "supported", "unsupported"].includes(result.capabilities?.collection) ? result.capabilities.collection : "unknown" };
+      const learning = result.learning?.ok === true ? { queued: uint(result.learning.queued), active: uint(result.learning.active),
+        dailyDownloads: uint(result.learning.dailyDownloads), downloadLimit: uint(result.learning.downloadLimit),
+        completed: uint(result.learning.completed), failed: uint(result.learning.failed),
+        lastErrorCode: ["ABORTED", "SOURCE_EXPIRED", "STICKER_LEARNING_FAILED"].includes(result.learning.lastErrorCode) ? result.learning.lastErrorCode : null } : null;
+      const reactions = result.reactions?.ok === true ? { capability: ["unknown", "supported", "unsupported"].includes(result.reactions.capability) ? result.reactions.capability : "unknown",
+        daily: uint(result.reactions.daily), maxDaily: uint(result.reactions.maxDaily), accepted: uint(result.reactions.accepted), uncertain: uint(result.reactions.uncertain) } : null;
+      const cache = typeof result.cache?.available === "boolean" ? { available: result.cache.available,
+        bytes: uint(result.cache.bytes), maxBytes: uint(result.cache.maxBytes), entries: uint(result.cache.entries) } : null;
+      return { revision: result.revision, stickers, language, dailyVisionCalls, learning, reactions, cache,
+        collection: ["unknown", "supported", "unsupported"].includes(result.capabilities?.collection) ? result.capabilities.collection : "unknown" };
     }
     async function loadExperienceLibrary(id, scope, verify = null) {
       if (!experienceLibraryScopes(id).includes(scope)) { if (verify) throw new Error("scope_changed"); return; }
@@ -5800,20 +5815,26 @@
       host.append(node("p", `官方表情列表读取能力：${capability}。这不代表新增收藏或发送权限。`, "hint"));
       const calls = data.dailyVisionCalls, counter = n => Number.isSafeInteger(n) && n >= 0 ? String(n) : "未知";
       host.append(node("p", `今日视觉调用（服务端只读）：已预留 ${counter(calls.reserved)} · 已尝试 ${counter(calls.attempted)} · 上限 ${counter(calls.limit)}。这是调用计数，不是费用金额；预留不等于已调用，尝试不保证成功。`, "hint"));
+      if (data.learning) host.append(node("p", `群表情学习：排队 ${counter(data.learning.queued)} · 处理中 ${counter(data.learning.active)} · 今日下载 ${counter(data.learning.dailyDownloads)} / ${counter(data.learning.downloadLimit)}。后台学习不触发发送。`, "hint"));
+      if (data.learning) host.append(node("p", `本次进程：完成 ${counter(data.learning.completed)} · 失败或取消 ${counter(data.learning.failed)}${data.learning.lastErrorCode ? ` · 最近原因：${{ ABORTED: "已取消或策略变更", SOURCE_EXPIRED: "来源已过期", STICKER_LEARNING_FAILED: "学习未完成，请检查预算、识图配置和缓存状态" }[data.learning.lastErrorCode]}` : ""}。完成处理不代表收录成功；允许无合适表情。`, "hint"));
+      const mib = n => Number.isSafeInteger(n) && n >= 0 ? String(Math.round(n / 1048576 * 100) / 100) : "未知";
+      if (data.cache) host.append(node("p", data.cache.available ? `表情缓存：${counter(data.cache.entries)} 项 · ${mib(data.cache.bytes)} / ${mib(data.cache.maxBytes)} MiB。满额停止新学习，不删除人物记忆。` : "当前系统安全缓存不可用；群表情学习不会绕过文件安全检查。", "hint"));
+      if (data.reactions) host.append(node("p", `消息回应：${{ unknown: "尚未验证", supported: "接口可受理", unsupported: "当前协议不支持" }[data.reactions.capability]} · 今日 ${counter(data.reactions.daily)} / ${counter(data.reactions.maxDaily)} · 已受理 ${counter(data.reactions.accepted)} · 未核实 ${counter(data.reactions.uncertain)}。受理不代表已确认对端显示。`, "hint"));
       const disabled = state.busy || !!state.loading || state.blocked;
       for (const item of data.stickers) {
         const row = node("details", undefined, "panel-details settings-block"); row.style.overflowWrap = "anywhere";
-        row.append(node("summary", `表情 ${item.id} · ${{ candidate: "候选标注", confirmed: "已确认标注", rejected: "已拒绝标注" }[item.annotation?.status] || "未确认"}`));
-        row.append(node("p", `官方描述（不可信）：${item.official.desc || "未提供"}`, "hint"));
+        row.append(node("summary", `${item.source === "group-observed" ? "群聊学习" : "账号收藏"} · ${item.id} · ${item.autoEligible ? "自动可用（无需审批）" : ({ candidate: "候选标注", confirmed: "已确认标注", rejected: "已禁用" }[item.annotation?.status] || "未确认")}`));
+        row.append(node("p", `来源描述（不可信）：${item.official.desc || "未提供"}`, "hint"));
+        if (item.usage) row.append(node("p", `观察用途（参考）：${item.usage}；不适用：${item.avoid.join("、") || "未明确"}`, "hint"));
         if (item.annotation) row.append(node("p", `视觉标注（参考数据）：${item.annotation.note || "未提供"}；标签：${item.annotation.tags.join("、") || "无"}；已确认发送次数：${item.annotation.sentCount ?? "未知"}；最近确认发送：${Number.isSafeInteger(item.annotation.lastSentAt) && item.annotation.lastSentAt > 0 ? new Date(item.annotation.lastSentAt).toLocaleString() : "暂无记录"}`, "hint"));
         const actions = node("div", undefined, "row"); actions.style.flexWrap = "wrap";
         const annotate = registryButton("单项视觉标注（可能收费）", () => mutateExperienceLibrary(id, scope, "annotate", item)); annotate.disabled = disabled; actions.append(annotate);
-        if (Number.isSafeInteger(item.annotation?.revision) && item.annotation.revision > 0) for (const [status, text] of [["confirmed", "确认此标注"], ["rejected", "拒绝此标注"]]) {
+        if (Number.isSafeInteger(item.annotation?.revision) && item.annotation.revision > 0) for (const [status, text] of [["confirmed", "人工确认此标注"], ["rejected", "禁用此表情"]]) {
           const review = registryButton(text, () => mutateExperienceLibrary(id, scope, "review-sticker", item, status)); review.disabled = disabled || item.annotation.status === status; actions.append(review);
         }
         row.append(actions); host.append(row);
       }
-      if (!data.stickers.length) host.append(node("p", "本范围暂无表情元数据；可显式同步，不会自动下载。", "hint"));
+      if (!data.stickers.length) host.append(node("p", "本范围暂无表情素材；可同步账号收藏，或保存并开启群表情学习。读取本页不会触发学习或发送。", "hint"));
       host.append(node("h4", "群语感 · 聚合观察与词义审核"));
       if (!scope.startsWith("group:")) { host.append(node("p", "群语感仅支持群聊；私聊不读取或审核语言候选。", "hint")); return; }
       if (!data.language.ok) { host.append(node("p", "群语感数据暂不可用，请刷新重试。", "warning")); return; }
@@ -5859,8 +5880,9 @@
           const current = registryGet(settings, path);
           const control = registryField(target, label, `socialExperience.${path}`, path === "shadowMode" ? String(current) : current, edit, { disabled, ...options });
           if (options.type === "number") { control.min = path === "expression.maxMessages" || path === "turn.maxTurnMs" ? "1" : "0"; control.step = "1"; }
-          if (path === "stickers.maxDailyVisionCalls") control.max = "100";
-          if (path === "stickers.cooldownMs") control.max = "86400000";
+          if (["stickers.maxDailyVisionCalls", "stickers.maxDailyDownloads"].includes(path)) control.max = "100";
+          if (path === "reactions.maxDaily") control.max = "200";
+          if (["stickers.cooldownMs", "reactions.cooldownMs"].includes(path)) control.max = "86400000";
           return control;
         };
         add(main, "启用社交表达", "enabled", { type: "checkbox", hint: "默认关闭；修改模式或参数不会代替你打开此开关。" });
@@ -5875,9 +5897,15 @@
         const media = document.createElement("div"); media.className = "form-grid";
         add(media, "启用表情库", "stickers.enabled", { type: "checkbox" });
         add(media, "允许自动发表情", "stickers.autoSend", { type: "checkbox", hint: "默认关闭；确认标注不等于授权自动发送，仍受观察模式、范围及发送权限约束。" });
-        add(media, "允许视觉学习（可能收费）", "stickers.visionLearning", { type: "checkbox", hint: "单项标注仍须逐次明确确认，不批量标注。" });
+        add(media, "允许视觉学习（可能收费）", "stickers.visionLearning", { type: "checkbox", hint: "手动标注逐项确认；开启群表情学习后，后台分析计入下方每日预算，不阻塞聊天。" });
+        add(media, "学习群友发送的表情", "stickers.groupLearning", { type: "checkbox", hint: "仅群聊范围；结合近期对话判断用途，不自动收藏，不复用照片、证件或聊天截图。" });
+        add(media, "自动判定表情可用", "stickers.autonomousEligibility", { type: "checkbox", hint: "无需逐张审批；有可靠用途和安全判断才供模型选用，管理员禁用优先。发送仍需允许自动发表情。" });
         add(media, "每日视觉调用上限", "stickers.maxDailyVisionCalls", { type: "number" });
+        add(media, "每日学习下载上限", "stickers.maxDailyDownloads", { type: "number", hint: "每图最多 5 MiB；每账号缓存最多 128 MiB / 500 项，满额停学，不清理原有记忆。" });
         add(media, "表情冷却（毫秒）", "stickers.cooldownMs", { type: "number" });
+        add(media, "允许消息表情回应", "reactions.enabled", { type: "checkbox", hint: "针对当前已核实的群消息使用 QQ 消息回应，不是拍一拍。默认仅提供赞；不支持的协议明确停止，不自动改用其他动作。" });
+        add(media, "每日消息回应上限", "reactions.maxDaily", { type: "number" });
+        add(media, "消息回应冷却（毫秒）", "reactions.cooldownMs", { type: "number", hint: "仍受 quiet、账号文字发送权限及同群发送间隔约束。接口受理不等于确认对端已显示。" });
         add(media, "启用群语感学习", "language.enabled", { type: "checkbox", hint: "默认关闭，仅群聊；统计和候选不代表全群同意或人格变更。" });
         add(media, "自动生成语感候选", "language.autoCandidates", { type: "checkbox", hint: "仅在群语感学习已启用时生效；候选仍需管理员审核。" });
         const advanced = document.createElement("details"); advanced.className = "panel-details settings-block";
@@ -5933,9 +5961,16 @@
         if (t.minWaitMs > t.maxWaitMs || t.maxWaitMs > t.maxTurnMs || [t.ordinaryWaitMs, t.incompleteWaitMs].some(n => n < t.minWaitMs || n > t.maxWaitMs)) throw new Error("等待参数须满足：最短等待 ≤ 普通 / 未完等待 ≤ 等待上限 ≤ 整轮最长等待");
         if (e.minIntervalMs > e.maxIntervalMs) throw new Error("气泡最短间隔不能大于最长间隔");
         if (p.stickers !== undefined) {
-          for (const flag of [p.stickers?.enabled, p.stickers?.autoSend, p.stickers?.visionLearning]) if (typeof flag !== "boolean") throw new Error("表情库开关须为布尔值");
+          for (const flag of [p.stickers?.enabled, p.stickers?.autoSend, p.stickers?.visionLearning, p.stickers?.groupLearning, p.stickers?.autonomousEligibility]) if (typeof flag !== "boolean") throw new Error("表情库开关须为布尔值");
           if (!Number.isSafeInteger(p.stickers.maxDailyVisionCalls) || p.stickers.maxDailyVisionCalls < 0 || p.stickers.maxDailyVisionCalls > 100) throw new Error("每日视觉调用上限须为 0–100 的整数");
+          if (!Number.isSafeInteger(p.stickers.maxDailyDownloads) || p.stickers.maxDailyDownloads < 0 || p.stickers.maxDailyDownloads > 100) throw new Error("每日学习下载上限须为 0–100 的整数");
           if (!Number.isSafeInteger(p.stickers.cooldownMs) || p.stickers.cooldownMs < 0 || p.stickers.cooldownMs > 86400000) throw new Error("表情冷却须为 0–86400000 毫秒（24 小时）的整数");
+        }
+        if (p.reactions !== undefined) {
+          if (typeof p.reactions.enabled !== "boolean") throw new Error("消息回应须为开关");
+          if (!Number.isSafeInteger(p.reactions.maxDaily) || p.reactions.maxDaily < 0 || p.reactions.maxDaily > 200) throw new Error("每日消息回应上限须为 0–200 的整数");
+          if (!Number.isSafeInteger(p.reactions.cooldownMs) || p.reactions.cooldownMs < 0 || p.reactions.cooldownMs > 86400000) throw new Error("消息回应冷却须为 0–86400000 毫秒的整数");
+          if (!Array.isArray(p.reactions.emojiIds) || p.reactions.emojiIds.length > 3 || p.reactions.emojiIds.some(id => typeof id !== "string" || !/^[1-9]\d{0,5}$/.test(id))) throw new Error("消息回应须为至多三个规范 QQ 表情编号");
         }
         if (p.language !== undefined && [p.language?.enabled, p.language?.autoCandidates].some(flag => typeof flag !== "boolean")) throw new Error("群语感开关须为布尔值");
       }

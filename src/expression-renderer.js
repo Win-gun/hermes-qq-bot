@@ -22,24 +22,26 @@ const skipped = ack => ack !== null && typeof ack === "object" && !Array.isArray
 
 /** Execute ONE host-validated plan ONCE. Never retry the whole result, including
  * sent=0 + uncertain=true. beforeEach owns identity/quiet/revision/quote authority
- * at the wire boundary; sendText/sendSticker must guard internal pre-wire awaits.
+ * at the wire boundary; all send adapters must guard internal pre-wire awaits.
  * Quote provenance was validated by parseReplyPlan, not this shape check.
  * Cancellation during send still collects that attempt's ACK and persists it.
  * Receipt persistence runs even after abort; failure stops all remaining sends.
  * sent counts confirmed wire ACKs (not durable receipts); uncertain also covers
- * unknown receipt durability. partial means some, but not all, messages ACKed. */
-export async function executeReplyPlan(plan, { sendText, sendSticker, allowedStickerIds = [], beforeEach, onReceipt, signal,
+ * unknown receipt durability. accepted counts reaction API acceptance, never
+ * visible delivery or bot speech. partial counts sent + accepted plan items. */
+export async function executeReplyPlan(plan, { sendText, sendSticker, sendReaction, allowedStickerIds = [], allowedReactionIds = [], beforeEach, onReceipt, signal,
   sleep = wait, minIntervalMs = 800, maxIntervalMs = 2000 } = {}) {
   if (![sendText, beforeEach, onReceipt, sleep].every(fn => typeof fn === "function")) throw new TypeError("INVALID_REPLY_ADAPTER");
   if (![minIntervalMs, maxIntervalMs].every(n => Number.isSafeInteger(n) && n >= 0 && n <= 60000)
     || minIntervalMs > maxIntervalMs) throw new TypeError("INVALID_REPLY_INTERVAL");
   // Copy before any await, so host/model mutations cannot change later messages.
   const ready = validateReplyPlan(plan, { maxMessages: 4, direct: false,
-    allowedStickerIds,
+    allowedStickerIds, allowedReactionIds,
     allowedQuoteIds: plan?.replyToMessageId == null ? [] : [plan.replyToMessageId] });
   if (ready.messages.some(item => item.type === "sticker") && typeof sendSticker !== "function") throw new TypeError("INVALID_REPLY_ADAPTER");
+  if (ready.messages.some(item => item.type === "reaction") && typeof sendReaction !== "function") throw new TypeError("INVALID_REPLY_ADAPTER");
   const receipts = [];
-  let sent = 0, uncertain = false;
+  let sent = 0, accepted = 0, uncertain = false;
   const cancelled = () => signal?.aborted === true;
   async function pause(index) {
     // Deterministic reading rhythm, not a per-character typewriter. Short
@@ -64,35 +66,49 @@ export async function executeReplyPlan(plan, { sendText, sendSticker, allowedSti
     const item = ready.messages[index];
     let type = item.type;
     const content = type === "sticker" ? item.fallbackText || "" : item.content;
-    const quoteId = index === 0 ? ready.replyToMessageId : null;
+    const quoteId = type !== "reaction" && index === 0 ? ready.replyToMessageId : null;
     const guard = async () => !cancelled() && !denied(await beforeEach({ index, content, quoteId, signal, type,
-      ...(type === "sticker" ? { stickerId: item.stickerId } : {}) })) && !cancelled();
+      ...(type === "sticker" ? { stickerId: item.stickerId } : type === "reaction" ? { reactionId: item.reactionId } : {}) })) && !cancelled();
     try {
       if (index > 0) await pause(index);
       if (!await guard() || cancelled()) break;
     } catch { break; } // No wire attempt; do not invent a failed ACK.
     let receipt;
     try {
-      let ack = type === "sticker" ? await sendSticker(item.stickerId, { quoteId, index }) : await sendText(content, { quoteId, index });
-      if (type === "sticker" && skipped(ack)) {
-        // No wire attempt and therefore no failed/uncertain receipt. A fallback
-        // is a NEW text attempt and must pass the current host guard again.
-        if (!content) continue;
-        type = "text";
-        try { if (!await guard() || cancelled()) break; } catch { break; }
-        ack = await sendText(content, { quoteId, index });
+      let ack = type === "reaction" ? await sendReaction(item.reactionId, { signal })
+        : type === "sticker" ? await sendSticker(item.stickerId, { quoteId, index }) : await sendText(content, { quoteId, index });
+      if (type === "reaction") {
+        const valid = ack?.status === "accepted" && typeof ack.actionId === "string" && messageId(ack.actionId) !== null
+          && ack.messageId === undefined && ack.message_id === undefined;
+        receipt = { index, type, reactionId: item.reactionId,
+          ...(valid ? { status: "accepted", actionId: ack.actionId,
+            ...(messageId(ack.targetMessageId) !== null ? { targetMessageId: ack.targetMessageId } : {}) }
+            : { status: ["rejected", "unsupported"].includes(ack?.status) ? ack.status : "uncertain" }) };
+      } else {
+        if (type === "sticker" && skipped(ack)) {
+          // No wire attempt and therefore no failed/uncertain receipt. A fallback
+          // is a NEW text attempt and must pass the current host guard again.
+          if (!content) continue;
+          type = "text";
+          try { if (!await guard() || cancelled()) break; } catch { break; }
+          ack = await sendText(content, { quoteId, index });
+        }
+        const ambiguousSkip = type === "sticker" && ack && typeof ack === "object" && "skipped" in ack;
+        const id = !ambiguousSkip && ack && typeof ack === "object" ? messageId(ack.messageId) : null;
+        receipt = { index, type, ...(type === "sticker" ? { stickerId: item.stickerId } : {}), content,
+          ...(ack === false ? { status: "failed" } : id !== null ? { status: "sent", messageId: id } : { status: "uncertain" }) };
       }
-      const ambiguousSkip = type === "sticker" && ack && typeof ack === "object" && "skipped" in ack;
-      const id = !ambiguousSkip && ack && typeof ack === "object" ? messageId(ack.messageId) : null;
-      receipt = { index, type, ...(type === "sticker" ? { stickerId: item.stickerId } : {}), content,
-        ...(ack === false ? { status: "failed" } : id !== null ? { status: "sent", messageId: id } : { status: "uncertain" }) };
-    } catch { receipt = { index, type, ...(type === "sticker" ? { stickerId: item.stickerId } : {}), status: "uncertain", content }; }
+    } catch { receipt = { index, type, ...(type === "sticker" ? { stickerId: item.stickerId }
+      : type === "reaction" ? { reactionId: item.reactionId } : {}), status: "uncertain",
+      ...(type !== "reaction" ? { content } : {}) }; }
     receipts.push(receipt);
     if (receipt.status === "sent") sent++;
+    if (receipt.status === "accepted") accepted++;
     if (receipt.status === "uncertain") uncertain = true;
     try { if (denied(await onReceipt({ ...receipt }))) throw new Error("RECEIPT_NOT_DURABLE"); }
     catch { uncertain = true; break; }
-    if (receipt.status !== "sent" || cancelled()) break;
+    if (!["sent", "accepted"].includes(receipt.status) || cancelled()) break;
   }
-  return { sent, partial: sent > 0 && sent < ready.messages.length, uncertain, receipts };
+  return { sent, accepted, handled: sent + accepted > 0,
+    partial: sent + accepted > 0 && sent + accepted < ready.messages.length, uncertain, receipts };
 }

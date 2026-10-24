@@ -280,7 +280,7 @@ await test("reading rhythm uses both configured bounds without splitting content
 });
 await test("pre-cancelled does not attempt send", async () => {
   const controller = new AbortController(); controller.abort(); const h = host({ signal: controller.signal });
-  assert.deepEqual(await execute(plan(), h.options), { sent: 0, partial: false, uncertain: false, receipts: [] }); assert.equal(h.calls.length, 0);
+  assert.deepEqual(await execute(plan(), h.options), { sent: 0, accepted: 0, handled: false, partial: false, uncertain: false, receipts: [] }); assert.equal(h.calls.length, 0);
 });
 await test("cancel during beforeEach", async () => {
   const controller = new AbortController(); const h = host({ signal: controller.signal, beforeEach: async () => { controller.abort(); } });
@@ -494,7 +494,7 @@ await test("skipped without fallback emits no receipt, continues later text", as
   assert.equal(result.sent, 1); assert.equal(result.partial, true); assert.equal(result.uncertain, false);
   assert.equal(result.receipts.length, 1); assert.equal(result.receipts[0].type, "text");
   const only = await execute(mediaPlan(), h.options);
-  assert.deepEqual(only, { sent: 0, partial: false, uncertain: false, receipts: [] });
+  assert.deepEqual(only, { sent: 0, accepted: 0, handled: false, partial: false, uncertain: false, receipts: [] });
 });
 await test("fallback guard denial/throw/cancel means no wire and no fake receipt", async () => {
   for (const mode of ["deny", "throw", "abort"]) {
@@ -506,7 +506,7 @@ await test("fallback guard denial/throw/cancel means no wire and no fake receipt
       return false;
     } });
     const result = await execute(mediaPlan([sticker("asset_A", "fallback")]), h.options);
-    assert.deepEqual(result, { sent: 0, partial: false, uncertain: false, receipts: [] }); assert.equal(h.calls.length, 0);
+    assert.deepEqual(result, { sent: 0, accepted: 0, handled: false, partial: false, uncertain: false, receipts: [] }); assert.equal(h.calls.length, 0);
   }
 });
 await test("abort during preparation skipped result never falls back", async () => {
@@ -615,7 +615,7 @@ await test("abort between async guard resolution and caller continuation prevent
     }, sendSticker: async () => { stickerAttempts++; return { skipped: true }; } });
     const result = await execute(mediaPlan(messages), h.options);
     assert.equal(h.calls.length, 0); assert.equal(stickerAttempts, fallback ? 1 : 0);
-    assert.deepEqual(result, { sent: 0, partial: false, uncertain: false, receipts: [] });
+    assert.deepEqual(result, { sent: 0, accepted: 0, handled: false, partial: false, uncertain: false, receipts: [] });
   }
 });
 console.log(`PASS social-expression: ${checks} synthetic checks; no IO/model/QQ adapters used`);

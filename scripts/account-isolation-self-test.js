@@ -119,6 +119,7 @@ function harness(config = fixtureConfig(), mutation = {}) {
     Date: FakeDate, structuredClone, randomBytes, AbortController,
     socialExperienceFor, evaluateConversationTurn, parseReplyPlan, replyPlanPrompt, executeReplyPlan,
     expressionStickersFor: () => null,
+    expressionReactionsFor: () => null,
     expressionDiagnostics: new ExpressionDiagnostics(),
     logicalBotId, botConversationKey, botControlRevision, replyDeliveryConfig,
     accountKernel: new AccountRuntime(config), kernelConfigRevision: 1, pendingReplyHandoffs: [],
@@ -950,6 +951,131 @@ await test("rebind while text/voice delivery waits rejects A; B fresh dispatch s
       check.deepEqual(h.warnings, []);
     }
   }
+});
+
+await test("native message reactions keep strict wire params and pass the real shared dispatcher", async () => {
+  const h=harness(), ws=h.connect(A).ws, wires=[];
+  h.c.oneBotRequestRaw=async (_socket,action,params)=>{ wires.push({action,...structuredClone(params)}); return {}; };
+  new vm.Script(functionSource("oneBotRequest")).runInContext(h.c);
+  const item=h.config.accounts.items.find(row=>row.id===A);
+  item.socialExperience={enabled:true,shadowMode:false,conversationIds:[`group:${G}`],reactions:{enabled:true}};
+  h.c.configRevision="reaction-enabled";
+  const params={group_id:G,message_id:"123456",code:"76",is_set:true};
+  await h.c.oneBotRequest(ws,"set_group_reaction",params);
+  check.equal(wires.length,1);
+  check.equal(wires[0].action,"set_group_reaction");
+  check.equal(Object.hasOwn(wires[0],"message"),false,"reaction has no chat content field");
+  await assert.rejects(()=>h.c.oneBotRequest(ws,"set_group_reaction",{...params,message:undefined}),
+    {code:"ACCOUNT_SEND_BLOCKED"},"extra message authority is still rejected");
+  h.c.isQuiet=()=>true;
+  await assert.rejects(()=>h.c.oneBotRequest(ws,"set_group_reaction",params),{code:"ACCOUNT_SEND_BLOCKED"});
+  await assert.rejects(()=>h.c.oneBotRequest(ws,"set_msg_emoji_like",params),{code:"ACCOUNT_SEND_BLOCKED"});
+  check.equal(wires.length,1,"quiet applies to reaction writes too");
+});
+
+await test("reaction acceptance requires an unambiguous raw OneBot envelope", async () => {
+  const h=harness(), ws=h.connect(A).ws, frames=[];
+  h.config.accounts.items.find(row=>row.id===A).socialExperience={enabled:true,shadowMode:false,
+    conversationIds:[`group:${G}`],reactions:{enabled:true}};
+  h.c.configRevision="reaction-ack-policy";
+  h.c.groupSendCoordinator=new GroupSendCoordinator({minDelayMs:()=>0});
+  h.c.setTimeout=()=>1; h.c.clearTimeout=()=>{};
+  for(const name of ["oneBotRequest","oneBotRequestRaw"]) new vm.Script(functionSource(name)).runInContext(h.c);
+  for(const ack of [{status:"ok",retcode:1404},{status:"failed",retcode:0},{status:"ok"},{status:"ok",retcode:0}]) {
+    const started=deferred(); ws.send=raw=>{frames.push(JSON.parse(raw));started.resolve();};
+    const pending=h.c.oneBotRequest(ws,"set_group_reaction",{group_id:G,message_id:"123456",code:"76",is_set:true})
+      .then(()=>true,()=>false);
+    await started.promise;
+    await ws.callbacks.get("message")(JSON.stringify({self_id:QQ[A],echo:frames.at(-1).echo,data:{},...ack}));
+    check.equal(await pending,ack.status==="ok"&&ack.retcode===0);
+    check.equal(h.c.pendingOneBotActions.size,0);
+  }
+});
+
+await test("queued reaction revocation, quiet and cancellation stop before wire/start callback", async () => {
+  for (const mode of ["revoke", "quiet", "cancel"]) {
+    const h = harness(), ws = h.connect(A).ws, frames = [], timers = new Map();
+    const item = h.config.accounts.items.find(row => row.id === A);
+    item.socialExperience = { enabled: true, shadowMode: false,
+      conversationIds: [`group:${G}`], reactions: { enabled: true } };
+    h.c.configRevision = "queued-reaction-policy";
+    h.c.setTimeout = callback => { const id = timers.size + 1; timers.set(id, callback); return id; };
+    h.c.clearTimeout = id => timers.delete(id);
+    ws.send = raw => frames.push(JSON.parse(raw));
+    for (const name of ["oneBotRequest", "oneBotRequestRaw"]) new vm.Script(functionSource(name)).runInContext(h.c);
+    const occupied = deferred(), release = deferred();
+    const blocker = h.c.groupSendCoordinator.dispatch(G, () => {}, () => {
+      occupied.resolve(); return release.promise;
+    });
+    await occupied.promise;
+    const controller = new AbortController();
+    let sendStarted = 0;
+    const pending = h.c.oneBotRequest(ws, "set_group_reaction",
+      { group_id: G, message_id: "123456", code: "76", is_set: true }, {
+        signal: controller.signal,
+        // Match the real reaction adapter's cancellation-aware wire binding.
+        binding: { ...h.c.oneBotBinding(ws, A), isCurrent: () => !controller.signal.aborted,
+          onSendStarted: () => { sendStarted++; } }
+      }).then(() => ({ ok: true }), error => ({ ok: false, error }));
+    check.notEqual(h.c.groupSendCoordinator.tails.get(G), blocker, `${mode}: request joined the physical group queue`);
+    check.equal(frames.length, 0, `${mode}: occupied group prevents raw wire dispatch`);
+    check.equal(sendStarted, 0);
+    if (mode === "revoke") item.socialExperience.reactions.enabled = false;
+    if (mode === "quiet") h.c.isQuiet = () => true;
+    if (mode === "cancel") controller.abort();
+    release.resolve(); await blocker;
+    const result = await pending;
+    check.equal(result.ok, false, mode);
+    check.equal(result.error.code, "ACCOUNT_SEND_BLOCKED", mode);
+    check.equal(frames.length, 0, `${mode}: no wire after queue release`);
+    check.equal(sendStarted, 0, `${mode}: admission/cancellation is not a wire attempt`);
+    check.equal(h.c.pendingOneBotActions.size, 0);
+    check.equal(timers.size, 0, `${mode}: raw ACK timer was never installed`);
+    check.deepEqual(h.warnings, []);
+  }
+});
+
+await test("reaction raw timeout cleans pending and ignores late success ACK without replay", async () => {
+  const h = harness(), ws = h.connect(A).ws, frames = [], timers = new Map();
+  h.config.accounts.items.find(row => row.id === A).socialExperience = { enabled: true, shadowMode: false,
+    conversationIds: [`group:${G}`], reactions: { enabled: true } };
+  h.c.configRevision = "reaction-timeout-policy";
+  h.c.setTimeout = callback => { const id = timers.size + 1; timers.set(id, callback); return id; };
+  h.c.clearTimeout = id => timers.delete(id);
+  const started = deferred();
+  ws.send = raw => { frames.push(JSON.parse(raw)); started.resolve(); };
+  for (const name of ["oneBotRequest", "oneBotRequestRaw"]) new vm.Script(functionSource(name)).runInContext(h.c);
+  let sendStarted = 0, accepted = 0, rejected = 0;
+  const pending = h.c.oneBotRequest(ws, "set_group_reaction",
+    { group_id: G, message_id: "123456", code: "76", is_set: true }, {
+      binding: { ...h.c.oneBotBinding(ws, A), onSendStarted: () => { sendStarted++; } }
+    }).then(() => { accepted++; return null; }, error => { rejected++; return error; });
+  await started.promise;
+  check.equal(frames.length, 1);
+  check.equal(sendStarted, 1);
+  const frame = frames[0], entry = h.c.pendingOneBotActions.get(frame.echo);
+  check.equal(entry.action, "set_group_reaction");
+  // Detect even a late resolve call on an already-rejected Promise.
+  let lateResolves = 0;
+  const resolve = entry.resolve;
+  entry.resolve = payload => { lateResolves++; resolve(payload); };
+  check.equal(timers.size, 1);
+  const [timerId, timeout] = timers.entries().next().value;
+  timers.delete(timerId); timeout();
+  check.match((await pending).message, /set_group_reaction timeout/);
+  check.equal(h.c.pendingOneBotActions.size, 0);
+  for (let i = 0; i < 2; i++) await ws.callbacks.get("message")(JSON.stringify({
+    self_id: QQ[A], echo: frame.echo, status: "ok", retcode: 0, data: {}
+  }));
+  check.equal(accepted, 0);
+  check.equal(rejected, 1);
+  check.equal(lateResolves, 0, "expired echo cannot reach the old acceptance callback");
+  check.equal(frames.length, 1, "timeout and duplicate late ACKs never replay the request");
+  check.equal(sendStarted, 1);
+  check.equal(h.c.pendingOneBotActions.size, 0);
+  check.equal(h.c.oneBotSendTrackers.size, 0);
+  check.equal(timers.size, 0);
+  check.deepEqual(h.warnings, []);
 });
 
 await test("rebind during voice synthesis discards A audio/text fallback; B voice still works", async () => {

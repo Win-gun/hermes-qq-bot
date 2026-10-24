@@ -272,6 +272,14 @@ quiet and logical-route checks apply again at wire time. Source completion is no
 production authorization. Run `npm run test:social-agent`; human blind evaluation
 and real QQ pilots remain separate acceptance gates, never self-awarded scores.
 
+Social expression contracts are in `docs/SOCIAL-EXPERIENCE-2.md`. Group sticker
+learning is opt-in, background, content-addressed and account/group-scoped;
+automatic qualification is not an administrator approval, and rejection wins.
+Do not persist signed transport URLs for cached group assets or put unbounded
+images into memory. Message reactions are external writes even without a
+`send_` prefix: every request must cross the same physical send gate and quiet
+checks. An accepted reaction is not a new QQ message or a spoken experience.
+
 Core source upgrade contracts and outstanding acceptance gates are tracked in
 `docs/CORE-UPGRADE.md`. The memory repository is the sole cooperating writer;
 read-only tools must not acquire its lock. AI extraction claims each batch

@@ -38,7 +38,7 @@ config.privateChats = { enabled: true, targetUsers: ['30001'], ownerUserIds: ['3
 config.commands = { ...config.commands, enabled: true, ownerUserIds: ['30001'], adminUserIds: ['30001'] };
 config.responseQueue = { ...config.responseQueue, minDelayMs: 2500 };
 const fake = path.join(home, 'fake-hermes.cjs');
-fs.writeFileSync(fake, `#!${process.execPath}\nprocess.stdout.write(process.argv.includes('--image')?JSON.stringify({note:'开心讨论',tags:['开心']}):'synthetic direct reply');\n`, { mode: 0o700 });
+fs.writeFileSync(fake, `#!${process.execPath}\nprocess.stdout.write(process.argv.includes('--image')?JSON.stringify({note:'开心讨论',tags:['开心'],sticker:true,safeToReuse:true,confidence:0.95,usage:'开心讨论时表达赞同和祝贺',avoid:['认真求助']}):'synthetic direct reply');\n`, { mode: 0o700 });
 config.ai = { ...config.ai, command: fake, args: ['-z'], textTransport: 'hermes', provider: 'custom', model: 'synthetic-model', timeoutMs: 5000 };
 let fakeRequests = 0;
 const model = http.createServer(async (req,res) => {
@@ -54,6 +54,16 @@ const model = http.createServer(async (req,res) => {
   if (fs.existsSync(path.join(home,'burst'))) decision={action:'reply',messages:['synthetic first bubble','synthetic second bubble']};
   if (fs.existsSync(path.join(home,'sticker'))) decision={action:'reply',expressionPlan:{version:1,action:'reply',replyToMessageId:null,
     messages:[{type:'text',content:'synthetic happy reply'},{type:'sticker',stickerId:'fixture-sticker',fallbackText:'synthetic media unavailable'}]}};
+  if (fs.existsSync(path.join(home,'learned-sticker'))) {
+    const item=projectedSnapshot.stickerCandidates?.find(row=>row.id!=='fixture-sticker');
+    decision=item?{action:'reply',expressionPlan:{version:1,action:'reply',replyToMessageId:null,
+      messages:[{type:'sticker',stickerId:item.id}]}}:{action:'observe'};
+  }
+  if (fs.existsSync(path.join(home,'reaction'))) {
+    const item=projectedSnapshot.reactionCandidates?.[0];
+    decision=item?{action:'reply',expressionPlan:{version:1,action:'reply',replyToMessageId:null,
+      messages:[{type:'reaction',reactionId:item.id}]}}:{action:'observe'};
+  }
   if (payload.messages.at(-1).content.includes('当前问题已完成回复')) decision={action:'reply',messages:['must not send reflection'],continuity:{mood:{valence:0.2}}};
   if (fs.existsSync(path.join(home,'persona'))) {
     const {snapshot}=JSON.parse(payload.messages.at(-1).content.split('\n').at(-1));
@@ -97,7 +107,7 @@ const req=new EventEmitter();req.destroy=()=>req.emit('close');req.end=()=>setIm
 `);
 let child, socket, tail = '', token;
 const calls = () => fs.existsSync(path.join(home,'calls')) ? fs.readFileSync(path.join(home,'calls'),'utf8').trim().split('\n').length : 0;
-const sends = [];
+const sends = [], reactions = [];
 async function request(url, { method = 'GET', body, auth = true, origin = base } = {}) {
   const response = await fetch(base + url, { method, headers: { ...(auth && token ? { 'x-hermes-qq-admin': token } : {}),
     ...(method !== 'GET' ? { origin, 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
@@ -114,6 +124,7 @@ async function start() {
   socket = new WebSocket(`ws://127.0.0.1:${onebot}/onebot`);
   socket.on('message', raw => { const item = JSON.parse(raw); if (!item.action) return;
     if (item.action.startsWith('send_')) sends.push(item);
+    if (item.action==='set_group_reaction') reactions.push(item);
     const data = item.action === 'get_login_info' ? { user_id: 10001, nickname: 'Test' }
       : item.action === 'get_group_member_list' ? [{ user_id: 10001 }, { user_id: 30001 }]
         : item.action === 'get_friend_list' ? [{user_id:30001}]
@@ -302,6 +313,63 @@ try {
   assert(sends.at(-1).params.message.at(-1).data.file.startsWith('base64://'));
   await until(async()=> (await request(libraryUrl+'?conversation_id=group:20002')).body.stickers[0].annotation.sentCount===1,'actual image ACK persisted once');
   await policy({enabled:false}); fs.unlinkSync(path.join(home,'sticker'));
+  // Actual group-event intake uses fake media/Vision and the real repository,
+  // never the unsupported collection route or a manual approval workaround.
+  async function expressionPolicy(patch) {
+    const registry=await request('/api/accounts');
+    const previous=registry.body.items.find(row=>row.id==='primary').socialExperience;
+    const r=await request('/api/accounts/primary',{method:'PATCH',body:{expectedRevision:registry.body.revision,
+      patch:{socialExperience:{...previous,...patch}}}});
+    assert.equal(r.status,200,JSON.stringify(r.body));
+  }
+  await expressionPolicy({stickers:{enabled:true,visionLearning:true,autoSend:true,groupLearning:true,
+    autonomousEligibility:true,maxDailyVisionCalls:8,maxDailyDownloads:8,cooldownMs:60000}});
+  const beforeLearningSends=sends.length;
+  socket.send(JSON.stringify({post_type:'message',message_type:'group',self_id:10001,group_id:20002,user_id:30001,
+    message_id:1100,time:Math.floor(fixtureNow()/1000),sender:{nickname:'Human'},message:[
+      {type:'text',data:{text:'开心讨论的时候用这个祝贺'}},
+      {type:'image',data:{url:'https://cdn.synthetic-stickers.net/group.png',file:'group-fixture',sub_type:0,summary:'synthetic'}}]}));
+  await until(async()=> (await request(libraryUrl+'?conversation_id=group:20002')).body.stickers?.some(row=>row.source==='group-observed'&&row.autoEligible),
+    'group image learns usage and becomes eligible without manual review',15000);
+  const learnedView=(await request(libraryUrl+'?conversation_id=group:20002')).body;
+  const learned=learnedView.stickers.find(row=>row.source==='group-observed');
+  assert.equal(learned.annotation.status,'candidate','automatic eligibility is not an administrator decision');
+  assert.equal(learned.annotation.actor,undefined);
+  assert(learned.usage.includes('开心')); assert(learnedView.cache.entries>=1);
+  assert.equal(sends.length,beforeLearningSends,'learning never sends QQ');
+  assert(!JSON.stringify(learnedView).includes('cdn.synthetic-stickers.net'),'signed media URLs stay out of admin API');
+  assert(!JSON.stringify(learnedView).includes('开心讨论的时候用这个祝贺'),'raw learning context stays out of admin API');
+  fs.writeFileSync(path.join(home,'learned-sticker'),'1');
+  await policy({enabled:true,conversationIds:['group:20002'],turnTimeoutMs:8000});
+  const beforeLearned=sends.length; message(1101,'大家聊得很开心',20002);
+  await until(()=>sends.length===beforeLearned+1,'autonomous choice sends learned sticker via same renderer',15000);
+  assert.equal(sends.at(-1).params.message.at(-1).type,'image');
+  await until(async()=> (await request(libraryUrl+'?conversation_id=group:20002')).body.stickers.find(row=>row.id===learned.id)?.annotation.sentCount===1,
+    'learned image receipt recorded exactly once');
+  await policy({enabled:false}); fs.unlinkSync(path.join(home,'learned-sticker'));
+  // A message reaction is an external write but not a new bot chat message.
+  await expressionPolicy({reactions:{enabled:true,cooldownMs:60000,maxDaily:3,emojiIds:['76']}});
+  fs.writeFileSync(path.join(home,'reaction'),'1');
+  const beforeReaction=sends.length;
+  const experiencesBefore=(await request(accountUrl)).body.state.experiences.length;
+  await policy({enabled:true,conversationIds:['group:20002'],turnTimeoutMs:8000});
+  message(1200,'这件小事值得点个赞',20002);
+  await until(()=>reactions.length===1,'reaction reaches fake OneBot');
+  assert.equal(String(reactions[0].params.group_id),'20002');
+  assert.equal(String(reactions[0].params.message_id),'1200');
+  assert.equal(reactions[0].params.code,'76'); assert.equal(reactions[0].params.is_set,true);
+  await until(async()=> (await request(libraryUrl+'?conversation_id=group:20002')).body.reactions?.accepted===1,
+    'reaction records interface acceptance, not invented message ACK');
+  await until(async()=> (await request(accountUrl)).body.state.conversations.find(row=>row.conversationId==='group:20002')?.unread===0,
+    'reaction-only autonomous turn acknowledges only actual read sources');
+  await until(async()=> (await request(accountUrl)).body.state.conversations.find(row=>row.conversationId==='group:20002')?.status==='idle',
+    'reaction-only acceptance completes the social runtime without a false failure');
+  assert.equal(sends.length,beforeReaction,'reaction does not create a second text reply');
+  assert.equal((await request(accountUrl)).body.state.experiences.length,experiencesBefore,'accepted reaction is not a fabricated spoken experience');
+  const view=(await request(libraryUrl+'?conversation_id=group:20002')).body;
+  assert.equal(view.reactions.capability,'supported');
+  await policy({enabled:false}); fs.unlinkSync(path.join(home,'reaction'));
+  console.log('PASS group expression bridge: direct group media -> bounded background learning -> cached auto eligibility -> shared image ACK; host-bound reaction -> acceptance only; no external calls or real QQ');
   console.log('PASS expression library bridge: auth/scope/CAS/intake/review/budget/fake-Vision/host-plan/image-wire/ACK; no external network or QQ');
   console.log('PASS social bridge integration: auth/CAS/default-off/restricted-model/confirmed-send/durable-ACK/dedup/habit-revoke/self-consent-revoke/at-replan-terminal/startup-pause/config-race');
 } finally {

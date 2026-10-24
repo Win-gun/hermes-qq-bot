@@ -16,7 +16,18 @@ export const BACKUP_MAGIC = Buffer.from("HERMESQQBACKUP1\n", "utf8");
 export const BACKUP_FORMAT_VERSION = 1;
 const CURRENT_APP_VERSION = "1.0.0-beta.4";
 const DEFAULT_COMPONENTS = ["config.json", "data"];
-const DATA_COMPONENTS = ["memory.json", "chat-archive", "images", "tasks"];
+const DATA_COMPONENTS = ["memory.json", "chat-archive", "images", "tasks", "sticker-assets"];
+// The cache is content-addressed; signed transport URLs are neither evidence
+// nor a portable credential. Never mutate the live published memory snapshot.
+function portableExpressionMemory(snapshot, sensitive) {
+  if (sensitive) return snapshot;
+  for (const bot of Object.values(snapshot.socialExpressionAssets?.bots || {})) {
+    for (const asset of Object.values(bot?.stickers || {})) {
+      if (asset?.source === "group-observed" && /^[a-f0-9]{64}$/.test(asset.cacheSha256 || "")) delete asset.url;
+    }
+  }
+  return snapshot;
+}
 const HERMES_PROFILE_FILES = new Set([".env", "config.yaml", "config.yml", "config.json", "profiles", "auth.json", "skills"]);
 const SECRET_KEY_RE = /(^|_)(password|passwd|secret|token|cookie|credential|privatekey|api[_-]?key)($|_)/i;
 const SECRET_VALUE_RE = /^(sk[-_][A-Za-z0-9_-]{16,}|eyJ[A-Za-z0-9_.-]{24,}|[A-Za-z0-9+/=_-]{48,})$/;
@@ -172,6 +183,33 @@ function copyPath(source, destination, options = {}) {
     filter: options.filter
   });
   return true;
+}
+
+function secureStagedStickerCache(dataRoot) {
+  const base = path.join(dataRoot, "sticker-assets");
+  if (!fs.existsSync(base)) return;
+  const directory = value => {
+    const stat = fs.lstatSync(value);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("备份中的表情缓存目录无效");
+    fs.chmodSync(value, 0o700);
+  };
+  directory(base);
+  const owners = fs.readdirSync(base);
+  if (owners.length > 128) throw new Error("备份中的表情缓存账号数量超限");
+  for (const owner of owners) {
+    if (!/^[a-f0-9]{64}$/.test(owner)) throw new Error("备份中的表情缓存命名无效");
+    const dir = path.join(base, owner); directory(dir);
+    const files = fs.readdirSync(dir); let bytes = 0;
+    if (files.length > 500) throw new Error("备份中的表情缓存数量超限");
+    for (const name of files) {
+      const file = path.join(dir, name), stat = fs.lstatSync(file);
+      if (!/^[a-f0-9]{64}\.asset$/.test(name) || !stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1
+        || stat.size < 1 || stat.size > 5 * 1024 * 1024) throw new Error("备份中的表情缓存文件无效");
+      bytes += stat.size;
+      if (bytes > 128 * 1024 * 1024) throw new Error("备份中的表情缓存容量超限");
+      fs.chmodSync(file, 0o600);
+    }
+  }
 }
 
 export class BackupCancelledError extends Error {
@@ -562,7 +600,7 @@ async function copyBackupPayload({ stateRoot, hermesHome, logRoot, includeLogs, 
         ensureDir(dataTarget);
         // Materialize a coherent recovered snapshot, never a lock or an
         // incomplete journal. Old backup formats still contain memory.json.
-        writeJson(path.join(dataTarget, name), readMemorySnapshot(source));
+        writeJson(path.join(dataTarget, name), portableExpressionMemory(readMemorySnapshot(source), sensitive));
       }
       continue;
     }
@@ -570,7 +608,8 @@ async function copyBackupPayload({ stateRoot, hermesHome, logRoot, includeLogs, 
     signal,
     // Full-history search postings are regenerable caches, not user evidence.
     // Keep raw JSONL, summaries and the existing lightweight archive metadata.
-    ...(name === "chat-archive" ? { filter: (source) => !/^search-index\.json(?:\.[a-f0-9-]+\.tmp)?$/i.test(path.basename(source)) } : {})
+    ...(name === "chat-archive" ? { filter: (source) => !/^search-index\.json(?:\.[a-f0-9-]+\.tmp)?$/i.test(path.basename(source)) } : {}),
+    ...(name === "sticker-assets" ? { filter: (source) => !/^\.sticker-cache-v1-[a-f0-9]{32}\.tmp$/.test(path.basename(source)) } : {})
     });
   }
   if (sensitive) {
@@ -945,6 +984,9 @@ function replaceFromStage({ stateRoot, payloadDir, full, hermesHome }) {
   const installed = [];
   try {
     for (const name of targets) copyPath(path.join(payloadDir, name === "config.json" || name === "data" ? "state" : "protocol-host", name), path.join(incomingDir, name));
+    // tar portable archives can normalize directory modes to 0755. Re-secure
+    // ONLY the new owned cache inside staging, before replacing any live data.
+    secureStagedStickerCache(path.join(incomingDir, "data"));
     if (full && hermesHome && fs.existsSync(path.join(payloadDir, "hermes-home"))) {
       if (path.resolve(hermesHome) !== path.join(stateRoot, "hermes")) throw new Error("Hermes 配置目录不在应用数据目录内");
       copyPath(path.join(payloadDir, "hermes-home"), path.join(incomingDir, "hermes"));
