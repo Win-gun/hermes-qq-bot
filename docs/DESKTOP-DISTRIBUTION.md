@@ -13,7 +13,7 @@ npm run app:package
 npm run app:make
 ```
 
-`app:package` 生成 `out/` 下的应用包；`app:make` 生成 `out/make/` 下的 arm64 ZIP 与 DMG。若已有应用正在从默认 `out/` 运行，先设置 `HERMES_QQ_BUILD_OUT=out/parity-dev`，避免覆盖运行中的应用。打开 DMG 后将 App 拖入“应用程序”，再从该目录启动。当前代码版本是 `1.0.0-beta.21`（包含[可靠性审查修复](AUDIT-REMEDIATION.md)、[记忆核实及学习升级](MEMORY-VERIFICATION.md)、[按账号自主社交与人格提案](SOCIAL-AGENT.md)、凭据管理及文本调用优化）；测试版采用 ad-hoc 签名，未完成 Apple 公证或跨设备验收。首次打开可能需要在 Finder 中右键应用并选择“打开”。
+`app:package` 生成 `out/` 下的应用包；`app:make` 生成 `out/make/` 下的 arm64 ZIP 与 DMG。若已有应用正在从默认 `out/` 运行，先设置 `HERMES_QQ_BUILD_OUT=out/parity-dev`，避免覆盖运行中的应用。打开 DMG 后将 App 拖入“应用程序”，再从该目录启动。当前代码版本是 `1.0.0-beta.22`（包含[可靠性审查修复](AUDIT-REMEDIATION.md)、[记忆核实及学习升级](MEMORY-VERIFICATION.md)、[按账号自主社交与人格提案](SOCIAL-AGENT.md)、[社交表达升级](SOCIAL-EXPERIENCE-2.md)、凭据管理及文本调用优化）；测试版采用 ad-hoc 签名，未完成 Apple 公证或跨设备验收。首次打开可能需要在 Finder 中右键应用并选择“打开”。
 
 `beta.15` 修复了其他 API 草稿误拦截密钥保存、Keychain 空值写入及新建模型方案默认关联错误连接的问题。旧版已保存的空凭据需要在本机重新录入；新写入会回读核对，成功后才显示已配置。页面 Keychain 写入支持单行可打印 ASCII，完整转义命令上限为 4000 字节，超出限制应使用环境变量配置；不会截断后写入。新增方案保持为草稿，不会自动切换功能或账号的线上模型绑定。
 
@@ -32,6 +32,8 @@ npm run app:make
 `beta.19` 增加按账号管理的[空闲网络采风](SOCIAL-DISCOVERY.md)：采集、素材检索、受控分享和反馈。安装不会自动开启该功能；生产范围和发送权限须另行确认。
 
 `beta.20–21` 加强管理台保存可靠性：非法数值明确拒绝，合法自定义值在保存后回读核对；迟到的 API 刷新不覆盖新保存；账号回读失败保留草稿并显示未核实，保存期间继续编辑不误判为外部冲突。WebUI 与 App 共用实现，升级不自动改动现有配置。
+
+`beta.22` 增加按账号、会话限定的社交表达：自适应轮次、共享 ReplyPlan 与语义气泡、受审核的收藏表情库和群语感。缺省仍关闭/观察模式，生产须显式启用；收藏同步依赖协议实际支持 `fetch_custom_face_detail`，不支持时明确降级，不假造图片或尝试未知动作。拍一拍保持禁用。参见 [Social Experience 2.0](SOCIAL-EXPERIENCE-2.md)。桌面冒烟测试明确清空示例的外部 OneBot/容器入口，避免连接当前机器的真实 QQ 协议端。
 
 桌面应用将只读代码与用户状态分离：
 
