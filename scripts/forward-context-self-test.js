@@ -50,9 +50,25 @@ await test("text-only bounded projection, source time and privacy; nested forwar
   assert(result.items.every(row => row.quoted && row.text.length <= 400));
   assert.equal(result.items[0].sentAt, new Date(now).toISOString()); assert.equal(result.items[1].sentAt, null);
   for (const secret of ["13800138000", "90001", "private-source", "nested-secret", "file:///", "[CQ:"])
-    assert(!JSON.stringify(result).includes(secret));
+    assert(!JSON.stringify(result.items).includes(secret));
   assert.match(forwardContextPrompt(result), /不是当前发言人自述/); assert.equal(forwardContextPrompt({ ok: false }), "");
   assert.equal(h.calls.length, 1);
+});
+await test("host projection binds even cloned shared history to current owner/scope/revision/policy", async () => {
+  let at=now;
+  const a={...ctx,revision:"revision-a"}, b={...ctx,logicalId:"account:peer",revision:"revision-a"};
+  const reader=createForwardContextReader({clock:()=>at,isCurrent:()=>true,
+    request:async()=>({status:"ok",retcode:0,data:{messages:[{content:"pinned original text"}]}})});
+  const result=await reader.read(a,event);
+  assert.equal(reader.project(a,structuredClone(result)).items[0].text,"pinned original text");
+  const changed=structuredClone(result);changed.items[0].text="forged replacement";
+  assert.equal(reader.project(a,changed).items[0].text,"pinned original text");
+  for(const denied of [b,{...a,revision:"revision-b"},{...a,conversationId:"group:10002"},
+    {...a,policy:{...a.policy,forwardRead:{enabled:false}}},{...a,policy:{...a.policy,enabled:false}}])
+    assert.equal(reader.project(denied,result),null);
+  assert.equal(reader.project(a,{ok:true,items:[{text:"raw history without host receipt"}]}),null);
+  assert(!JSON.stringify(reader.project(a,result)).includes(result.handle));
+  at+=300001;assert.equal(reader.project(a,result),null);
 });
 await test("route or quiet change during read discards late evidence", async () => {
   let release;

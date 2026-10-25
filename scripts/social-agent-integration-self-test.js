@@ -129,7 +129,7 @@ mediaDNS.lookup=async host=>{if(host!=='cdn.synthetic-stickers.net')throw Error(
 mediaHTTPS.request=(url,opts,callback)=>{if(url.hostname!=='cdn.synthetic-stickers.net')throw Error('fixture denies external HTTPS');
 const req=new EventEmitter();req.destroy=()=>req.emit('close');req.end=()=>setImmediate(()=>{const res=new PassThrough();res.statusCode=200;res.headers={'content-type':'image/png'};callback(res);res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aCusAAAAASUVORK5CYII=','base64'));res.once('end',()=>req.emit('close'));});return req;};syncBuiltinESMExports();
 `);
-let child, socket, tail = '', token;
+let child, socket, peerSocket, tail = '', token;
 const calls = () => fs.existsSync(path.join(home,'calls')) ? fs.readFileSync(path.join(home,'calls'),'utf8').trim().split('\n').length : 0;
 const sends = [], reactions = [], onebotRequests = [];
 async function request(url, { method = 'GET', body, auth = true, origin = base } = {}) {
@@ -432,6 +432,19 @@ try {
   assert.equal(writes21().length,beforeDefaultWrites,'default-off observation writes no OneBot action');
   await policy({enabled:false}); scenario21=null;
 
+  // Style and local language context are independent of multi-bubble ReplyPlan.
+  await expressionPolicy({style:{enabled:true},expression:{...defaults21.expression,enabled:false}});
+  scenario21={kind:'style-only',messageId:1299};
+  await policy({enabled:true});
+  const beforeStyleWrites=writes21().length;
+  message(1299,'原来如此，我再慢慢看看',20002);
+  await settled21('style-only');
+  assert.match(currentCall21('style-only').snapshot.groupExpression,/本地表达建议/);
+  assert.equal(currentCall21('style-only').snapshot.expressionInstruction,undefined);
+  assert.equal(writes21().length,beforeStyleWrites,'local style projection does not create a send');
+  await policy({enabled:false}); scenario21=null;
+  await expressionPolicy({expression:defaults21.expression});
+
   await expressionPolicy({interestWatch:{enabled:true,maxDurationMs:300000,maxActive:4}});
   scenario21={kind:'interest',messageId:1301};
   await policy({enabled:true});
@@ -494,6 +507,23 @@ try {
   assert.equal(writes21().length,beforeUnknownPoke,'no poke offer means no native/text fallback write');
   await policy({enabled:false}); scenario21=null;
 
+  // A second independent owner must not inherit expansions in shared history.
+  let registry21=await request('/api/accounts');
+  const peerCreated=await request('/api/accounts',{method:'POST',body:{expectedRevision:registry21.body.revision,
+    account:{id:'fixture-peer',qq:'10002',displayName:'Synthetic peer',protocol:'napcat',managed:true,
+      onebotPath:'/onebot',features:{chat:true,proactive:true},sendTypes:{text:true},
+      socialAgent:{enabled:true,shadowMode:false,conversationIds:['group:20002']},socialExperience:{enabled:false}}}});
+  assert.equal(peerCreated.status,201,JSON.stringify(peerCreated.body));
+  registry21=await request('/api/accounts');
+  assert.equal((await request('/api/accounts/fixture-peer',{method:'PATCH',body:{expectedRevision:registry21.body.revision,patch:{enabled:true,onebotWsUrl:''}}})).status,200);
+  peerSocket=new WebSocket(`ws://127.0.0.1:${onebot}/onebot`);
+  peerSocket.on('message',raw=>{const item=JSON.parse(raw);if(!item.action)return;
+    peerSocket.send(JSON.stringify({status:'ok',retcode:0,echo:item.echo,data:item.action==='get_login_info'
+      ?{user_id:10002,nickname:'Synthetic peer'}:{online:true,good:true}}));});
+  await new Promise(resolve=>peerSocket.once('open',resolve));
+  peerSocket.send(JSON.stringify({post_type:'meta_event',meta_event_type:'lifecycle',sub_type:'connect',self_id:10002}));
+  await until(async()=> (await request('/api/accounts')).body.statuses.some(row=>row.id==='fixture-peer'&&row.connected),'peer fixture registered');
+
   await expressionPolicy({mentions:{enabled:false},pokes:{enabled:false},forwardRead:{enabled:true}});
   scenario21={kind:'forward',messageId:1304};
   await policy({enabled:true});
@@ -512,6 +542,15 @@ try {
     'quoted forward is not promoted to an original speaker message');
   assert.equal((await libraryView21()).forwards.capability,'read-confirmed');
   assert.equal(writes21().length,beforeForwardWrites,'forward reading is not a send');
+  scenario21={kind:'peer-forward',messageId:1306};
+  peerSocket.send(JSON.stringify({post_type:'message',message_type:'group',self_id:10002,group_id:20002,user_id:30001,
+    message_id:1306,time:Math.floor(fixtureNow()/1000),message:'synthetic peer followup',raw_message:'synthetic peer followup',sender:{nickname:'Human'}}));
+  await until(()=>Boolean(currentCall21('peer-forward')),'independent peer model snapshot');
+  const peerContext=currentCall21('peer-forward').snapshot.recentContext;
+  assert(peerContext.some(row=>row.text.includes('synthetic current original forward')),'the peer sees the same original public group history');
+  assert(!peerContext.some(row=>row.forwardedContext),'the peer never receives another owners forward expansion');
+  assert(!JSON.stringify(peerContext).includes('synthetic forwarded text only'));
+  await until(async()=> (await request('/api/social-agent/accounts/fixture-peer')).body.state.conversations[0]?.unread===0,'peer observation ACK');
   await policy({enabled:false}); scenario21=null;
 
   // An arbitrary model ID/tool name cannot enter this host-only read adapter.
@@ -535,7 +574,7 @@ try {
   console.log('PASS expression library bridge: auth/scope/CAS/intake/review/budget/fake-Vision/host-plan/image-wire/ACK; no external network or QQ');
   console.log('PASS social bridge integration: auth/CAS/default-off/restricted-model/confirmed-send/durable-ACK/dedup/habit-revoke/self-consent-revoke/at-replan-terminal/startup-pause/config-race');
 } finally {
-  socket?.close(); child?.kill('SIGTERM'); if (child && child.exitCode===null) await Promise.race([new Promise(resolve=>child.once('exit',resolve)),pause(3000)]);
+  socket?.close(); peerSocket?.close(); child?.kill('SIGTERM'); if (child && child.exitCode===null) await Promise.race([new Promise(resolve=>child.once('exit',resolve)),pause(3000)]);
   fs.rmSync(home,{recursive:true,force:true});
   model.closeAllConnections(); await new Promise(resolve=>model.close(resolve));
 }

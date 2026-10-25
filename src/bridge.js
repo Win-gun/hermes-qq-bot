@@ -123,6 +123,7 @@ let socialPromptProvider = () => "";
 let socialDeliveredProvider = () => {};
 let discoveryPromptProvider = () => "";
 let groupLanguagePromptProvider = () => "";
+let forwardContextProvider = () => null;
 let discoveryDeliveredProvider = async () => {};
 const archiveSearchService = new ArchiveSearchService();
 process.once("exit", () => { void memoryRepository.terminate(); });
@@ -3544,7 +3545,7 @@ function webSearchPreReply(decision, config) {
 
 function buildPrompt({ config, history, current, mode, memoryText = "", contextBundle = null, webSearchContext = "", archiveContext = "", learningPrompt = "" }) {
   const memorySafety = "记忆使用边界：新旧说法不同时先区分时间变化、条件、玩笑引用与身份；不要认定谁说错。待核实/过期/条件未确认的内容不能作为确定的当前事实。摘要、检索原文及你自己的旧回答不是新证据，不能绕过记忆纠正或复活已否定内容。核实由后台流程处理，不得假称已通知管理员、已获批准或已修改记忆；与当前问题无关的争议不打断闲聊。";
-  const system = `${systemPromptForAccount(config, config.__activeAccountId || "primary") || ""}\n\n${memorySafety}\n${socialPromptProvider(config, String(current?.user_id || ""))}\n${discoveryPromptProvider(config, current, mode)}\n${typeof groupLanguagePromptProvider === "function" ? groupLanguagePromptProvider(config, current) : ""}\n${forwardContextPrompt(current?.forwardedContext)}`;
+  const system = `${systemPromptForAccount(config, config.__activeAccountId || "primary") || ""}\n\n${memorySafety}\n${socialPromptProvider(config, String(current?.user_id || ""))}\n${discoveryPromptProvider(config, current, mode)}\n${typeof groupLanguagePromptProvider === "function" ? groupLanguagePromptProvider(config, current) : ""}\n${forwardContextPrompt(typeof forwardContextProvider === "function" ? forwardContextProvider(config, current) : null)}`;
   const accountIdentity = accountIdentityForPrompt(config, config.__activeAccountId || "primary");
   const recent = contextBundle?.recentMessages || compactHistory(history.slice(-Math.max(1, config.history?.promptRecentMessages ?? config.history?.maxMessages ?? 40)), config);
   const voiceCapability = config.voice?.enabled === true && config.voice?.tts?.enabled !== false
@@ -9263,6 +9264,10 @@ async function main() {
       } catch (error) { if ([404, 1404].includes(error.retcode)) return { status: "failed", retcode: error.retcode }; throw error; }
     }
   });
+  forwardContextProvider = (selected, current) => {
+    try { return forwardReader.project(captureExpressionContext(selected.__activeAccountId, selected.__socialConversationId), current?.forwardedContext); }
+    catch { return null; }
+  };
   let nativeSourceToIssue = null;
   const nativeActions = createNativeSocialActions({
     capture: (id, conversationId) => {
@@ -9553,11 +9558,13 @@ async function main() {
       // The social lane augments existing evidence-bound memory; it must not
       // discard the account's established relationships when first enabled.
       snapshot = { ...snapshot, knownContext: redactSensitive(compactMemory(memory, scope.internalId, selected, scope.userId), selected, { force: true }).slice(0, 6000),
-        recentContext: (historyByGroup.get(scope.internalId) || []).slice(-12).map(item => ({
+        recentContext: (historyByGroup.get(scope.internalId) || []).slice(-12).map(item => {
+          const forwardedContext = forwardContextProvider(selected, item);
+          return {
           userId: String(item.user_id || ""), isBot: item.isBot === true,
           text: redactSensitive(String(item.text || ""), selected, { force: true }).slice(0, 800), at: item.sentAt || item.at || null,
-          ...(item.forwardedContext?.ok ? { forwardedContext: item.forwardedContext } : {})
-        })) };
+          ...(forwardedContext ? { forwardedContext } : {})
+        }; }) };
       const query = snapshot.recentContext.filter(item => !item.isBot).slice(-3).map(item => item.text).join(" ");
       const expression = socialExperienceFor(selected, ctx.conversationId);
       if (expression.active && expression.interestWatch.enabled && !scope.reflectOnly && !scope.discoveryWakeId
@@ -9582,7 +9589,9 @@ async function main() {
       const planOptions = { maxMessages: expression.expression.maxMessages, maxTextLength: 2000, direct: false,
         allowedQuoteIds: quoteIds, allowedStickerIds: stickerOffer?.allowedIds || [], allowedReactionIds: reactionOffer?.allowedIds || [],
         allowedMentionIds: nativeOffer?.allowedMentionIds || [], allowedPokeIds: nativeOffer?.allowedPokeIds || [] };
-      if (sharedExpression) snapshot = { ...snapshot, groupExpression: groupLanguagePromptProvider(selected, { text: query }),
+      if (expression.active && !expression.shadowMode && !scope.reflectOnly)
+        snapshot = { ...snapshot, groupExpression: groupLanguagePromptProvider(selected, { text: query }) };
+      if (sharedExpression) snapshot = { ...snapshot,
         expressionInstruction: `reply 可增加 expressionPlan，内容为下面协议的完整对象；外层仍使用社交action/throughSeq等格式，不得改变目的地。所有气泡由同一个发送器处理。\n${replyPlanPrompt(planOptions)}`,
         stickerCandidates: stickerOffer?.candidates || [], reactionCandidates: reactionOffer?.candidates || [],
         mentionCandidates: nativeOffer?.mentions || [], pokeCandidates: nativeOffer?.pokes || [] };

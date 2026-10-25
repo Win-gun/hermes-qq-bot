@@ -11,7 +11,7 @@ const terms = text => [...new Set(String(text || '').normalize('NFKC').toLowerCa
 export function createSocialInterestWatch({ clock = Date.now, isCurrent, getPolicy, maxScopes = 256 } = {}) {
   if (typeof clock !== 'function' || typeof isCurrent !== 'function' || typeof getPolicy !== 'function'
     || !Number.isSafeInteger(maxScopes) || maxScopes < 1 || maxScopes > 1024) throw new TypeError('INTEREST_DEPENDENCY');
-  const scopes = new Map(), key = c => JSON.stringify([c.logicalId,c.conversationId]);
+  const scopes = new Map(), issued = new Map(), key = c => JSON.stringify([c.logicalId,c.conversationId]);
   function guard(c) {
     if (!safeScope(c) || isCurrent(c) !== true) return null;
     const p = getPolicy(c);
@@ -46,9 +46,17 @@ export function createSocialInterestWatch({ clock = Date.now, isCurrent, getPoli
     const rows=prune(c), topic=terms(source.text);
     if(proposal.kind==='topic'&&!topic.length)return {ok:false,code:'INTEREST_SOURCE'};
     if(rows.some(x=>x.sourceMessageId===source.messageId&&x.kind===proposal.kind))return {ok:false,code:'INTEREST_DUPLICATE'};
+    for(const [sourceKey,until]of issued)if(until<=at)issued.delete(sourceKey);
+    const sourceKey=JSON.stringify([c.logicalId,c.conversationId,source.messageId]);
+    // Cancellation/consumption must fence late model results without changing
+    // global config. A different kind cannot resurrect the same source either.
+    // Never evict a live fence to admit a duplicate source.
+    if(issued.has(sourceKey))return {ok:false,code:'INTEREST_COMPLETED'};
+    if(issued.size>=maxScopes*4)return {ok:false,code:'INTEREST_CAPACITY'};
     if(rows.length>=limit||(!scopes.has(key(c))&&scopes.size>=maxScopes))return {ok:false,code:'INTEREST_CAPACITY'};
     const watch={id:'interest_'+randomUUID(),kind:proposal.kind,userId:source.userId,sourceMessageId:source.messageId,
       revision:c.revision,sourceSentAt:source.sentAt,createdAt:at,expiresAt:at+Math.min(maxDuration,proposal.ttlMs),topic};
+    issued.set(sourceKey,Math.max(watch.expiresAt,source.sentAt+300001));
     scopes.set(key(c),[...rows,watch]);return {ok:true,id:watch.id,expiresAt:watch.expiresAt};
   }
   function observe(c, event) {
