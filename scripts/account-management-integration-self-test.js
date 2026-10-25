@@ -15,12 +15,13 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), "hermesqq-account-integration
 const configFile = path.join(home, "config.json");
 const sockets = new Map();
 const actions = [];
+const acknowledged = new Set();
 const results = [];
 const ids = Array.from({ length: 6 }, (_, index) => `fixture-${index}`);
 const qqs = ids.map((_, index) => String(91000 + index));
 const GROUP = "810001", BLOCKED = "810002", QUIET = "810003", EXPLICIT = "810004";
 const NEGATIVE_ACK_GROUP = "810005";
-// This is a 45-case end-to-end suite, not one failover attempt. It includes
+// This is a 46-case end-to-end suite, not one failover attempt. It includes
 // durable config writes, six-account probes and real 1s shared send spacing.
 // Node 22/CI can exceed 60s cumulatively even when every bounded action passes.
 const fixtureBudgetMs = 120_000, caseBudgetMs = 20_000;
@@ -175,7 +176,8 @@ process.stderr.write("fixture: real Docker forbidden\\n"); process.exit(97);
   fs.writeFileSync(hermes, `#!${process.execPath}
 const fs = require("node:fs"), file = ${JSON.stringify(path.join(home, "hermes-calls.jsonl"))};
 fs.appendFileSync(file, JSON.stringify(process.argv.slice(2))+"\\n");
-process.stdout.write("fixture text reply "+Date.now()+"\\n");
+const slowRoute=process.argv.some(arg=>arg.includes("CONCURRENT_BOTH_SWITCH"));
+setTimeout(()=>process.stdout.write("fixture text reply "+Date.now()+"-"+process.pid+(slowRoute?" CONCURRENT_BOTH_SWITCH":"")+"\\n"),slowRoute?1500:0);
 `, { mode: 0o700 });
   const config = JSON.parse(fs.readFileSync(path.join(root, "config.example.json"), "utf8"));
   config.listen = { ...config.listen, host: "127.0.0.1", port: await freePort(), path: "/fixture-onebot" };
@@ -248,9 +250,17 @@ process.stdout.write("fixture text reply "+Date.now()+"\\n");
         };
         return;
       }
-      if (action.echo && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ status: "ok", retcode: 0, echo: action.echo,
-        data: action.action === "get_login_info" ? { user_id: qqs[index], nickname: id }
-          : action.action === "get_status" ? { online: true, good: true } : { message_id: `fixture-reply-${++sequence}` } }));
+      const reply = () => {
+        if (!action.echo || socket.readyState !== WebSocket.OPEN) return;
+        socket.send(JSON.stringify({ status: "ok", retcode: 0, echo: action.echo,
+          data: action.action === "get_login_info" ? { user_id: qqs[index], nickname: id }
+            : action.action === "get_status" ? { online: true, good: true } : { message_id: `fixture-reply-${++sequence}` } }));
+        acknowledged.add(action.echo);
+      };
+      // Legal bounded ACK latency must not turn a routing test into a flaky
+      // zero-latency assumption. This delay exists only in this fake transport.
+      if(action.action==='send_group_msg'&&JSON.stringify(action.params.message).includes('CONCURRENT_BOTH_SWITCH')) setTimeout(reply,2000);
+      else reply();
     });
     await until(() => socket.readyState === WebSocket.OPEN, `reverse WS open ${id}`);
     socket.send(JSON.stringify({ post_type: "meta_event", meta_event_type: "heartbeat", self_id: qqs[index], status: { online: true, good: true } }));
@@ -510,7 +520,23 @@ process.stdout.write("fixture text reply "+Date.now()+"\\n");
     const names = [...snapshot.items.map((item) => item.displayName), ...snapshot.failoverGroups.map((group) => group.policy.displayName)].join(" ");
     broadcast({ group: GROUP, text: `${names} ${marker}`, messageId: marker });
     const newReplies = () => actions.slice(actionOffset).filter((item) => item.action === "send_group_msg" && String(item.params.group_id) === GROUP);
-    await until(() => newReplies().length >= expected.length, `${marker}: all selected routes reply`, 6500);
+    const generationBudgetMs=Number(config.ai.timeoutMs)+2000;
+    const fakeAckMs=marker==='CONCURRENT_BOTH_SWITCH'?2000:0;
+    const wireBudgetMs=Number(config.ai.timeoutMs)+expected.length*Math.max(1000,fakeAckMs)+1000;
+    try {
+      await until(()=>hermesCalls().length-promptOffset>=expected.length,`${marker}: all selected routes start generation`,generationBudgetMs);
+      await until(() => newReplies().length >= expected.length, `${marker}: all selected routes reply`,wireBudgetMs);
+      await until(()=>newReplies().every(item=>acknowledged.has(item.echo)),`${marker}: actual fake transport ACKs`,fakeAckMs+2000);
+    }
+    catch(error) {
+      // All values are synthetic. Record bounded admission/generation/wire
+      // evidence instead of guessing that a missing reply was a slow runner.
+      const health=(await request('/health')).data;
+      const lines=output.split('\n').filter(line=>line.includes(marker)||/duplicate|skipped|cancelled|discard|blocked|failed/i.test(line)).slice(-12);
+      error.message += ` ${JSON.stringify({expected,replied:newReplies().map(item=>item.id),
+        promptCalls:hermesCalls().length-promptOffset,coordinator:health.replyCoordinator,lines})}`;
+      throw error;
+    }
     await pause(200);
     assert.deepEqual(newReplies().map((item) => item.id).sort(), [...expected].sort(), `${marker}: exactly the two selected members and independent bots must send`);
     const prompts = hermesCalls().slice(promptOffset).map((args) => args.join("\n"));
