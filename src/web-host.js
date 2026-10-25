@@ -505,6 +505,7 @@ function proxy(req, res) {
   // The public host validates the browser Origin before proxying. The bridge
   // independently checks its own loopback origin for protected mutations.
   if (req.headers.origin && (/^\/api\/voice\/(?:credential|test)(?:\?|$)/.test(req.url || "")
+    || /^(?:\/send|\/api\/send_private)(?:\?|$)/.test(req.url || "")
     || /^\/api\/api-center(?:\/|\?|$)/.test(req.url || "")
     || /^\/api\/social-agent(?:\/|\?|$)/.test(req.url || "")
     || /^\/api\/(?:accounts|account-groups|tasks)(?:\/|\?|$)/.test(req.url || "")

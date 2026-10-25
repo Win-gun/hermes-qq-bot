@@ -104,6 +104,14 @@ try {
   const adminSession = await request(port, "/api/admin/session");
   check(adminSession.status === 200 && typeof adminSession.data.token === "string", "local admin session is proxied");
   const voiceHeaders = { Origin: `http://127.0.0.1:${port}`, "x-hermes-qq-admin": adminSession.data.token };
+  for (const route of ["/send", "/api/send_private"]) {
+    const permitted = await request(port, route, "POST", {}, voiceHeaders);
+    check(permitted.status === 503, `same-origin ${route} reaches disabled account lookup rather than proxy Origin rejection`);
+    check((await request(port, route, "POST", {}, { ...voiceHeaders, Origin: "https://invalid.example" })).status === 403,
+      `cross-origin ${route} cannot pass public proxy`);
+    check((await request(port, route, "POST", {}, { Origin: voiceHeaders.Origin })).status === 403,
+      `same-origin ${route} still requires admin session`);
+  }
   const deniedVoice = await request(port, "/api/voice/test", "POST", { voice: { tts: { model: "invalid-test-model" } } }, { ...voiceHeaders, Origin: "http://example.com" });
   check(deniedVoice.status === 403, "cross-origin voice API request is blocked at public host");
   const acceptedVoice = await request(port, "/api/voice/test", "POST", { voice: { tts: { model: "invalid-test-model" } } }, voiceHeaders);
