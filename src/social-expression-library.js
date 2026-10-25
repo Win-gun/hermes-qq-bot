@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { createStickerService } from "./sticker-service.js";
 import { createGroupStickerLearning } from "./group-sticker-learning.js";
 import { validateSocialExperiencePolicy } from "./social-experience-policy.js";
-import { listGroupLanguage, reviewGroupSlang } from "./group-language-learning.js";
+import { listGroupLanguage, reviewGroupSlang, listImplicitGroupLanguage, reviewImplicitGroupSlang } from "./group-language-learning.js";
+import { rankStickerCandidates } from "./sticker-semantics.js";
 
 const plain = x => x !== null && typeof x === "object" && !Array.isArray(x);
 const own = (x, k) => plain(x) && Object.hasOwn(x, k);
@@ -98,6 +99,12 @@ export function createExpressionLibrary({ readState, transact, capture, isCurren
     const stickers = s.list(ctx);
     const bot = root.memory.socialExpressionAssets?.bots?.[c.logicalId];
     const language = listGroupLanguage(root.memory, c);
+    if (language.ok && c.conversationId.startsWith("group:")) {
+      const view = listImplicitGroupLanguage(root.memory, { ...c, now: now() });
+      if (!view.ok) throw fail("EXPRESSION_STATE");
+      language.lifecycle = { ok: true, entries: view.entries.map(row => ({ id: row.id, term: row.term, revision: row.revision,
+        lifecycle: row.lifecycle, meaning: row.proposal?.meaning || "" })) };
+    }
     if (!language.ok && c.conversationId.startsWith("group:")) throw fail("EXPRESSION_STATE");
     const assets = Object.values(bot?.stickers || {}).sort((a, b) => a.id.localeCompare(b.id))
       .map(({ annotations, ...a }) => ({ ...a, annotation: annotations[c.conversationId] || null }));
@@ -193,7 +200,8 @@ export function createExpressionLibrary({ readState, transact, capture, isCurren
       c = guard(ctx, signal);
       const allowed = { sync: ["expectedStateRevision", "conversationId"], annotate: ["expectedStateRevision", "conversationId", "id"],
         "review-sticker": ["expectedStateRevision", "conversationId", "id", "expectedRevision", "status"],
-        "review-language": ["expectedStateRevision", "conversationId", "id", "expectedRevision", "status", "meaning"] }[op];
+        "review-language": ["expectedStateRevision", "conversationId", "id", "expectedRevision", "status", "meaning"],
+        "review-implicit": ["expectedStateRevision", "conversationId", "id", "expectedRevision", "action"] }[op];
       if (!allowed || !strict(body, allowed)) throw fail("EXPRESSION_ARGUMENT");
       if (body.conversationId !== undefined && body.conversationId !== c.conversationId) throw fail("EXPRESSION_SCOPE");
       body = clone(body);
@@ -221,6 +229,16 @@ export function createExpressionLibrary({ readState, transact, capture, isCurren
           return r;
         }, { signal });
       }
+      if (op === "review-implicit") {
+        if (!c.conversationId.startsWith("group:")) throw fail("EXPRESSION_SCOPE");
+        result = await write(ctx, body.expectedStateRevision, root => {
+          const r = reviewImplicitGroupSlang(root.memory, { logicalId: c.logicalId, conversationId: c.conversationId,
+            id: body.id, expectedRevision: body.expectedRevision, action: body.action, now: now(),
+            actor: { id: "local-admin", authorized: true, logicalId: c.logicalId, conversationId: c.conversationId } });
+          if (!r.ok) throw fail(r.reason === "stale_revision" ? "EXPRESSION_CONFLICT" : "EXPRESSION_ARGUMENT");
+          return r;
+        }, { signal });
+      }
       guard(ctx, signal);
       return { ok: true, result, revision: parts(readState(), ctx).revision };
     } catch (e) { return error(safeCode(e)); }
@@ -232,18 +250,33 @@ export function createExpressionLibrary({ readState, transact, capture, isCurren
     if (serious || query.trim().length < 2) return [];
     const q = query.normalize("NFKC").toLowerCase().trim(), root = rootAt(readState()), at = now();
     const list = service(ctx).list(ctx), raw = root.memory.socialExpressionAssets?.bots?.[c.logicalId]?.stickers || {};
-    return list.filter(a => {
+    // Authority remains here, before any semantic inference. No other logical
+    // account/group, official transport metadata or raw evidence enters ranking.
+    const qualified = list.filter(a => {
       const v = a.annotation;
       if (!v || (v.status !== "confirmed" && !a.autoEligible) || v.blocked || v.denied || raw[a.id].blocked || raw[a.id].denied) return false;
       const times = Object.values(raw[a.id].annotations[c.conversationId].receipts).map(r => r.at);
       if (times.some(time => time > at || at - time < c.policy.stickers.cooldownMs)) return false;
-      const note = v.note.normalize("NFKC").toLowerCase();
+      // Preserve the original full-field literal veto even for legacy entries
+      // beyond the ranker's bounded semantic feature projection.
       if ((v.avoid || []).some(t => t.trim().length >= 2 && q.includes(t.normalize("NFKC").toLowerCase()))) return false;
+      return true;
+    }).map(a => ({ id: a.id, note: a.annotation.note, tags: clone(a.annotation.tags),
+      source: a.source, autoEligible: a.autoEligible === true, usage: a.annotation.usage || "", avoid: clone(a.annotation.avoid || []),
+      history: { sentCount: a.annotation.sentCount,
+        lastSentAt: Object.values(raw[a.id].annotations[c.conversationId].receipts).reduce((last, r) => Math.max(last, r.at), 0) } }));
+    // P0 semantic inference is group-scoped only. Keep the old private-chat
+    // literal contract rather than expanding inference to private annotations.
+    if (!c.conversationId.startsWith("group:")) return qualified.filter(a => {
+      const note = a.note.normalize("NFKC").toLowerCase();
       return note.length >= 2 && (note.includes(q) || q.includes(note))
-        || v.tags.some(t => t.trim().length >= 2 && q.includes(t.normalize("NFKC").toLowerCase()))
-        || (v.usage?.trim().length >= 2 && q.includes(v.usage.normalize("NFKC").toLowerCase()));
-    }).slice(0, limit).map(a => ({ id: a.id, note: a.annotation.note, tags: clone(a.annotation.tags),
-      source: a.source, autoEligible: a.autoEligible === true, usage: a.annotation.usage || "", avoid: clone(a.annotation.avoid || []) }));
+        || a.tags.some(t => t.trim().length >= 2 && q.includes(t.normalize("NFKC").toLowerCase()))
+        || (a.usage.trim().length >= 2 && q.includes(a.usage.normalize("NFKC").toLowerCase()));
+    }).slice(0, limit).map(({ history, ...row }) => row);
+    const byId = new Map(qualified.map(a => [a.id, a]));
+    return rankStickerCandidates(qualified, { query, serious, limit, now: at }).map(({ id, score, reasons }) => {
+      const { history, ...row } = byId.get(id); return { ...row, score, reasons };
+    });
   }
   function candidates(ctx, { query = "", serious = false, limit = 3 } = {}) {
     try {

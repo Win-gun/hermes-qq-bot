@@ -3,6 +3,7 @@
 // --preview renders the same editor with an in-memory account API on loopback.
 import assert from "node:assert/strict";
 import { validateSocialExperiencePolicy } from "../src/social-experience-policy.js";
+import { QQ_REACTION_LABELS } from "../src/message-reactions.js";
 import fs from "node:fs";
 import vm from "node:vm";
 import http from "node:http";
@@ -19,7 +20,7 @@ function source(name) {
 const constants = ["registryTabs", "registryFeatures", "registrySendTypes", "registryIdentityKeys", "registryPolicyKeys"]
   .map(name => script.match(new RegExp(`^    const ${name} = .+;$`, "m"))[0]).join("\n");
 const functions = ["api", "ensureAdminSession", "switchPage", "currentScope", "registryItem", "registryGroup", "registryEffective", "registryStyle", "registryEditable", "registryDraft", "registryGet", "registrySet", "registryButton", "registryRequest", "rebaseRegistryDraft", "refreshAccountRegistry", "registryField", "registryFields", "refreshExperienceStatus", "renderExperienceDiagnostic", "registryExperienceDiagnostic", "registryValidate", "registryTabKeys", "registryPatch", "confirmRegistrySave", "saveRegistryPatch", "saveRegistryEditor", "registrySelect", "syncRegistryDraftControls", "renderRegistryEditor", "registryDraftStatus"]
-  .concat(["experienceLibraryScopes", "experienceLibraryState", "experienceLibraryText", "experienceLibraryProjection", "loadExperienceLibrary", "selectExperienceLibrary", "mutateExperienceLibrary", "renderExperienceLibrary"])
+  .concat(["experienceDiagnosticReason", "experienceLibraryScopes", "experienceLibraryState", "experienceLibraryText", "experienceLibraryProjection", "loadExperienceLibrary", "selectExperienceLibrary", "mutateExperienceLibrary", "cancelExperienceInterest", "renderExperienceLibrary"])
   .map(source).join("\n");
 const realSource = `${constants}\nlet adminSessionToken = "", adminSessionRequest = null;\n${functions}`;
 // Syntax-check every inline script too, without running page initialization.
@@ -92,6 +93,18 @@ function fixture(document, state = {}) {
       const method = opts.method || "GET";
       requests.push({ url, method, body: opts.body ? JSON.parse(opts.body) : null, token: opts.headers?.get("x-hermes-qq-admin") });
       if (url === "/api/admin/session") return response({ token: "synthetic-session" });
+      if (url.includes("/interest-watch")) {
+        assertRoute(opts.headers.get("x-hermes-qq-admin") === "synthetic-session");
+        const parsed = new URL(url, "https://synthetic.invalid"), id = decodeURIComponent(parsed.pathname.split("/")[4]);
+        const body = opts.body ? JSON.parse(opts.body) : null, scope = body?.conversationId || parsed.searchParams.get("conversation_id");
+        const data = library(id, scope);
+        if (method === "GET") return response({ ok: true, revision: server.revision, items: data.interest?.items || [] }, hooks.interestReadStatus || 200);
+        assertRoute(method === "POST");
+        if (hooks.interestPostStatus) return response({ error: "PRIVATE_ERROR_SENTINEL" }, hooks.interestPostStatus);
+        if (body.expectedRevision !== server.revision) return response({ ok: false }, 409);
+        data.interest.items = data.interest.items.filter(row => row.id !== body.id);
+        return response({ ok: true });
+      }
       if (url.includes("/expression-library")) {
         assertRoute(opts.headers.get("x-hermes-qq-admin") === "synthetic-session");
         const parsed = new URL(url, "https://synthetic.invalid"), parts = parsed.pathname.split("/"), id = decodeURIComponent(parts[4]);
@@ -111,10 +124,13 @@ function fixture(document, state = {}) {
           data.dailyVisionCalls.attempted++;
           item.annotation = { revision: (item.annotation?.revision || 0) + 1, status: "candidate", note: "合成单项标注", tags: ["合成"], sentCount: 0 };
         } else {
-          assertRoute(["review-sticker", "review-language"].includes(action));
-          const item = action === "review-language" ? data.language.candidates.find(i => i.id === body.id) : data.stickers.find(i => i.id === body.id)?.annotation;
+          assertRoute(["review-sticker", "review-language", "review-implicit"].includes(action));
+          const item = action === "review-implicit" ? data.language.lifecycle.entries.find(i => i.id === body.id)
+            : action === "review-language" ? data.language.candidates.find(i => i.id === body.id) : data.stickers.find(i => i.id === body.id)?.annotation;
           if (body.expectedRevision !== item?.revision) return response({ error: "conflict" }, 409);
-          item.status = body.status; item.revision++;
+          if (action === "review-implicit") item.lifecycle = { verify: "Verified", activate: "Active", reject: "Deprecated", deprecate: "Deprecated" }[body.action];
+          else item.status = body.status;
+          item.revision++;
         }
         data.revision = `s${Number(data.revision.slice(1)) + 1}`;
         hooks.afterLibraryPost?.(data);
@@ -138,6 +154,7 @@ function fixture(document, state = {}) {
       await hooks.beforePatch?.();
       if (hooks.patchStatus) return response({ error: "synthetic rejection" }, hooks.patchStatus);
       if (body.expectedRevision !== server.revision) return response({ error: "synthetic conflict" }, 409);
+      if (body.patch.socialExperience && hooks.canonicalPolicy) body.patch.socialExperience = hooks.canonicalPolicy(body.patch.socialExperience);
       const item = server.items.find(i => i.id === decodeURIComponent(url.split("/").at(-1)));
       Object.assign(item, structuredClone(body.patch)); server.revision = `r${Number(server.revision.slice(1)) + 1}`;
       hooks.afterPatch?.(item);
@@ -150,6 +167,7 @@ function fixture(document, state = {}) {
 async function runtime() {
   const document = mockDocument();
   const t = fixture(document, { document, Headers, Response, URL, structuredClone, Date });
+  t.hooks.canonicalPolicy = validateSocialExperiencePolicy;
   vm.runInContext(realSource, vm.createContext(t.state));
   t.edit = (path, value) => {
     const control = document.getElementById("dynamicAccountEditor").querySelectorAll("[data-registry-field]").find(c => c.dataset.registryField === `socialExperience.${path}`);
@@ -339,7 +357,7 @@ await test("admin-only diagnostics filter owners, bound rows and never expose co
   t.hooks.diagnostic = { ok: true, turns: 120, plans: 50, recent: [
     { kind: "plans", owner: "account:demo-b", reason: "other_account" },
     ...Array.from({ length: 7 }, (_, i) => ({ kind: "turns", owner: "account:demo-a", at: 1700000000000 + i,
-      waitMs: i, messageCount: i, shadow: true, reason: `code_${i}`, content: "PRIVATE_CONTENT_SENTINEL", reasoning: "REASONING_SENTINEL" })),
+      waitMs: i, messageCount: i, shadow: true, reason: ["empty", "command", "ordinary", "incomplete", "addressed", "consecutive", "separated"][i], content: "PRIVATE_CONTENT_SENTINEL", reasoning: "REASONING_SENTINEL" })),
     { kind: "plans", owner: "demo-a", at: 1700000000010, confirmed: 0, partial: false, uncertain: true, shadow: false, reason: "<script>PRIVATE_CONTENT_SENTINEL</script>" }
   ] };
   await s.refreshExperienceStatus();
@@ -347,8 +365,9 @@ await test("admin-only diagnostics filter owners, bound rows and never expose co
   assert.match(text, /全局累计（非当前账号计数）：turn 120 · ReplyPlan 50/);
   assert.match(text, /最近 5 条/); assert.match(text, /确认 0 · 部分发送 否 · 结果不确定 是/);
   assert.match(text, /实际/); assert.match(text, /观察/); assert.match(text, /原因 未报告/);
-  assert(!/other_account|code_0|code_1|code_2|PRIVATE_CONTENT|REASONING/.test(text));
-  assert(text.indexOf("ReplyPlan · 实际") < text.indexOf("原因 code_6"));
+  assert(!/other_account|原因 empty|原因 command|原因 ordinary|PRIVATE_CONTENT|REASONING/.test(text));
+  assert(text.indexOf("ReplyPlan · 实际") < text.indexOf("原因 separated"));
+  assert(!/PRIVATE_CONTENT|REASONING|other_account/.test(JSON.stringify(s.registryState.experienceStatus.value)));
   const reads = t.requests.filter(r => r.url === "/api/social-agent/expression-status");
   assert(reads.every(r => r.method === "GET" && r.token === "synthetic-session"));
   assert(t.requests.every(r => r.url === "/api/admin/session" || r.url === "/api/social-agent/expression-status"));
@@ -359,13 +378,13 @@ await test("shared identity diagnostics do not mix independent histories", async
   s.registryState.groups = [{ id: "team", memberIds: ["demo-a", "demo-b"] }];
   t.hooks.diagnostic = { ok: true, recent: [
     { kind: "turns", owner: "account:demo-a", reason: "old_independent" },
-    { kind: "plans", owner: "group:team", confirmed: true, partial: false, uncertain: false, reason: "shared_current" },
+    { kind: "plans", owner: "group:team", confirmed: true, partial: false, uncertain: false, reason: "ordinary" },
     { kind: "plans", owner: "group:elsewhere", reason: "other_group" }
   ] };
   await s.refreshExperienceStatus();
   const text = s.registryExperienceDiagnostic("demo-a");
   assert.match(text, /turn 未知 · ReplyPlan 未知/); assert.match(text, /当前接管组共享身份/);
-  assert.match(text, /确认 是/); assert.match(text, /shared_current/);
+  assert.match(text, /确认 是/); assert.match(text, /原因 ordinary/);
   assert(!/old_independent|other_group/.test(text));
   assert.equal(text, s.registryExperienceDiagnostic("demo-b"));
   assert.match(s.registryExperienceDiagnostic(""), /请到接管组成员账号/);
@@ -575,19 +594,220 @@ await test("learned source and reaction acceptance stay distinct from administra
   assert(!JSON.stringify(data).includes("DO_NOT_SHOW")); assert(!JSON.stringify(data).includes("PRIVATE_PATH"));
   assert.equal(libraryPosts(t).length,0,"viewing statuses does not initiate learning or reactions");
 });
+await test("2.1 controls preserve legacy policy, canonical defaults and the single-save boundary", async () => {
+  const t = await runtime(), s = t.state;
+  const legacy = { enabled: false, conversationIds: ["group:123456"], reactions: { emojiIds: ["76", "999"] },
+    turn: { incompleteWaitMs: 2900 }, language: { autoCandidates: false }, stickers: { cooldownMs: 90000 } };
+  t.server.items[0].socialExperience = structuredClone(legacy);
+  await s.refreshAccountRegistry(); s.renderRegistryEditor(true);
+  const d = s.registryDraft();
+  assert.deepEqual(plain(d.value.socialExperience), validateSocialExperiencePolicy(legacy));
+  assert.equal(d.dirty.size, 0); assert.equal(t.requests.filter(r => r.method !== "GET").length, 0);
+  const host = t.document.getElementById("dynamicAccountEditor");
+  assert.equal(host.querySelectorAll("*").filter(n => n.tagName === "BUTTON" && /^保存/.test(n.textContent)).length, 1);
+  for (const key of ["language.implicitLearning", "interestWatch.enabled", "style.enabled", "pokes.enabled", "mentions.enabled", "forwardRead.enabled"]) {
+    assert.equal(s.registryGet(d.value.socialExperience, key), false); t.edit(key, true);
+  }
+  t.edit("interestWatch.maxDurationMs", 1000); t.edit("interestWatch.maxActive", 2);
+  t.edit("pokes.maxDaily", 0); t.edit("pokes.cooldownMs", 86400000);
+  const before = plain(d.value.socialExperience), dirty = [...d.dirty];
+  s.registrySelect("demo-b", "experience"); s.registrySelect("demo-a", "experience");
+  assert.deepEqual(plain(d.value.socialExperience), before); assert.deepEqual([...d.dirty], dirty);
+  await s.refreshAccountRegistry(); assert.deepEqual(plain(d.value.socialExperience), before);
+  s.registryState.tab = "identity"; await s.saveRegistryEditor();
+  assert(!Object.hasOwn(t.requests.find(r => r.method === "PATCH").body.patch, "socialExperience"));
+  assert.deepEqual(t.server.items[0].socialExperience, legacy);
+  s.registryState.tab = "experience"; await s.saveRegistryEditor();
+  const write = t.requests.filter(r => r.method === "PATCH").at(-1);
+  assert.deepEqual(Object.keys(write.body.patch), ["socialExperience"]);
+  assert.deepEqual(t.server.items[0].socialExperience, validateSocialExperiencePolicy(before));
+  assert.equal(d.dirty.size, 0); assert.equal(Object.hasOwn(t.server.items[1], "socialExperience"), false);
+  assert(!t.requests.some(r => /interest-watch|send_|poke|forward/.test(r.url)));
+});
+await test("2.1 numeric limits and toggle types match canonical policy before any transport", async () => {
+  const t = await runtime(), s = t.state, d = s.registryDraft();
+  const bounds = [["interestWatch.maxActive", 1, 4], ["interestWatch.maxDurationMs", 1000, 600000],
+    ["pokes.maxDaily", 0, 200], ["pokes.cooldownMs", 0, 86400000]];
+  for (const [path, min, max] of bounds) {
+    const control = t.edit(path, min);
+    assert.equal(control.min, String(min)); assert.equal(control.max, String(max)); assert.equal(control.step, "1");
+    for (const n of [min, max]) {
+      const candidate = structuredClone(expected); s.registrySet(candidate, path, n);
+      assert.doesNotThrow(() => s.registryValidate({ socialExperience: candidate }, ["socialExperience"]));
+      assert.doesNotThrow(() => validateSocialExperiencePolicy(candidate));
+    }
+    for (const n of [min - 1, max + 1, min + 0.5, null, "1", NaN, Infinity]) {
+      const candidate = structuredClone(expected); s.registrySet(candidate, path, n);
+      assert.throws(() => s.registryValidate({ socialExperience: candidate }, ["socialExperience"]));
+      assert.throws(() => validateSocialExperiencePolicy(candidate));
+    }
+    t.edit(path, max + 1);
+    await assert.rejects(s.saveRegistryPatch("demo-a", ["socialExperience"], "社交表达"));
+    assert.equal(s.registryGet(d.value.socialExperience, path), max + 1);
+    assert(d.dirty.has(`socialExperience.${path}`)); t.edit(path, s.registryGet(expected, path));
+  }
+  for (const path of ["language.implicitLearning", "interestWatch.enabled", "style.enabled", "pokes.enabled", "mentions.enabled", "forwardRead.enabled"]) {
+    const candidate = structuredClone(expected); s.registrySet(candidate, path, "true");
+    assert.throws(() => s.registryValidate({ socialExperience: candidate }, ["socialExperience"]));
+    assert.throws(() => validateSocialExperiencePolicy(candidate));
+  }
+  assert(t.requests.every(r => r.method === "GET"));
+});
+await test("2.1 failed CAS and failed readback retain every new draft without retries", async () => {
+  for (const mode of [409, 403, 500, "readback"]) {
+    const t = await runtime(), s = t.state, d = s.registryDraft();
+    t.edit("interestWatch.enabled", true); t.edit("interestWatch.maxActive", 3);
+    t.edit("language.implicitLearning", true); t.edit("pokes.maxDaily", 11); t.edit("style.enabled", true);
+    const before = plain(d.value), dirty = [...d.dirty];
+    if (mode === "readback") t.hooks.afterPatch = () => { t.hooks.readError = true; };
+    else t.hooks.patchStatus = mode;
+    await assert.rejects(s.saveRegistryPatch("demo-a", ["socialExperience"], "社交表达"));
+    assert.deepEqual(plain(d.value), before); assert.deepEqual([...d.dirty], dirty);
+    assert.equal(t.requests.filter(r => r.method === "PATCH").length, 1);
+    assert.equal(d.saveState.status, mode === "readback" ? "unverified" : "failed");
+  }
+});
+await test("reaction whitelist copy matches the native trusted mapping and retains unknown old IDs", async () => {
+  const t = await runtime(), host = t.document.getElementById("dynamicAccountEditor");
+  for (const [id, label] of Object.entries(QQ_REACTION_LABELS)) assert(host.textContent.includes(`${id} ${label}`), `${id} trusted label drift`);
+  assert.match(host.textContent, /当前配置白名单/); assert(!host.textContent.includes("默认仅提供赞"));
+  t.edit("reactions.emojiIds", "14，76\n999\n76");
+  await t.state.saveRegistryEditor();
+  assert.deepEqual(t.server.items[0].socialExperience.reactions.emojiIds, ["14", "76", "999"]);
+  t.edit("reactions.emojiIds", "14 49 66 76");
+  await assert.rejects(t.state.saveRegistryPatch("demo-a", ["socialExperience"], "社交表达"), /至多三个/);
+  assert.deepEqual(plain(t.state.registryDraft().value.socialExperience.reactions.emojiIds), ["14", "49", "66", "76"]);
+});
+await test("2.1 diagnostics use fixed codes, never even ASCII-shaped private text", async () => {
+  const t = await runtime(), s = t.state;
+  t.hooks.diagnostic = { ok: true, turns: "private", plans: -1, recent: [
+    { kind: "turns", owner: "account:demo-a", reason: "PRIVATE_ASCII_SENTINEL", evidence: "PRIVATE_SENTINEL", messageCount: "PRIVATE_SENTINEL" },
+    { kind: "turns", owner: "account:demo-a", reason: "interest-photo", waitMs: 200 },
+    { kind: "plans", owner: "account:demo-a", reason: { text: "PRIVATE_SENTINEL" }, at: "PRIVATE_SENTINEL" }
+  ] };
+  await s.refreshExperienceStatus();
+  const stored = JSON.stringify(s.registryState.experienceStatus.value), text = s.registryExperienceDiagnostic("demo-a");
+  assert(!/PRIVATE|evidence/.test(stored)); assert(!/PRIVATE|object Object/.test(text));
+  assert.match(text, /原因 未报告/); assert.match(text, /原因 interest-photo/);
+  assert.match(text, /turn 未知 · ReplyPlan 未知/);
+});
+await test("2.1 attention metadata and lifecycle counts stay read-only, scoped and content-free", async () => {
+  const t = await runtime(), s = t.state, d = libraryScope(t), scope = "group:123456", at = Date.now();
+  const raw = t.library("demo-a", scope);
+  raw.interest = { ephemeral: true, restartReplay: false, evidence: "PRIVATE_SENTINEL", items: [
+    { id: "interest_demo", kind: "photo", createdAt: at, expiresAt: at + 300000, topic: "PRIVATE_SENTINEL", userId: "12345" },
+    { id: "interest_expired", kind: "reply", createdAt: at - 3000, expiresAt: at - 1000 },
+    { id: "unsafe", kind: "PRIVATE_SENTINEL", createdAt: at, expiresAt: at + 1000 },
+    { id: "unsafe-time", kind: "member", createdAt: at, expiresAt: 1e17 }
+  ] };
+  raw.native = { ok: true, capabilities: { poke: "unsupported", mention: "supported", forwardRead: "PRIVATE_SENTINEL" },
+    daily: 1, maxDaily: 5, cooldownRemainingMs: 2000, targetUserId: "PRIVATE_SENTINEL" };
+  raw.language.lifecycle = { ok: true, entries: ["Observed", "Candidate", "Verified", "Active", "Deprecated", "PRIVATE_SENTINEL"].map(lifecycle => ({ lifecycle, evidence: "PRIVATE_SENTINEL", proposal: "PRIVATE_SENTINEL" })) };
+  raw.language.observed = 7;
+  const before = plain(d.value), dirty = [...d.dirty], revision = s.registryState.revision;
+  await s.selectExperienceLibrary("demo-a", scope);
+  const data = s.experienceLibraryState("demo-a", scope).data, text = libraryHost(t).textContent;
+  assert.deepEqual(plain(data.interest.items), raw.interest.items.slice(0, 2).map(({ id, kind, createdAt, expiresAt }) => ({ id, kind, createdAt, expiresAt })));
+  assert(!/PRIVATE|evidence|proposal|targetUserId|userId/.test(JSON.stringify(data)));
+  assert.match(text, /短期关注：快照 2 项/); assert.match(text, /重启不重放/); assert.match(text, /图片后续/);
+  assert.match(text, /已到期（请刷新核对）/); assert.match(text, /核实不等于激活/);
+  assert.match(text, /仅观察 1 · 候选 1 · 已核实 1 · 已激活 1 · 已弃用 1 · 未知 1/);
+  assert.match(text, /观察计数：7/); assert.match(text, /拍一拍 协议不支持/);
+  assert.deepEqual(plain(d.value), before); assert.deepEqual([...d.dirty], dirty); assert.equal(s.registryState.revision, revision);
+  // Switching accounts never reuses the other account's attention snapshot.
+  libraryScope(t, "demo-b", [scope]); s.registrySelect("demo-b", "experience"); await s.selectExperienceLibrary("demo-b", scope);
+  assert(!libraryHost(t).textContent.includes("interest_demo")); assert.match(libraryHost(t).textContent, /尚未提供有效诊断/);
+  s.registrySelect("demo-a", "experience");
+  const privateRaw = t.library("demo-a", "private:654321"); Object.assign(privateRaw, { interest: raw.interest, native: raw.native });
+  await s.selectExperienceLibrary("demo-a", "private:654321");
+  const privateData = s.experienceLibraryState("demo-a", "private:654321").data;
+  assert.equal(privateData.interest, null); assert.equal(privateData.native, null);
+  assert(!libraryHost(t).textContent.includes("interest_demo")); assert.match(libraryHost(t).textContent, /不展示私聊内容或目标/);
+  assert(t.requests.every(r => r.method === "GET"));
+});
+await test("2.1 missing or malformed optional diagnostics do not masquerade as zero or retain stale data", async () => {
+  const t = await runtime(), s = t.state; libraryScope(t); const scope = "group:123456", raw = t.library("demo-a", scope);
+  for (const interest of [undefined, { ephemeral: false, restartReplay: true, items: [] }, { ephemeral: true, restartReplay: false, items: "PRIVATE_SENTINEL" }]) {
+    raw.interest = interest; raw.language.lifecycle = { ok: true, entries: "PRIVATE_SENTINEL" }; raw.language.observed = "PRIVATE_SENTINEL";
+    await s.selectExperienceLibrary("demo-a", scope);
+    const data = s.experienceLibraryState("demo-a", scope).data;
+    assert.equal(data.interest, null); assert.equal(data.language.lifecycle, null); assert.equal(data.language.observed, null);
+    assert.match(libraryHost(t).textContent, /尚未提供有效诊断/); assert(!libraryHost(t).textContent.includes("PRIVATE_SENTINEL"));
+  }
+  raw.interest = { ephemeral: true, restartReplay: false, items: [] }; await s.loadExperienceLibrary("demo-a", scope);
+  assert.match(libraryHost(t).textContent, /短期关注：快照 0 项/);
+  t.hooks.libraryStatus = 403; await s.loadExperienceLibrary("demo-a", scope);
+  assert.equal(s.experienceLibraryState("demo-a", scope).data, null);
+  assert(!libraryHost(t).textContent.includes("短期关注：快照 0 项")); assert.match(libraryHost(t).textContent, /读取失败/);
+});
+await test("2.1 attention cancel is scoped, authenticated, readback verified and preserves drafts", async () => {
+  for (const failure of [0, 409, 403]) {
+    const t=await runtime(),s=t.state,d=libraryScope(t),scope="group:123456",now=Date.now();
+    const item={id:"interest_12345678-1234-1234-1234-123456789abc",kind:"member",createdAt:now,expiresAt:now+300000};
+    t.library("demo-a",scope).interest={ephemeral:true,restartReplay:false,items:[item]};
+    await s.selectExperienceLibrary("demo-a",scope);t.edit("interestWatch.enabled",true);
+    const before=plain(d.value); t.hooks.interestPostStatus=failure;
+    await s.cancelExperienceInterest("demo-a",scope,item);
+    assert.deepEqual(plain(d.value),before);assert(d.dirty.size > 0);
+    const posts=t.requests.filter(row=>row.method==="POST"&&row.url.includes("interest-watch"));
+    assert.equal(posts.length,1);assert.equal(posts[0].token,"synthetic-session");
+    assert.equal(posts[0].body.expectedRevision,t.server.revision);
+    const state=s.experienceLibraryState("demo-a",scope);
+    if(failure){assert(state.blocked);assert.equal(state.data,null);assert(!state.error.includes("PRIVATE"));}
+    else {assert.equal(state.data.interest.items.length,0);assert.match(state.notice,/核实/);}
+    await s.cancelExperienceInterest("demo-a",scope,item);
+    assert.equal(t.requests.filter(row=>row.method==="POST"&&row.url.includes("interest-watch")).length,1);
+    assert(!t.requests.some(row=>/send_|poke/.test(row.url)));
+  }
+});
+await test("2.1 implicit reviews require separate verify and activate with fresh revisions", async()=>{
+  const t=await runtime(),s=t.state;libraryScope(t);const scope="group:123456";
+  t.library("demo-a",scope).language.lifecycle={ok:true,entries:[{id:"implicit:demo",revision:3,term:"贴贴",meaning:"一起摸鱼",lifecycle:"Candidate"}]};
+  await s.selectExperienceLibrary("demo-a",scope);
+  let item=s.experienceLibraryState("demo-a",scope).data.language.implicitCandidates[0];
+  await s.mutateExperienceLibrary("demo-a",scope,"review-implicit",item,"verify");
+  item=s.experienceLibraryState("demo-a",scope).data.language.implicitCandidates[0];assert.equal(item.lifecycle,"Verified");
+  await s.mutateExperienceLibrary("demo-a",scope,"review-implicit",item,"activate");
+  assert.equal(s.experienceLibraryState("demo-a",scope).data.language.implicitCandidates[0].lifecycle,"Active");
+  assert.equal(libraryPosts(t).length,2);
+});
 console.log(JSON.stringify({ ok: true, cases, offline: true, liveDataTouched: false, bridgeStarted: false }));
 
 if (process.argv.includes("--preview")) {
   const css = fs.readFileSync(new URL("../public/console.css", import.meta.url), "utf8");
-  const page = `<!doctype html><html lang="zh-CN" data-theme="dark"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/console.css"><title>社交表达 · 合成预览</title><body><main style="max-width:1000px;margin:auto;padding:24px"><h1>社交表达 · 合成预览</h1><p>仅虚构账号与内存保存，不连接真实机器人。</p><div class="row"><button id="theme">切换明暗</button><button id="other">切换演示账号</button></div><section id="dynamicAccountEditor" class="card"></section><p id="preview-feedback" role="status"></p></main><script>
+  const page = `<!doctype html><html lang="zh-CN" data-theme="dark"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/console.css"><title>社交表达 2.1 · 隔离预览</title><body><main style="max-width:1000px;margin:auto;padding:24px"><h1>账号功能 → 社交表达 · 2.1</h1><p>仅虚构账号与内存保存，不连接真实机器人。所有诊断为合成样本，保存仅写内存。</p><div class="row" style="flex-wrap:wrap"><button id="theme">切换明暗</button><button id="other">切换演示账号</button><button id="conflict">模拟保存冲突</button><button id="restore">恢复合成接口</button><button id="fail-read">模拟诊断失败</button></div><section id="dynamicAccountEditor" class="card"></section><p id="preview-feedback" role="status"></p></main><script>
     const synthetic = (${fixture.toString()})(document, window);
     for (const item of synthetic.server.items) item.socialExperience = { conversationIds: ['group:123456', 'private:654321'] };
     registryState.items = structuredClone(synthetic.server.items);
+    const at = Date.now(), library = synthetic.library('demo-a', 'group:123456');
+    library.interest = { ephemeral: true, restartReplay: false, items: [
+      { id: 'interest_12345678-1234-1234-1234-123456789abc', kind: 'photo', createdAt: at, expiresAt: at + 300000 },
+      { id: 'interest_87654321-1234-1234-1234-123456789abc', kind: 'topic', createdAt: at, expiresAt: at + 240000 }
+    ] };
+    library.native = { ok: true, capabilities: { poke: 'unknown', mention: 'unknown', forwardRead: 'unsupported' }, daily: 0, maxDaily: 5, cooldownRemainingMs: 0 };
+    library.language.lifecycle = { ok: true, entries: ['Observed', 'Candidate', 'Verified', 'Active', 'Deprecated'].map(lifecycle => ({ lifecycle })) };
+    library.language.observed = 5;
+    synthetic.hooks.diagnostic = { ok: true, turns: 2, plans: 1, recent: [
+      { kind: 'turns', owner: 'account:demo-a', at, reason: 'incomplete', waitMs: 2500, messageCount: 2, shadow: true },
+      { kind: 'plans', owner: 'account:demo-a', at, messageCount: 1, shadow: true }
+    ] };
     ${realSource}
     registryFeedback = message => document.getElementById('preview-feedback').textContent = message;
     registrySelect('demo-a', 'experience');
+    selectExperienceLibrary('demo-a', 'group:123456');
     document.getElementById('theme').addEventListener('click', () => document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
     document.getElementById('other').addEventListener('click', () => registrySelect(registryState.selected === 'demo-a' ? 'demo-b' : 'demo-a', 'experience'));
+    document.getElementById('conflict').addEventListener('click', () => { synthetic.hooks.patchStatus = 409; registryFeedback('下次合成保存将返回 409；可确认草稿仍保留。'); });
+    document.getElementById('fail-read').addEventListener('click', () => {
+      synthetic.hooks.diagnosticStatus = synthetic.hooks.libraryStatus = 403;
+      refreshExperienceStatus(); const id = registryState.selected, scope = experienceLibraryState(id).scope;
+      if (scope) loadExperienceLibrary(id, scope);
+    });
+    document.getElementById('restore').addEventListener('click', () => {
+      synthetic.hooks.patchStatus = synthetic.hooks.diagnosticStatus = synthetic.hooks.libraryStatus = 0;
+      refreshExperienceStatus(); const id = registryState.selected, scope = experienceLibraryState(id).scope;
+      if (scope) loadExperienceLibrary(id, scope); registryFeedback('合成接口已恢复；没有改动草稿。');
+    });
   </script></body></html>`;
   const server = http.createServer((req, res) => {
     if (req.url === "/console.css") { res.setHeader("content-type", "text/css"); res.end(css); }

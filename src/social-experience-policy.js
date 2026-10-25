@@ -8,7 +8,12 @@ const defaults = {
   stickers: { enabled: false, autoSend: false, visionLearning: false, groupLearning: false,
     autonomousEligibility: false, maxDailyVisionCalls: 8, maxDailyDownloads: 16, cooldownMs: 60000 },
   reactions: { enabled: false, cooldownMs: 60000, maxDaily: 30, emojiIds: ["76"] },
-  language: { enabled: false, autoCandidates: true }
+  language: { enabled: false, autoCandidates: true, implicitLearning: false },
+  interestWatch: { enabled: false, maxDurationMs: 300000, maxActive: 4 },
+  style: { enabled: false },
+  pokes: { enabled: false, cooldownMs: 300000, maxDaily: 5 },
+  mentions: { enabled: false },
+  forwardRead: { enabled: false }
 };
 
 export function validateSocialExperiencePolicy(value = {}) {
@@ -23,7 +28,7 @@ export function validateSocialExperiencePolicy(value = {}) {
       || value.conversationIds.some(id => typeof id !== "string" || !/^(group|private):[1-9]\d{0,19}$/.test(id))) throw new Error("社交表达必须限定规范会话范围");
     result.conversationIds = [...new Set(value.conversationIds)];
   }
-  for (const section of ["turn", "expression", "stickers", "reactions", "language"]) {
+  for (const section of ["turn", "expression", "stickers", "reactions", "language", "interestWatch", "style", "pokes", "mentions", "forwardRead"]) {
     if (value[section] === undefined) continue;
     if (!plain(value[section]) || Object.keys(value[section]).some(key => !Object.hasOwn(defaults[section], key))) throw new Error("社交表达高级字段无效");
     for (const [key, entry] of Object.entries(value[section])) {
@@ -35,8 +40,8 @@ export function validateSocialExperiencePolicy(value = {}) {
       }
       if (typeof defaults[section][key] === "boolean") {
         if (typeof entry !== "boolean") throw new Error(`${key} 必须是开关`);
-      } else if (!Number.isSafeInteger(entry) || entry < (["maxMessages", "maxTurnMs"].includes(key) ? 1 : 0)
-        || entry > (key === "maxMessages" ? 4 : key === "maxTurnMs" ? 15000
+      } else if (!Number.isSafeInteger(entry) || entry < (key === "maxDurationMs" ? 1000 : ["maxMessages", "maxTurnMs", "maxActive"].includes(key) ? 1 : 0)
+        || entry > (key === "maxMessages" || key === "maxActive" ? 4 : key === "maxDurationMs" ? 600000 : key === "maxTurnMs" ? 15000
           : ["maxDailyVisionCalls", "maxDailyDownloads"].includes(key) ? 100 : key === "maxDaily" ? 200
             : key === "cooldownMs" ? 86400000 : 6000)) throw new Error(`${key} 超出有效范围`);
       result[section][key] = entry;

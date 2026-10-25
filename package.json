@@ -1,6 +1,6 @@
 {
   "name": "qq-hermes-onebot-bridge",
-  "version": "1.0.0-beta.23",
+  "version": "1.0.0-beta.24",
   "description": "Local desktop manager and OneBot bridge for Hermes-powered QQ bots",
   "main": "desktop/main.cjs",
   "private": true,
@@ -19,6 +19,8 @@
     "test:reply": "node scripts/reply-coordinator-self-test.js",
     "test:social-experience": "node scripts/social-expression-self-test.js && node scripts/social-experience-policy-self-test.js && node scripts/sticker-service-self-test.js && node scripts/sticker-cache-self-test.js && node scripts/social-expression-library-self-test.js && node scripts/group-sticker-learning-self-test.js && node scripts/message-reactions-self-test.js && node scripts/group-language-learning-self-test.js && node scripts/vision-process-self-test.js && node scripts/social-experience-ui-self-test.js",
     "test:group-stickers": "node scripts/sticker-cache-self-test.js && node scripts/group-sticker-learning-self-test.js && node scripts/message-reactions-self-test.js",
+    "test:social-experience-21": "npm run test:social-experience && node scripts/sticker-semantic-evaluation-self-test.js && node scripts/conversation-turn-self-test.js && node scripts/social-interest-watch-self-test.js && node scripts/social-style-context-self-test.js && node scripts/native-social-actions-self-test.js && node scripts/forward-context-self-test.js && node scripts/social-experience-21-evaluation-self-test.js",
+    "social:evaluate:21": "node scripts/social-experience-21-evaluation.js",
     "test:features": "node scripts/bot-capabilities-self-test.js && node scripts/automation-rules-self-test.js && node scripts/voice-intent-self-test.js && node scripts/voice-credentials-self-test.js && node scripts/voice-service-self-test.js && node scripts/voice-onebot-self-test.js && node scripts/voice-mode-self-test.js && node scripts/voice-consent-self-test.js && node scripts/voice-design-self-test.js && node scripts/task-web-policy-self-test.js && node scripts/new-features-integration-self-test.js",
     "test:backup": "node scripts/backup-service-self-test.js",
     "test:web-host": "node scripts/web-host-self-test.js",

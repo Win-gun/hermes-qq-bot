@@ -1,10 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { validateSocialExperiencePolicy } from "./social-experience-policy.js";
 
-// QQ official system-face mapping: EmojiType=1, ID=76, meaning=赞.
+// QQ official system faces (EmojiType=1), checked 2026-10-25. These are
+// semantic mappings, NOT evidence that a particular carrier supports them.
 // https://bot.q.qq.com/wiki/develop/api-v2/openapi/emoji/model.html#Emoji列表
 // Wire schema: https://snowluma.github.io/en/docs/api/extended/set_group_reaction
-const LABELS = Object.freeze({ "76": "赞同 / 点赞" });
+export const QQ_REACTION_LABELS = Object.freeze({
+  "14": "微笑", "49": "拥抱", "66": "爱心", "76": "赞同 / 点赞",
+  "78": "握手", "99": "鼓掌", "124": "OK", "179": "doge", "182": "笑哭", "315": "加油"
+});
+const LABELS = QQ_REACTION_LABELS;
 const MAX_AGE = 300000, CAPACITY = 1000;
 const plain = v => v !== null && typeof v === "object" && !Array.isArray(v)
   && [Object.prototype, null].includes(Object.getPrototypeOf(v));

@@ -142,4 +142,22 @@ releaseFirstPeer();
 await Promise.all([firstPeer, secondPeer]);
 assert.deepEqual(peerSent.slice(-2), ["standby-2", "primary-2"], "独立 bot 应并行生成，同一人的问题不能跨 bot 合并");
 
-console.log(JSON.stringify({ ok: true, runs, sent, order, peerSent, metrics: coordinator.snapshot() }));
+// Refreshing a pending settle timer must not start at its obsolete deadline.
+const settling = new ReplyCoordinator({ config: { responseQueue: { minDelayMs: 0,
+  liveContext: { settleMs: 40, windowMs: 1000, maxRegenerations: 2 } } } });
+let settleRuns = 0;
+const settleInput = (id) => ({ conversationId: "group:settle", senderId: "u1", accountId: "a",
+  mode: "at", direct: true, messageIds: [id], current: { text: id, messageIds: [id] } });
+const settleFirst = settling.enqueue({ ...settleInput("s1"), execute: async ({ job }) => {
+  settleRuns += 1;
+  assert.ok(Date.now() >= job.settleUntil, "必须等最新片段的 settle 窗口，而非旧 timer");
+  return { sent: true, ids: job.messageIds };
+} });
+assert.equal((await settling.enqueue(settleInput("s2"))).absorbed, true);
+await delay(8);
+assert.equal(settling.observeMessage(settleInput("s3")).absorbed, true);
+const settled = await settleFirst;
+assert.deepEqual(settled.ids, ["s1", "s2", "s3"]);
+assert.equal(settleRuns, 1, "尚在 settle 的续话不应额外启动模型");
+
+console.log(JSON.stringify({ ok: true, runs, sent, order, peerSent, settleRuns, metrics: coordinator.snapshot() }));

@@ -28,5 +28,7 @@ mkdir -p "$output_dir"
 cp -R "$app_path" "$stage_dir/Hermes QQ Bot.app"
 ln -s /Applications "$stage_dir/Applications"
 rm -f "$output_path"
-hdiutil create -volname "Hermes QQ Bot" -srcfolder "$stage_dir" -ov -format ULFO "$output_path"
+# Use the widely supported HFS+/zlib distribution format explicitly instead
+# of inheriting the build host's APFS/LZFSE image behavior.
+hdiutil create -volname "Hermes QQ Bot" -srcfolder "$stage_dir" -ov -fs HFS+ -format UDZO "$output_path"
 print -r -- "$output_path"

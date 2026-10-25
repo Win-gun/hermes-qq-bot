@@ -458,4 +458,295 @@ await test("owner-transition-recovers-only-bounded-unsent-direct-intents", async
   await drained(coordinator);
 });
 
+await test("cross-user-ownership-needs-evidence-not-question-or-bot-quote", async () => {
+  const coordinator = new ReplyCoordinator({ config });
+  const entered = deferred(), release = deferred();
+  let captured, signal, runs = 0;
+  const first = coordinator.enqueue(input("a", "owned-question", {
+    current: { text: "数据库索引 查询性能", messageIds: ["owned-question"] },
+    execute: async ({ job, signal: currentSignal }) => {
+      captured = job; signal = currentSignal; runs += 1;
+      if (runs === 1) { entered.resolve(); await release.promise; }
+      return { sent: true };
+    }
+  }));
+  await entered.promise;
+  const observe = (id, current, extra = {}) => coordinator.observeMessage(input("a", id, {
+    senderId: "other-human", direct: false, current: { messageIds: [id], ...current }, ...extra
+  }));
+  for (const [id, current, extra] of [
+    ["unrelated", { text: "晚饭吃饺子" }],
+    ["question", { text: "数据库索引 查询性能怎么处理？" }],
+    ["direct-question", { text: "数据库索引 查询性能" }, { direct: true }],
+    ["foreign-quote", { text: "数据库索引 查询性能", replyContexts: [{ isBot: true, messageId: "unrelated-bot-reply" }] }],
+    ["other-recipient", { text: "数据库索引 查询性能", addressedTo: "other" }]
+  ]) {
+    assert.equal(observe(id, current, extra).contextUpdated, false, id);
+    assert.equal(signal.aborted, false, id);
+  }
+  const related = { text: "补充：只在夜间出现", replyContexts: [{ messageId: "owned-question" }] };
+  const refreshed = observe("related", related);
+  assert.equal(refreshed.absorbed, false, "相关的另一个人仍拥有自己的消息");
+  assert.equal(refreshed.contextUpdated, true);
+  assert.equal(signal.aborted, true);
+  assert.equal(observe("related", related).contextUpdated, false, "重复相关事件不能耗尽刷新预算");
+  assert.equal(captured.contextRevision, 1);
+  assert.deepEqual(captured.messageIds, ["owned-question"]);
+  assert.equal(captured.currentMessages.length, 1);
+  release.resolve();
+  assert.equal((await first).regenerationCount, 1);
+  assert.equal(coordinator.isCovered(["related"], "a"), false, "上下文刷新不得认领他人的问题");
+  assert.equal((await coordinator.enqueue(input("a", "related", { senderId: "other-human" }))).sent, true);
+  await drained(coordinator);
+});
+
+await test("related-statement-refreshes-without-absorbing-other-sender", async () => {
+  const coordinator = new ReplyCoordinator({ config });
+  const entered = deferred(), release = deferred();
+  let runs = 0;
+  const first = coordinator.enqueue(input("a", "source", {
+    current: { text: "数据库索引 查询延迟", messageIds: ["source"] },
+    execute: async () => { if (++runs === 1) { entered.resolve(); await release.promise; } return { sent: true }; }
+  }));
+  await entered.promise;
+  assert.deepEqual(coordinator.observeMessage(input("a", "related-statement", {
+    senderId: "second", direct: false, current: { text: "数据库索引 查询延迟只在夜间上升" }
+  })).contextUpdated, true);
+  release.resolve();
+  await first;
+  assert.equal(runs, 2);
+  assert.equal(coordinator.isCovered(["related-statement"], "a"), false);
+  await drained(coordinator);
+});
+
+await test("interleaved-fragments-preserve-each-human-turn", async () => {
+  const coordinator = new ReplyCoordinator({ config });
+  const entered = deferred(), release = deferred();
+  let jobA, runs = 0;
+  const a = coordinator.enqueue(input("a", "a-start", {
+    current: { text: "我跟你讲", messageIds: ["a-start"] },
+    execute: async ({ job }) => { jobA = job; if (++runs === 1) { entered.resolve(); await release.promise; } return { sent: true }; }
+  }));
+  await entered.promise;
+  const b = coordinator.enqueue(input("a", "b-question", { senderId: "second-human" }));
+  assert.equal(coordinator.observeMessage(input("a", "a-finish", {
+    current: { text: "这个测试需要离线验证", messageIds: ["a-finish"] }
+  })).absorbed, true, "插话不应截断原说话人的未完片段");
+  assert.deepEqual(jobA.messageIds, ["a-start", "a-finish"]);
+  assert.equal(coordinator.snapshot().pending, 1);
+  coordinator.observeMessage(input("a", "side-chat", { senderId: "second-human", direct: false }));
+  assert.equal(coordinator.observeMessage(input("a", "a-independent", {
+    current: { text: "换一个独立问题", messageIds: ["a-independent"] }
+  })).absorbed, false, "插话后的完整新问题不得吞回旧轮次");
+  const next = coordinator.enqueue(input("a", "a-independent"));
+  release.resolve();
+  await Promise.all([a, b, next]);
+  assert.equal(coordinator.snapshot().sent, 3);
+  await drained(coordinator);
+});
+
+await test("same-human-topic-recipient-quote-end-and-command-boundaries", async () => {
+  for (const [name, before, after] of [
+    ["topic", { topicId: "one" }, { topicId: "two" }],
+    ["recipient", {}, { addressedTo: "other" }],
+    ["quote", {}, { replyContexts: [{ isBot: true, messageId: "different-turn" }] }],
+    ["explicit-end", { topicEnded: true }, {}],
+    ["spoken-end", { text: "就这些。" }, {}],
+    ["command", {}, { text: "/status" }]
+  ]) {
+    const coordinator = new ReplyCoordinator({ config });
+    const first = coordinator.enqueue(input("a", `before-${name}`, { current: { text: "我想说", ...before } }));
+    const observed = coordinator.observeMessage(input("a", `after-${name}`, { current: { text: "另一个问题", ...after } }));
+    assert.equal(observed.absorbed, false, name);
+    assert.equal(observed.contextUpdated, false, name);
+    const next = coordinator.enqueue(input("a", `after-${name}`, { current: { text: "另一个问题", ...after } }));
+    assert.equal(coordinator.snapshot().pending, 2, name);
+    assert.equal((await first).sent, true);
+    assert.equal((await next).sent, true);
+    await drained(coordinator);
+  }
+});
+
+await test("hard-live-expiry-and-old-event-do-not-refresh-or-merge", async () => {
+  for (const oldJob of [true, false]) {
+    const coordinator = new ReplyCoordinator({ config });
+    const entered = deferred(), release = deferred();
+    let job, signal;
+    const first = coordinator.enqueue(input("a", "expiring", {
+      current: { text: "数据库索引 查询延迟", messageIds: ["expiring"] },
+      execute: async (args) => { ({ job, signal } = args); entered.resolve(); await release.promise; return { sent: true }; }
+    }));
+    await entered.promise;
+    if (oldJob) { job.createdAt -= 20_001; job.updatedAt = Date.now(); }
+    const current = { text: "数据库索引 查询延迟", replyContexts: [{ messageId: "expiring" }],
+      ...(oldJob ? {} : { sentAtMs: Date.now() - 20_001 }) };
+    assert.equal(coordinator.observeMessage(input("a", "late-other", { senderId: "other", direct: false, current })).contextUpdated, false);
+    assert.equal(coordinator.observeMessage(input("a", "late-same", { current })).absorbed, false);
+    assert.equal(signal.aborted, false);
+    release.resolve(); await first; await drained(coordinator);
+  }
+});
+
+await test("duplicate-observe-enqueue-and-partial-covered-batch", async () => {
+  const coordinator = new ReplyCoordinator({ config });
+  const entered = deferred(), release = deferred();
+  let signal, job;
+  const first = coordinator.enqueue(input("a", "dedup", {
+    execute: async (args) => { ({ signal, job } = args); entered.resolve(); await release.promise; return { sent: true }; }
+  }));
+  await entered.promise;
+  assert.equal(coordinator.observeMessage(input("a", "dedup")).duplicate, true);
+  assert.equal((await coordinator.enqueue(input("a", "dedup"))).duplicate, true);
+  assert.equal(signal.aborted, false);
+  assert.equal(job.contextRevision, 0);
+  release.resolve(); await first; await drained(coordinator);
+  const batch = coordinator.enqueue(input("a", "fresh", {
+    messageIds: ["dedup", "fresh"],
+    current: undefined,
+    currentMessages: [{ text: "already handled", messageIds: ["dedup"] }, { text: "fresh question", messageIds: ["fresh"] }],
+    execute: async ({ job: batchJob }) => {
+      assert.deepEqual(batchJob.messageIds, ["fresh"]);
+      assert.deepEqual(batchJob.currentMessages.map((item) => item.text), ["fresh question"]);
+      return { sent: true };
+    }
+  }));
+  assert.equal((await batch).sent, true, "旧覆盖不能丢弃混合批次中的新问题");
+  assert.equal((await coordinator.enqueue(input("a", "fresh"))).reason, "covered");
+  for (const key of coordinator.covered.keys()) coordinator.covered.set(key, Date.now() - 1);
+  assert.equal(coordinator.isCovered(["fresh"], "a"), false);
+  assert.equal((await coordinator.enqueue(input("a", "fresh"))).sent, true);
+  await drained(coordinator);
+});
+
+await test("quiet-cancel-is-logical-identity-times-conversation-scoped", async () => {
+  const coordinator = new ReplyCoordinator({ config });
+  const entered = deferred(), release = deferred();
+  let signal;
+  const active = coordinator.enqueue(input("a", "quiet-active", {
+    execute: async (args) => { signal = args.signal; entered.resolve(); await release.promise; return { sent: true }; }
+  }));
+  await entered.promise;
+  const pending = coordinator.enqueue(input("a", "quiet-pending", { senderId: "other-human" }));
+  const otherGroup = coordinator.enqueue(input("a", "other-group", { conversationId: "group:other" }));
+  const peer = coordinator.enqueue(input("b", "peer-question"));
+  assert.deepEqual(coordinator.invalidateConversation("group:shared", "quiet", "a"), { active: 1, pending: 1, dropped: 2 });
+  assert.equal(signal.aborted, true);
+  for (const outcome of await Promise.all([active, pending])) assert.equal(outcome.reason, "quiet");
+  assert.deepEqual(coordinator.invalidateConversation("group:shared", "quiet", "a"), { active: 0, pending: 0, dropped: 0 });
+  assert.equal((await otherGroup).sent, true);
+  assert.equal((await peer).sent, true);
+  release.resolve(); await drained(coordinator);
+  assert.equal(coordinator.snapshot().sent, 2, "被取消执行器迟到的 sent 不能算成已发送");
+  assert.equal(coordinator.covered.size, 2);
+});
+
+await test("wire-started-duplicate-and-uncertain-ack-never-replay", async () => {
+  const coordinator = new ReplyCoordinator({ config });
+  const entered = deferred(), ack = deferred();
+  let attempts = 0, stopped = 0;
+  const first = coordinator.enqueue(input("a", "on-wire", {
+    execute: async ({ job }) => {
+      attempts += 1; job.deliveryStarted = true; job.expressionSending = true;
+      job.stopRemaining = () => { stopped += 1; };
+      entered.resolve(); await ack.promise; return { retry: true };
+    }
+  }));
+  await entered.promise;
+  assert.equal(coordinator.observeMessage(input("a", "on-wire")).duplicate, true);
+  assert.equal((await coordinator.enqueue(input("a", "on-wire"))).duplicate, true);
+  assert.equal(stopped, 0, "重复接收不是新的插话");
+  assert.equal(coordinator.invalidateConversation("group:shared", "cancel", "a").active, 0);
+  ack.resolve();
+  assert.equal((await first).deliveryUnconfirmed, true);
+  await drained(coordinator);
+  assert.equal((await coordinator.enqueue(input("a", "on-wire"))).reason, "covered");
+  assert.equal(attempts, 1);
+  assert.equal(coordinator.snapshot().regenerated, 0);
+});
+
+await test("inflight-dedup-shares-logical-owner-not-physical-carrier", async () => {
+  const coordinator = new ReplyCoordinator({ config, ownerForAccount: () => "group:failover" });
+  const entered = deferred(), release = deferred();
+  let signal, attempts = 0;
+  const first = coordinator.enqueue(input("primary", "same-event", {
+    execute: async (args) => { attempts += 1; signal = args.signal; entered.resolve(); await release.promise; return { sent: true }; }
+  }));
+  await entered.promise;
+  assert.equal(coordinator.observeMessage(input("standby", "same-event")).duplicate, true);
+  assert.equal((await coordinator.enqueue(input("standby", "same-event"))).duplicate, true);
+  assert.equal(signal.aborted, false);
+  release.resolve(); await first; await drained(coordinator);
+  assert.equal(attempts, 1);
+  assert.equal(coordinator.isCovered(["same-event"], "standby", { conversationId: "group:shared" }), true);
+});
+
+await test("stale-direct-input-does-not-preempt-proactive-turn", async () => {
+  const coordinator = new ReplyCoordinator({ config });
+  const entered = deferred(), release = deferred();
+  let signal;
+  const first = coordinator.enqueue(input("a", "proactive-current", {
+    mode: "proactive", direct: false,
+    execute: async (args) => { signal = args.signal; entered.resolve(); await release.promise; return { sent: true }; }
+  }));
+  await entered.promise;
+  const stale = input("a", "stale-direct", { current: { text: "过期输入", sentAtMs: Date.now() - 30_000 } });
+  assert.equal(coordinator.observeMessage(stale).contextUpdated, false);
+  const next = coordinator.enqueue(stale);
+  assert.equal(signal.aborted, false);
+  release.resolve(); await first; await next; await drained(coordinator);
+});
+
+await test("queued-mixed-batch-rechecks-coverage-after-prior-ack", async () => {
+  for (const uncertain of [false, true]) {
+    const coordinator = new ReplyCoordinator({ config });
+    const entered = deferred(), release = deferred();
+    const first = coordinator.enqueue(input("a", "already-on-wire", {
+      execute: async ({ job }) => {
+        job.deliveryStarted = true; entered.resolve(); await release.promise;
+        return uncertain ? { retry: true } : { sent: true };
+      }
+    }));
+    await entered.promise;
+    let executions = 0;
+    const next = coordinator.enqueue(input("a", "still-new", {
+      current: undefined, messageIds: ["already-on-wire", "still-new"],
+      currentMessages: [{ text: "old", messageIds: ["already-on-wire"] }, { text: "new", messageIds: ["still-new"] }],
+      execute: async ({ job }) => {
+        executions += 1;
+        assert.deepEqual(job.messageIds, ["still-new"]);
+        assert.deepEqual(job.currentMessages.map((item) => item.text), ["new"]);
+        return { sent: true };
+      }
+    }));
+    release.resolve(); await first;
+    assert.equal((await next).sent, true);
+    assert.equal(executions, 1);
+    await drained(coordinator);
+  }
+});
+
+await test("other-recipient-cannot-preempt-proactive-or-expression", async () => {
+  for (const onWire of [false, true]) {
+    const coordinator = new ReplyCoordinator({ config });
+    const entered = deferred(), release = deferred();
+    let signal, stopped = 0;
+    const first = coordinator.enqueue(input("a", "current-turn", {
+      mode: "proactive", direct: false,
+      execute: async (args) => {
+        signal = args.signal;
+        args.job.deliveryStarted = onWire; args.job.expressionSending = onWire;
+        args.job.stopRemaining = () => { stopped += 1; };
+        entered.resolve(); await release.promise; return { sent: true };
+      }
+    }));
+    await entered.promise;
+    const other = input("a", "another-recipient", { current: { text: "小王你看这个", addressedTo: "other" } });
+    assert.equal(coordinator.observeMessage(other).contextUpdated, false);
+    const pending = coordinator.enqueue(other);
+    assert.equal(signal.aborted, false);
+    assert.equal(stopped, 0);
+    release.resolve(); await first; await pending; await drained(coordinator);
+  }
+});
+
 console.log(JSON.stringify({ ok: true, tests: passed.length, passed }));

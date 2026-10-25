@@ -41,6 +41,10 @@ const fake = path.join(home, 'fake-hermes.cjs');
 fs.writeFileSync(fake, `#!${process.execPath}\nprocess.stdout.write(process.argv.includes('--image')?JSON.stringify({note:'开心讨论',tags:['开心'],sticker:true,safeToReuse:true,confidence:0.95,usage:'开心讨论时表达赞同和祝贺',avoid:['认真求助']}):'synthetic direct reply');\n`, { mode: 0o700 });
 config.ai = { ...config.ai, command: fake, args: ['-z'], textTransport: 'hermes', provider: 'custom', model: 'synthetic-model', timeoutMs: 5000 };
 let fakeRequests = 0;
+// In-memory 2.1 scenarios cannot leave filesystem flags behind for later cases.
+// Keep the exact host snapshot as evidence, not a separately fabricated fixture.
+let scenario21 = null;
+const modelCalls21 = [];
 const model = http.createServer(async (req,res) => {
   let raw=''; for await(const chunk of req) raw+=chunk;
   const payload=JSON.parse(raw); assert.equal(payload.tools,undefined); assert.equal(payload.tool_choice,undefined);
@@ -80,6 +84,26 @@ const model = http.createServer(async (req,res) => {
     if(privateContext) { assert(!prompt.includes('cross-source-do-not-copy')); decision={action:'reply',messages:['fresh private followup']}; }
     else decision={action:'tool',tool:{name:'schedule_followup',args:{delayMs:1100,userId:'30001'}}};
   }
+  if (scenario21) {
+    const { snapshot, tools } = JSON.parse(payload.messages.at(-1).content.split('\n').at(-1));
+    const reflection = snapshot.instruction?.includes('当前问题已完成回复') === true;
+    // Reflection is never allowed to reuse an interest/action or read attempt.
+    decision = { action: 'observe' };
+    if (!reflection) {
+      const source = snapshot.messages.find(item => item.messageId === String(scenario21.messageId));
+      assert(source, `2.1 ${scenario21.kind} must read its actual current event`);
+      if (scenario21.kind === 'interest') decision.interest = { kind: 'member', sourceSeq: source.seq, ttlMs: 30000 };
+      if (scenario21.kind === 'mention') {
+        const candidate = snapshot.mentionCandidates?.[0];
+        assert(candidate, 'enabled mentions expose a host-issued candidate');
+        decision = { action: 'reply', expressionPlan: { version: 1, action: 'reply', replyToMessageId: null,
+          messages: [{ type: 'mention', mentionId: candidate.id, content: 'synthetic current member mention' }] } };
+      }
+      if (scenario21.kind === 'forged-forward') decision = { action: 'tool',
+        tool: { name: 'get_forward_msg', args: { id: 'model-forged-forward' } } };
+    }
+    modelCalls21.push({ kind: scenario21.kind, reflection, snapshot, tools, decision: structuredClone(decision) });
+  }
   await pause(fs.existsSync(path.join(home,'slow'))?1800:0);
   res.setHeader('content-type','application/json'); res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(decision)},finish_reason:'stop'}]}));
 });
@@ -107,7 +131,7 @@ const req=new EventEmitter();req.destroy=()=>req.emit('close');req.end=()=>setIm
 `);
 let child, socket, tail = '', token;
 const calls = () => fs.existsSync(path.join(home,'calls')) ? fs.readFileSync(path.join(home,'calls'),'utf8').trim().split('\n').length : 0;
-const sends = [], reactions = [];
+const sends = [], reactions = [], onebotRequests = [];
 async function request(url, { method = 'GET', body, auth = true, origin = base } = {}) {
   const response = await fetch(base + url, { method, headers: { ...(auth && token ? { 'x-hermes-qq-admin': token } : {}),
     ...(method !== 'GET' ? { origin, 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
@@ -123,12 +147,15 @@ async function start() {
   token = (await request('/api/admin/session')).body.token;
   socket = new WebSocket(`ws://127.0.0.1:${onebot}/onebot`);
   socket.on('message', raw => { const item = JSON.parse(raw); if (!item.action) return;
+    onebotRequests.push(item);
     if (item.action.startsWith('send_')) sends.push(item);
     if (item.action==='set_group_reaction') reactions.push(item);
     const data = item.action === 'get_login_info' ? { user_id: 10001, nickname: 'Test' }
       : item.action === 'get_group_member_list' ? [{ user_id: 10001 }, { user_id: 30001 }]
         : item.action === 'get_friend_list' ? [{user_id:30001}]
         : item.action === 'fetch_custom_face_detail' ? [{emoji_id:'fixture-sticker',url:'https://cdn.synthetic-stickers.net/image.png',desc:'synthetic collection'}]
+        : item.action === 'get_forward_msg' ? { messages: [{ time: Math.floor(fixtureNow()/1000),
+          content: [{ type: 'text', data: { text: 'synthetic forwarded text only' } }] }] }
         : item.action.startsWith('send_') ? { message_id: 90000+sends.length } : { online: true, good: true };
     socket.send(JSON.stringify({ status: 'ok', retcode: 0, echo: item.echo, data }));
   });
@@ -136,7 +163,7 @@ async function start() {
   socket.send(JSON.stringify({ post_type:'meta_event',meta_event_type:'lifecycle',sub_type:'connect',self_id:10001 }));
   await pause(150);
 }
-function message(id, text='ordinary synthetic chat', group=20001) { socket.send(JSON.stringify({ post_type:'message', message_type:group?'group':'private', self_id:10001, ...(group?{group_id:group}:{}), user_id:30001, message_id:id, time:Math.floor(fixtureNow()/1000), message:text, raw_message:text, sender:{nickname:'Human'} })); }
+function message(id, text='ordinary synthetic chat', group=20001, segments=text) { socket.send(JSON.stringify({ post_type:'message', message_type:group?'group':'private', self_id:10001, ...(group?{group_id:group}:{}), user_id:30001, message_id:id, time:Math.floor(fixtureNow()/1000), message:segments, raw_message:text, sender:{nickname:'Human'} })); }
 async function stop() { socket?.close(); child?.kill('SIGTERM'); if(child?.exitCode===null) await Promise.race([new Promise(resolve=>child.once('exit',resolve)),pause(3000)]); }
 const accountUrl = '/api/social-agent/accounts/primary';
 async function policy(patch) { for(let attempt=0;attempt<8;attempt++) { const previous = await request(accountUrl); const r = await request(accountUrl,{method:'PATCH',body:{expectedRevision:previous.body.revision,policy:{...previous.body.policy,...patch}}}); if(r.status===409){await pause(100);continue;} assert.equal(r.status,200,JSON.stringify(r.body)); return r; } throw new Error('fixture policy CAS never quiesced'); }
@@ -369,6 +396,141 @@ try {
   const view=(await request(libraryUrl+'?conversation_id=group:20002')).body;
   assert.equal(view.reactions.capability,'supported');
   await policy({enabled:false}); fs.unlinkSync(path.join(home,'reaction'));
+  // 2.1: drive the actual bridge model/API/event paths, not module-only seams.
+  for (const flag of ['wait','burst','sticker','learned-sticker','reaction','persona','pages','cross','slow'])
+    assert(!fs.existsSync(path.join(home,flag)), `prior ${flag} flag must not leak into 2.1`);
+  const defaults21 = (await request('/api/accounts')).body.items.find(row=>row.id==='primary').socialExperience;
+  for (const feature of ['interestWatch','mentions','pokes','forwardRead'])
+    assert.equal(defaults21[feature].enabled,false, `${feature} remains opt-in after 2.0 policies`);
+  const libraryView21 = async () => {
+    const r = await request(libraryUrl+'?conversation_id=group:20002');
+    assert.equal(r.status,200,JSON.stringify(r.body)); return r.body;
+  };
+  const writes21 = () => onebotRequests.filter(item => item.action.startsWith('send_')
+    || ['set_group_reaction','group_poke'].includes(item.action));
+  const forwards21 = () => onebotRequests.filter(item=>item.action==='get_forward_msg');
+  const currentCall21 = kind => modelCalls21.find(item=>item.kind===kind&&!item.reflection);
+  async function settled21(kind) {
+    await until(()=>Boolean(currentCall21(kind)), `2.1 ${kind} model snapshot`);
+    await until(async()=> {
+      const state=(await request(accountUrl)).body.state.conversations.find(row=>row.conversationId==='group:20002');
+      return state?.unread===0 && state.status==='idle';
+    }, `2.1 ${kind} durable terminal ACK`,15000);
+  }
+  // With all new switches still off, even an original forward segment grants
+  // no read. The planner observes, so this also proves absent native offers.
+  const beforeDefaultWrites=writes21().length, beforeDefaultReads=forwards21().length;
+  scenario21={kind:'default-off',messageId:1300};
+  await policy({enabled:true,conversationIds:['group:20002'],turnTimeoutMs:8000});
+  message(1300,'synthetic default-off context',20002,[
+    {type:'text',data:{text:'synthetic default-off context'}},{type:'forward',data:{id:'disabled-original-forward'}}]);
+  await settled21('default-off');
+  assert.deepEqual(currentCall21('default-off').snapshot.mentionCandidates,[]);
+  assert.deepEqual(currentCall21('default-off').snapshot.pokeCandidates,[]);
+  assert.equal(currentCall21('default-off').snapshot.interestWatch,undefined);
+  assert.equal(forwards21().length,beforeDefaultReads,'default-off original forward is not read');
+  assert.equal(writes21().length,beforeDefaultWrites,'default-off observation writes no OneBot action');
+  await policy({enabled:false}); scenario21=null;
+
+  await expressionPolicy({interestWatch:{enabled:true,maxDurationMs:300000,maxActive:4}});
+  scenario21={kind:'interest',messageId:1301};
+  await policy({enabled:true});
+  const beforeInterestWrites=writes21().length;
+  message(1301,'synthetic member attention',20002);
+  await settled21('interest');
+  const interestCall=currentCall21('interest');
+  const interestSource=interestCall.snapshot.messages.find(item=>item.messageId==='1301');
+  assert.equal(interestSource.userId,'30001');
+  assert.equal(interestCall.decision.action,'observe');
+  assert.deepEqual(interestCall.decision.interest,{kind:'member',sourceSeq:interestSource.seq,ttlMs:30000});
+  const interestView=(await libraryView21()).interest;
+  assert.equal(interestView.ephemeral,true); assert.equal(interestView.restartReplay,false);
+  assert.equal(interestView.items.length,1,'observe publishes its current-source interest to the library API');
+  const watch=interestView.items[0];
+  assert.equal(watch.kind,'member'); assert.equal(watch.expiresAt-watch.createdAt,30000);
+  const interestUrl=accountUrl+'/interest-watch';
+  const interestGet=await request(interestUrl+'?conversation_id=group:20002');
+  assert.equal(interestGet.status,200); assert.deepEqual(interestGet.body.items,interestView.items);
+  const cancelWatch={conversationId:'group:20002',id:watch.id,expectedRevision:interestGet.body.revision};
+  const callsBeforeCancel=calls();
+  assert.equal((await request(interestUrl,{method:'POST',body:{...cancelWatch,expectedRevision:'stale'}})).status,409);
+  assert.deepEqual((await libraryView21()).interest.items,[watch],'stale cancellation preserves the watch');
+  assert.equal((await request(interestUrl,{method:'POST',body:cancelWatch,auth:false})).status,403);
+  assert.deepEqual((await libraryView21()).interest.items,[watch],'unauthenticated cancellation preserves the watch');
+  const cancelled=await request(interestUrl,{method:'POST',body:cancelWatch});
+  assert.equal(cancelled.status,200,JSON.stringify(cancelled.body)); assert.equal(cancelled.body.cancelled,1);
+  assert.deepEqual((await libraryView21()).interest.items,[]);
+  assert.deepEqual((await request(interestUrl+'?conversation_id=group:20002')).body.items,[]);
+  assert.equal(calls(),callsBeforeCancel,'interest management calls no model');
+  assert.equal(writes21().length,beforeInterestWrites,'interest observation/cancellation never sends QQ');
+  await policy({enabled:false}); scenario21=null;
+
+  // Enable pokes too: lack of proven host capability, not merely its switch,
+  // must withhold every poke handle. Mentions bind only the current speaker.
+  await expressionPolicy({interestWatch:{enabled:false},mentions:{enabled:true},pokes:{enabled:true}});
+  scenario21={kind:'mention',messageId:1302};
+  await policy({enabled:true});
+  const beforeMention=writes21().length;
+  message(1302,'synthetic friendly member greeting',20002);
+  await settled21('mention');
+  const mentionCall=currentCall21('mention');
+  assert.equal(mentionCall.decision.expressionPlan.messages[0].mentionId,mentionCall.snapshot.mentionCandidates[0].id);
+  assert.deepEqual(mentionCall.snapshot.pokeCandidates,[]);
+  const mentionWrites=writes21().slice(beforeMention);
+  assert.equal(mentionWrites.length,1,'one host-issued mention yields exactly one physical write');
+  assert.equal(mentionWrites[0].action,'send_group_msg');
+  assert.equal(String(mentionWrites[0].params.group_id),'20002');
+  assert.deepEqual(mentionWrites[0].params.message,[{type:'at',data:{qq:'30001'}},
+    {type:'text',data:{text:' synthetic current member mention'}}]);
+  await policy({enabled:false}); scenario21=null;
+  scenario21={kind:'unknown-poke',messageId:1303};
+  await policy({enabled:true});
+  const beforeUnknownPoke=writes21().length;
+  message(1303,'synthetic lighthearted discussion',20002);
+  await settled21('unknown-poke');
+  assert.deepEqual(currentCall21('unknown-poke').snapshot.pokeCandidates,[]);
+  assert.equal((await libraryView21()).native.capabilities.poke,'unknown');
+  assert.equal(onebotRequests.filter(item=>item.action==='group_poke').length,0,'never probe unknown poke with a write');
+  assert.equal(writes21().length,beforeUnknownPoke,'no poke offer means no native/text fallback write');
+  await policy({enabled:false}); scenario21=null;
+
+  await expressionPolicy({mentions:{enabled:false},pokes:{enabled:false},forwardRead:{enabled:true}});
+  scenario21={kind:'forward',messageId:1304};
+  await policy({enabled:true});
+  const beforeForward=forwards21().length, beforeForwardWrites=writes21().length;
+  message(1304,'synthetic current original forward',20002,[
+    {type:'text',data:{text:'synthetic current original forward'}},{type:'forward',data:{id:'current-original-forward'}}]);
+  await settled21('forward');
+  assert.deepEqual(forwards21().slice(beforeForward).map(item=>item.params),[{id:'current-original-forward'}]);
+  const forwardCall=currentCall21('forward');
+  const forwarded=forwardCall.snapshot.recentContext.find(item=>item.text.includes('synthetic current original forward'))?.forwardedContext;
+  assert(forwarded,'actual model recentContext includes current-event forwardedContext');
+  assert.equal(forwarded.ok,true); assert.equal(forwarded.status,'read-confirmed');
+  assert.equal(forwarded.items.length,1); assert.equal(forwarded.items[0].quoted,true);
+  assert.equal(forwarded.items[0].text,'synthetic forwarded text only');
+  assert(!forwardCall.snapshot.messages.some(item=>item.text.includes('synthetic forwarded text only')),
+    'quoted forward is not promoted to an original speaker message');
+  assert.equal((await libraryView21()).forwards.capability,'read-confirmed');
+  assert.equal(writes21().length,beforeForwardWrites,'forward reading is not a send');
+  await policy({enabled:false}); scenario21=null;
+
+  // An arbitrary model ID/tool name cannot enter this host-only read adapter.
+  scenario21={kind:'forged-forward',messageId:1305};
+  await policy({enabled:true});
+  const beforeForgedCalls=calls(), beforeForgedReads=forwards21().length, beforeForgedWrites=writes21().length;
+  const usageCalls=body=>Object.values(body.state.usage.days||{}).reduce((sum,day)=>sum+(day.actualCalls||0),0);
+  const priorUsage=usageCalls((await request(accountUrl)).body);
+  message(1305,'synthetic model-only forward reference',20002);
+  await until(()=>Boolean(currentCall21('forged-forward')),'forged forward model attempt');
+  await until(async()=>usageCalls((await request(accountUrl)).body)>priorUsage,'invalid tool model call durably accounted');
+  assert(!currentCall21('forged-forward').tools.some(tool=>tool.name==='get_forward_msg'),
+    'host forward reader is never a model tool');
+  await pause(500);
+  await policy({enabled:false}); scenario21=null;
+  assert.equal(calls(),beforeForgedCalls+1,'invalid forward tool is not retried');
+  assert.equal(forwards21().length,beforeForgedReads,'model-forged ID opens no OneBot read');
+  assert.equal(writes21().length,beforeForgedWrites,'invalid forward tool has no external write');
+  console.log('PASS Social Experience 2.1 bridge: default-off; actual snapshot-seq interest observe/GET/cancel/auth403/stale409; host mention -> at 30001/group 20002; unknown poke -> no offer/write; original forward -> quoted recentContext; forged model forward -> no read/write/retry');
   console.log('PASS group expression bridge: direct group media -> bounded background learning -> cached auto eligibility -> shared image ACK; host-bound reaction -> acceptance only; no external calls or real QQ');
   console.log('PASS expression library bridge: auth/scope/CAS/intake/review/budget/fake-Vision/host-plan/image-wire/ACK; no external network or QQ');
   console.log('PASS social bridge integration: auth/CAS/default-off/restricted-model/confirmed-send/durable-ACK/dedup/habit-revoke/self-consent-revoke/at-replan-terminal/startup-pause/config-race');

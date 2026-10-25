@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createMessageReactions } from "../src/message-reactions.js";
+import { createMessageReactions, QQ_REACTION_LABELS } from "../src/message-reactions.js";
 import { validateReplyPlan, parseReplyPlan, replyPlanPrompt } from "../src/reply-plan.js";
 import { executeReplyPlan } from "../src/expression-renderer.js";
 import { accountDeliveryDecision } from "../src/account-delivery.js";
@@ -253,5 +253,32 @@ await test("account delivery applies reaction write guard, not send prefix", () 
   assert.equal(decision(), false); assert.equal(decision(undefined, undefined, { activeGroupAccountId: "a" }), true);
   config.accounts.failoverGroups = [];
   config.socialExperience.reactions.enabled = false; assert.equal(decision(), false);
+});
+await test("official semantic mapping offers only configured known IDs; not capability proof", async () => {
+  assert.equal(Object.keys(QQ_REACTION_LABELS).length, 10); assert.ok(Object.isFrozen(QQ_REACTION_LABELS));
+  for (const [emoji, label] of Object.entries(QQ_REACTION_LABELS)) {
+    const h = host({ ...policy(), reactions: { ...policy().reactions, emojiIds: [emoji] } });
+    const row = h.offer()[0]; assert.equal(row.label, label); assert.equal(h.status().capability, "unknown");
+    await h.send(row.id); assert.equal(h.calls[0].params.code, emoji);
+  }
+  const h = host({ ...policy(), reactions: { ...policy().reactions, emojiIds: ["14", "99", "124"] } });
+  assert.equal(h.offer().length, 3);
+});
+await test("delivery rejects configured but unverified emoji mapping", () => {
+  const account = { id: "a", enabled: true, protocolEnabled: true, qq: "777", scope: { groups: true }, sendTypes: { text: true } };
+  const config = { socialExperience: { ...policy(), reactions: { ...policy().reactions, emojiIds: ["999"] } },
+    accounts: { version: 2, items: [account], failoverGroups: [] } };
+  assert.equal(accountDeliveryDecision(config, "a", "set_group_reaction", { group_id: "123", message_id: "12", code: "999", is_set: true }).allowed, false);
+  config.socialExperience.reactions.emojiIds = ["99"];
+  assert.equal(accountDeliveryDecision(config, "a", "set_group_reaction", { group_id: "123", message_id: "12", code: "99", is_set: true }).allowed, true);
+});
+await test("direct optional reaction failure cannot swallow required answer", async () => {
+  const calls = [];
+  const p = plan([reaction, { type: "text", content: "先回答实际问题" }]);
+  assert.equal(validateReplyPlan(p, { ...opts, direct: true }).messages[0].type, "text");
+  const result = await executeReplyPlan(p, { ...opts, direct: true, minIntervalMs: 0, maxIntervalMs: 0,
+    beforeEach: () => true, onReceipt: () => {}, sendText: async text => { calls.push(text); return { messageId: "13" }; },
+    sendReaction: async () => { calls.push("reaction"); return { status: "unsupported" }; } });
+  assert.deepEqual(calls, ["先回答实际问题", "reaction"]); assert.equal(result.sent, 1); assert.equal(result.accepted, 0);
 });
 console.log(`PASS message-reactions: ${checks} synthetic checks; no live state or QQ sends`);

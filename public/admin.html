@@ -1356,7 +1356,7 @@
       const configAdmin = method === "PATCH" && /^\/api\/config(?:[?]|$)/.test(path);
       const socialAdmin = /^\/api\/social-agent(?:[/?]|$)/.test(path);
       if (socialAdmin) opts = { ...opts, cache: "no-store" };
-      const sessionAdmin = accountAdmin || configAdmin || socialAdmin;
+      const sessionAdmin = accountAdmin || configAdmin || socialAdmin || ["/send", "/api/send_private"].includes(path);
       if (sessionAdmin) {
         const headers = new Headers(opts.headers || {});
         if (!headers.has("x-hermes-qq-admin")) headers.set("x-hermes-qq-admin", await ensureAdminSession());
@@ -5461,7 +5461,12 @@
         stickers: { enabled: false, autoSend: false, visionLearning: false, groupLearning: false, autonomousEligibility: false,
           maxDailyVisionCalls: 8, maxDailyDownloads: 16, cooldownMs: 60000, ...result.socialExperience?.stickers },
         reactions: { enabled: false, cooldownMs: 60000, maxDaily: 30, emojiIds: ["76"], ...result.socialExperience?.reactions },
-        language: { enabled: false, autoCandidates: true, ...result.socialExperience?.language }
+        language: { enabled: false, autoCandidates: true, implicitLearning: false, ...result.socialExperience?.language },
+        interestWatch: { enabled: false, maxDurationMs: 300000, maxActive: 4, ...result.socialExperience?.interestWatch },
+        style: { enabled: false, ...result.socialExperience?.style },
+        pokes: { enabled: false, cooldownMs: 300000, maxDaily: 5, ...result.socialExperience?.pokes },
+        mentions: { enabled: false, ...result.socialExperience?.mentions },
+        forwardRead: { enabled: false, ...result.socialExperience?.forwardRead }
       };
       return result;
     }
@@ -5602,7 +5607,7 @@
       control.disabled = disabled;
       control.addEventListener(type === "checkbox" || options ? "change" : "input", () => {
         let next = type === "checkbox" ? control.checked : type === "number" ? (control.value === "" ? null : Number(control.value)) : control.value;
-        if (["scope.groupIds", "socialExperience.conversationIds"].includes(path)) next = [...new Set(control.value.split(/[\s,，]+/).filter(Boolean))];
+        if (["scope.groupIds", "socialExperience.conversationIds", "socialExperience.reactions.emojiIds"].includes(path)) next = [...new Set(control.value.split(/[\s,，]+/).filter(Boolean))];
         change(path, next);
       });
       // Keep label association; aria-label above excludes select option text
@@ -5625,7 +5630,16 @@
           const result = await api("/api/social-agent/expression-status");
           if (result.ok !== true || !Array.isArray(result.recent)) throw new Error("invalid_response");
           // This cache is UI-only; never project runtime diagnostics into drafts.
-          state.value = { turns: result.turns, plans: result.plans, recent: result.recent };
+          const uint = n => Number.isSafeInteger(n) && n >= 0 ? n : null;
+          state.value = { turns: uint(result.turns), plans: uint(result.plans), recent: result.recent.slice(-40).filter(row => row
+            && typeof row.owner === "string" && /^(?:(?:account|group):)?[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(row.owner)
+            && ["turns", "plans", "watches", "decisions", "selections", "styles"].includes(row.kind)).map(row => {
+              const safe = { owner: row.owner, kind: row.kind, reason: experienceDiagnosticReason(row.reason) };
+              for (const key of ["at", "waitMs", "messageCount"]) safe[key] = uint(row[key]);
+              for (const key of ["partial", "uncertain", "shadow"]) safe[key] = typeof row[key] === "boolean" ? row[key] : null;
+              safe.confirmed = typeof row.confirmed === "boolean" ? row.confirmed : uint(row.confirmed);
+              return safe;
+            }) };
         } catch {
           state.value = null;
           state.error = "运行诊断加载失败或管理会话不可用；旧摘要已清空，请刷新重试。";
@@ -5641,6 +5655,12 @@
       const diagnostic = $("dynamicAccountEditor")?.querySelector("[data-experience-diagnostic]");
       if (diagnostic?.dataset?.accountId) diagnostic.textContent = registryExperienceDiagnostic(diagnostic.dataset.accountId);
     }
+    function experienceDiagnosticReason(value) {
+      // Runtime-owned fixed codes only. A regex alone could admit private text.
+      return ["empty", "command", "explicit-immediate", "max-turn", "other-recipient", "topic-ended", "incomplete", "addressed", "ordinary", "interrupted", "separated", "consecutive", "complete",
+        "interest-member", "interest-photo", "interest-topic", "interest-reply", "reply", "observe", "wait", "dive", "shadow", "concise", "balanced",
+        "AFFECT_MATCH", "USAGE_MATCH", "TOPIC_MATCH", "VISUAL_MATCH", "LITERAL_MATCH", "TOPIC_MISMATCH_PENALTY", "ACK_REPEAT_PENALTY"].includes(value) ? value : "未报告";
+    }
     function registryExperienceDiagnostic(id) {
       if (!id) return "最近运行 · 只读：请到接管组成员账号的社交表达标签查看共享身份摘要。";
       const state = registryState.experienceStatus;
@@ -5654,17 +5674,18 @@
       const scope = group ? "当前接管组共享身份" : "当前账号";
       const lines = [`全局累计（非当前账号计数）：turn ${number(data.turns)} · ReplyPlan ${number(data.plans)}`];
       if (!Array.isArray(data.recent)) return [...lines, `${scope}：最近记录未提供。`].join("\n");
-      const rows = data.recent.filter(row => row && owners.includes(row.owner) && ["turns", "plans"].includes(row.kind)).slice(-5).reverse();
+      const labels = { turns: "turn", plans: "ReplyPlan", watches: "关注唤醒", decisions: "社交决策", selections: "选图依据", styles: "表达建议" };
+      const rows = data.recent.filter(row => row && owners.includes(row.owner) && Object.hasOwn(labels, row.kind)).slice(-5).reverse();
       if (!rows.length) return [...lines, `${scope}暂无最近记录；有界窗口为空不代表从未执行。`].join("\n");
       lines.push(`${scope} · 最近 ${rows.length} 条（新到旧，仅状态，不含聊天内容）：`);
       for (const row of rows) {
         const date = typeof row.at === "number" && Number.isFinite(row.at) && row.at >= 0 ? new Date(row.at) : null;
         const time = date && !Number.isNaN(date.getTime()) ? date.toLocaleString("zh-CN", { hour12: false }) : "时间未知";
         const mode = row.shadow === true ? "观察" : row.shadow === false ? "实际" : "模式未报告";
-        const reason = typeof row.reason === "string" && /^[a-z0-9_-]{1,80}$/i.test(row.reason) ? row.reason : "未报告";
+        const reason = experienceDiagnosticReason(row.reason);
         const confirmed = typeof row.confirmed === "boolean" ? row.confirmed ? "是" : "否" : number(row.confirmed);
         const flag = value => value === true ? "是" : value === false ? "否" : "未知";
-        lines.push(`${time} · ${row.kind === "turns" ? "turn" : "ReplyPlan"} · ${mode} · 等待 ${number(row.waitMs)} ms · 消息 ${number(row.messageCount)} · 确认 ${confirmed} · 部分发送 ${flag(row.partial)} · 结果不确定 ${flag(row.uncertain)} · 原因 ${reason}`);
+        lines.push(`${time} · ${labels[row.kind]} · ${mode} · 等待 ${number(row.waitMs)} ms · 消息 ${number(row.messageCount)} · 确认 ${confirmed} · 部分发送 ${flag(row.partial)} · 结果不确定 ${flag(row.uncertain)} · 原因 ${reason}`);
       }
       return lines.join("\n");
     }
@@ -5701,7 +5722,7 @@
           sentCount: uint(row.annotation.sentCount), lastSentAt: uint(row.annotation.lastSentAt) } : null
       }));
       const language = { ok: typeof scope === "string" && scope.startsWith("group:") && result.language?.ok === true && Array.isArray(result.language.candidates) && uint(result.language.revision) !== null,
-        revision: uint(result.language?.revision), stats: null, candidates: [] };
+        revision: uint(result.language?.revision), stats: null, candidates: [], implicitCandidates: [], lifecycle: null, observed: null };
       if (language.ok) {
         if (result.language.stats && typeof result.language.stats === "object") {
           language.stats = {};
@@ -5712,6 +5733,21 @@
         language.candidates = (Array.isArray(result.language.candidates) ? result.language.candidates : []).slice(0, 200)
           .filter(row => row && typeof row.id === "string" && /^[A-Za-z0-9_.:@-]{1,160}$/.test(row.id))
           .map(row => ({ id: row.id, revision: uint(row.revision), status: ["pending", "confirmed", "rejected", "revoked"].includes(row.status) ? row.status : "unknown", term: text(row.term, 24), meaning: text(row.meaning, 120) }));
+        // Optional 2.1 lifecycle projection: retain fixed-state counts only,
+        // never implicit evidence, proposals, reviewer identity or source text.
+        const lifecycle = result.language.lifecycle;
+        if (lifecycle?.ok === true && Array.isArray(lifecycle.entries)) {
+          language.lifecycle = { Observed: 0, Candidate: 0, Verified: 0, Active: 0, Deprecated: 0, unknown: 0 };
+          for (const row of lifecycle.entries.slice(0, 200)) {
+            const key = row && Object.hasOwn(language.lifecycle, row.lifecycle) ? row.lifecycle : "unknown";
+            language.lifecycle[key]++;
+          }
+        }
+        language.implicitCandidates = (Array.isArray(lifecycle?.entries) ? lifecycle.entries : []).slice(0, 200).filter(row => row && typeof row.id === "string"
+          && /^[A-Za-z0-9_.:@-]{1,160}$/.test(row.id) && uint(row.revision) !== null
+          && ["Observed", "Candidate", "Verified", "Active", "Deprecated"].includes(row.lifecycle))
+          .map(row => ({ id: row.id, revision: row.revision, lifecycle: row.lifecycle, term: text(row.term, 24), meaning: text(row.meaning, 120) }));
+        language.observed = uint(result.language.observed);
       }
       const dailyVisionCalls = { reserved: uint(result.dailyVisionCalls?.reserved), attempted: uint(result.dailyVisionCalls?.attempted), limit: uint(result.dailyVisionCalls?.limit) };
       const learning = result.learning?.ok === true ? { queued: uint(result.learning.queued), active: uint(result.learning.active),
@@ -5722,7 +5758,18 @@
         daily: uint(result.reactions.daily), maxDaily: uint(result.reactions.maxDaily), accepted: uint(result.reactions.accepted), uncertain: uint(result.reactions.uncertain) } : null;
       const cache = typeof result.cache?.available === "boolean" ? { available: result.cache.available,
         bytes: uint(result.cache.bytes), maxBytes: uint(result.cache.maxBytes), entries: uint(result.cache.entries) } : null;
-      return { revision: result.revision, stickers, language, dailyVisionCalls, learning, reactions, cache,
+      const interest = scope.startsWith("group:") && result.interest?.ephemeral === true && result.interest.restartReplay === false && Array.isArray(result.interest.items)
+        ? { ephemeral: true, restartReplay: false, items: result.interest.items.slice(0, 4).filter(row => row
+          && typeof row.id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(row.id) && ["member", "photo", "topic", "reply"].includes(row.kind)
+          && uint(row.createdAt) !== null && uint(row.expiresAt) !== null && row.createdAt < row.expiresAt && row.expiresAt <= 8640000000000000)
+          .map(({ id, kind, createdAt, expiresAt }) => ({ id, kind, createdAt, expiresAt })) } : null;
+      const capability = value => ["unknown", "supported", "unsupported"].includes(value) ? value : "unknown";
+      const native = scope.startsWith("group:") && result.native?.ok === true ? {
+        capabilities: { poke: capability(result.native.capabilities?.poke), mention: capability(result.native.capabilities?.mention) },
+        daily: uint(result.native.daily), maxDaily: uint(result.native.maxDaily), cooldownRemainingMs: uint(result.native.cooldownRemainingMs) } : null;
+      const forwards = scope.startsWith("group:") && result.forwards?.readOnly === true ? {
+        readOnly: true, capability: ["unknown", "unsupported", "read-confirmed"].includes(result.forwards.capability) ? result.forwards.capability : "unknown" } : null;
+      return { revision: result.revision, stickers, language, dailyVisionCalls, learning, reactions, cache, interest, native, forwards,
         collection: ["unknown", "supported", "unsupported"].includes(result.capabilities?.collection) ? result.capabilities.collection : "unknown" };
     }
     async function loadExperienceLibrary(id, scope, verify = null) {
@@ -5749,16 +5796,19 @@
       if (scope) await loadExperienceLibrary(id, scope);
     }
     async function mutateExperienceLibrary(id, scope, action, item = null, status = "") {
-      if (!experienceLibraryScopes(id).includes(scope) || !["sync", "annotate", "review-sticker", "review-language"].includes(action)) return;
+      if (!experienceLibraryScopes(id).includes(scope) || !["sync", "annotate", "review-sticker", "review-language", "review-implicit"].includes(action)) return;
       if (action === "review-language" && !scope.startsWith("group:")) return;
       const state = experienceLibraryState(id, scope), data = state.data;
       if (!data || state.loading || state.busy || state.blocked) return;
-      const rows = action === "review-language" ? data.language.candidates : data.stickers;
+      const implicit = action === "review-implicit";
+      const rows = implicit ? data.language.implicitCandidates : action === "review-language" ? data.language.candidates : data.stickers;
       const current = item ? rows.find(row => row.id === item.id) : null;
-      const annotation = action === "review-language" ? current : current?.annotation;
+      const annotation = implicit || action === "review-language" ? current : current?.annotation;
       if (action !== "sync" && !current) return;
       if (action.startsWith("review-")) {
-        if (!Number.isSafeInteger(annotation?.revision) || annotation.revision < 1 || annotation.revision !== (action === "review-language" ? item?.revision : item?.annotation?.revision)) return;
+        if (!Number.isSafeInteger(annotation?.revision) || annotation.revision < 1 || annotation.revision !== (implicit || action === "review-language" ? item?.revision : item?.annotation?.revision)) return;
+        if (implicit && !(["reject", "deprecate"].includes(status) && annotation.lifecycle !== "Deprecated"
+          || status === "verify" && annotation.lifecycle === "Candidate" || status === "activate" && annotation.lifecycle === "Verified")) return;
         if (action === "review-sticker" && !["confirmed", "rejected"].includes(status)) return;
         if (action === "review-language" && !(annotation.status === "pending" && ["confirmed", "rejected"].includes(status) || annotation.status === "confirmed" && status === "revoked")) return;
       }
@@ -5772,7 +5822,7 @@
         if (!experienceLibraryScopes(id).includes(scope)) throw new Error("scope_changed");
         const body = { conversationId: scope, expectedStateRevision: data.revision };
         if (current) body.id = current.id;
-        if (action.startsWith("review-")) { body.expectedRevision = annotation.revision; body.status = status; }
+        if (action.startsWith("review-")) { body.expectedRevision = annotation.revision; if (implicit) body.action = status; else body.status = status; }
         state.attempts.add(key);
         const result = await api(`/api/social-agent/accounts/${encodeURIComponent(id)}/expression-library/${action}`, { method: "POST", body: JSON.stringify(body) });
         submitted = true;
@@ -5780,14 +5830,47 @@
         await loadExperienceLibrary(id, scope, latest => {
           if (latest.revision === data.revision) throw new Error("unconfirmed_revision");
           if (action === "sync") return;
-          const row = action === "review-language" ? latest.language.candidates.find(row => row.id === current.id) : latest.stickers.find(row => row.id === current.id)?.annotation;
+          const row = implicit ? latest.language.implicitCandidates.find(row => row.id === current.id)
+            : action === "review-language" ? latest.language.candidates.find(row => row.id === current.id) : latest.stickers.find(row => row.id === current.id)?.annotation;
           const before = annotation?.revision ?? 0;
-          if (!row || row.revision == null || row.revision <= before || row.status !== (action === "annotate" ? "candidate" : status)) throw new Error("unconfirmed_action");
+          const expected = implicit ? ({ verify: "Verified", activate: "Active", reject: "Deprecated", deprecate: "Deprecated" })[status] : action === "annotate" ? "candidate" : status;
+          if (!row || row.revision == null || row.revision <= before || (implicit ? row.lifecycle : row.status) !== expected) throw new Error("unconfirmed_action");
         });
         if (!state.error) state.notice = "操作已读回核实；未自动发送或新增收藏，配置草稿不变。";
       } catch (error) {
         state.blocked = true; state.data = null;
         state.error = error.status === 409 ? "修订冲突；未自动重试，请刷新核对最新状态。" : submitted ? "操作已提交但结果未核实；不会自动重试，请刷新核对。" : "操作失败或结果不确定；不会自动重试，请刷新核对。";
+      } finally { state.busy = false; renderExperienceLibrary(); }
+    }
+    async function cancelExperienceInterest(id, scope, item) {
+      if (!experienceLibraryScopes(id).includes(scope) || !/^interest_[a-f0-9-]{36}$/.test(item?.id || "")) return;
+      const state = experienceLibraryState(id, scope);
+      if (!state.data?.interest?.items.some(row => row.id === item.id) || state.loading || state.busy || state.blocked) return;
+      const key = `cancel:${item.id}`;
+      if (state.attempts.has(key)) return;
+      state.busy = true; state.error = ""; state.notice = ""; renderExperienceLibrary();
+      try {
+        await ensureAdminSession();
+        const url = `/api/social-agent/accounts/${encodeURIComponent(id)}/interest-watch`;
+        const query = `?conversation_id=${encodeURIComponent(scope)}`;
+        const current = await api(url + query);
+        if (!experienceLibraryScopes(id).includes(scope) || current.ok !== true || typeof current.revision !== "string"
+          || !Array.isArray(current.items)) throw new Error("invalid_readback");
+        if (current.items.some(row => row.id === item.id)) {
+          state.attempts.add(key);
+          const result = await api(url, { method: "POST", body: JSON.stringify({ conversationId: scope, id: item.id, expectedRevision: current.revision }) });
+          if (result.ok !== true) throw new Error("unconfirmed_cancel");
+        }
+        const latest = await api(url + query);
+        if (!experienceLibraryScopes(id).includes(scope) || latest.ok !== true || !Array.isArray(latest.items)
+          || latest.items.some(row => row.id === item.id)) throw new Error("unconfirmed_cancel");
+        await loadExperienceLibrary(id, scope, view => {
+          if (!view.interest || view.interest.items.some(row => row.id === item.id)) throw new Error("unconfirmed_cancel");
+        });
+        if (!state.error) state.notice = "关注已取消或到期，并已读回核实；没有发送 QQ 消息，配置草稿不变。";
+      } catch (error) {
+        state.blocked = true; state.data = null;
+        state.error = error.status === 409 ? "修订冲突；未重试，草稿保留，请刷新后核对。" : "取消结果未核实；不会自动重试，草稿保留，请刷新核对。";
       } finally { state.busy = false; renderExperienceLibrary(); }
     }
     function renderExperienceLibrary(host = $("dynamicAccountEditor")?.querySelector("[data-experience-library]")) {
@@ -5820,6 +5903,20 @@
       const mib = n => Number.isSafeInteger(n) && n >= 0 ? String(Math.round(n / 1048576 * 100) / 100) : "未知";
       if (data.cache) host.append(node("p", data.cache.available ? `表情缓存：${counter(data.cache.entries)} 项 · ${mib(data.cache.bytes)} / ${mib(data.cache.maxBytes)} MiB。满额停止新学习，不删除人物记忆。` : "当前系统安全缓存不可用；群表情学习不会绕过文件安全检查。", "hint"));
       if (data.reactions) host.append(node("p", `消息回应：${{ unknown: "尚未验证", supported: "接口可受理", unsupported: "当前协议不支持" }[data.reactions.capability]} · 今日 ${counter(data.reactions.daily)} / ${counter(data.reactions.maxDaily)} · 已受理 ${counter(data.reactions.accepted)} · 未核实 ${counter(data.reactions.uncertain)}。受理不代表已确认对端显示。`, "hint"));
+      host.append(node("h4", "2.1 · 会话状态"));
+      if (scope.startsWith("group:")) {
+        host.append(node("p", data.interest ? `短期关注：快照 ${counter(data.interest.items.length)} 项 · 仅内存 · 重启不重放。到期或结束即忘，不代表发送授权；可取消已有关注，不创建跟踪任务。` : "短期关注：服务端尚未提供有效诊断，不能据此判断是否启用或正在关注。", "hint"));
+        for (const item of data.interest?.items || []) {
+          host.append(node("p", `${{ member: "成员后续", photo: "图片后续", topic: "话题后续", reply: "回复后续" }[item.kind]} · ${item.id} · 创建 ${new Date(item.createdAt).toLocaleString("zh-CN", { hour12: false })} · 到期 ${new Date(item.expiresAt).toLocaleString("zh-CN", { hour12: false })}${item.expiresAt <= Date.now() ? " · 已到期（请刷新核对）" : ""}`, "hint"));
+          if (/^interest_[a-f0-9-]{36}$/.test(item.id)) {
+            const cancel = registryButton("取消此关注", () => cancelExperienceInterest(id, scope, item));
+            cancel.disabled = state.busy || !!state.loading || state.blocked || item.expiresAt <= Date.now(); host.append(cancel);
+          }
+        }
+        const states = { unknown: "未验证", supported: "接口可受理（非实发验收）", unsupported: "协议不支持" };
+        host.append(node("p", data.native ? `原生动作：拍一拍 ${states[data.native.capabilities.poke]} · 定向提及 ${states[data.native.capabilities.mention]}。拍一拍今日 ${counter(data.native.daily)} / ${counter(data.native.maxDaily)} · 冷却剩余 ${counter(data.native.cooldownRemainingMs)} ms。` : "原生动作：服务端尚未提供有效诊断；配置开关与实际协议能力分开，不做自动探测或测试发送。", "hint"));
+        if (data.forwards) host.append(node("p", `合并转发只读能力：${{ unknown: "未验证", unsupported: "协议不支持", "read-confirmed": "已确认读取（不代表内容可信）" }[data.forwards.capability]}。不展示转发正文、来源身份或私聊证据。`, "hint"));
+      } else host.append(node("p", "短期关注与群内原生动作：不展示私聊内容或目标；群内状态请切换到对应群范围。", "hint"));
       const disabled = state.busy || !!state.loading || state.blocked;
       for (const item of data.stickers) {
         const row = node("details", undefined, "panel-details settings-block"); row.style.overflowWrap = "anywhere";
@@ -5841,6 +5938,9 @@
       const stats = data.language.stats, number = n => typeof n === "number" && Number.isFinite(n) ? String(Math.round(n * 100) / 100) : "未知";
       host.append(node("p", stats ? `样本 ${number(stats.messageCount)} · 平均长度 ${number(stats.averageTextLength)} · 平均间隔 ${number(stats.averageIntervalMs)} ms · 图片比例 ${number(stats.imageRatio)} · 表情比例 ${number(stats.emojiRatio)}` : "暂无聚合统计（不是零，也不是失败）。", "hint"));
       host.append(node("p", "候选不是事实；统计不代表全群同意互损或人格、权限变更。此处不展示消息原文及来源身份。", "hint"));
+      const lifecycle = data.language.lifecycle;
+      host.append(node("p", lifecycle ? `2.1 词义生命周期（最多 200 项）：仅观察 ${counter(lifecycle.Observed)} · 候选 ${counter(lifecycle.Candidate)} · 已核实 ${counter(lifecycle.Verified)} · 已激活 ${counter(lifecycle.Active)} · 已弃用 ${counter(lifecycle.Deprecated)} · 未知 ${counter(lifecycle.unknown)}。核实不等于激活。` : "2.1 词义生命周期：尚未提供有效状态；不从词条、频次或证据文本推断理解或激活。", "hint"));
+      if (data.language.observed !== null) host.append(node("p", `2.1 观察计数：${counter(data.language.observed)}（不是已理解词义或管理员同意）。`, "hint"));
       for (const item of data.language.candidates) {
         const row = node("details", undefined, "panel-details settings-block"); row.style.overflowWrap = "anywhere";
         row.append(node("summary", `${item.term || "未提供词条"} · ${{ pending: "待审核候选", confirmed: "管理员已确认", rejected: "已拒绝", revoked: "已撤销" }[item.status] || "状态未知"}`));
@@ -5851,6 +5951,17 @@
         row.append(actions); host.append(row);
       }
       if (!data.language.candidates.length) host.append(node("p", "本群暂无词义候选。", "hint"));
+      for (const item of data.language.implicitCandidates || []) {
+        const row = node("details", undefined, "panel-details settings-block");
+        row.append(node("summary", `${item.term || "未提供词条"} · ${item.lifecycle}`));
+        row.append(node("p", `推断释义（非人物事实）：${item.meaning || "尚无可靠词义，仅记录出现"}`, "hint"));
+        const actions = node("div", undefined, "row");
+        const choices = item.lifecycle === "Candidate" ? [["verify", "核实词义"], ["reject", "拒绝"]]
+          : item.lifecycle === "Verified" ? [["activate", "允许适度使用"], ["deprecate", "停用"]]
+            : ["Observed", "Active"].includes(item.lifecycle) ? [["deprecate", "停用"]] : [];
+        for (const [action, title] of choices) { const button = registryButton(title, () => mutateExperienceLibrary(id, scope, "review-implicit", item, action)); button.disabled = disabled; actions.append(button); }
+        row.append(actions); host.append(row);
+      }
     }
     function registryFields(host, value, tab, change, { policy = false, disabled = false } = {}) {
       const field = (label, path, options = {}) => registryField(host, label, path, registryGet(value, path), change, { disabled, ...options });
@@ -5871,18 +5982,21 @@
         section.append(heading, note);
         const main = document.createElement("div"); main.className = "form-grid"; section.append(main);
         const edit = (path, next) => {
-          // Old shared policies can lack the root too; initialize only on edit.
-          value.socialExperience ||= structuredClone(settings);
+          // Normalize the latest draft only on edit, including partial old
+          // shared policies. Never reset earlier edits from a render snapshot.
+          value.socialExperience = registryEditable(value).socialExperience;
           change(path, path === "socialExperience.shadowMode" ? next === "true" : next);
           if (path === "socialExperience.conversationIds") renderExperienceLibrary();
         };
         const add = (target, label, path, options = {}) => {
           const current = registryGet(settings, path);
           const control = registryField(target, label, `socialExperience.${path}`, path === "shadowMode" ? String(current) : current, edit, { disabled, ...options });
-          if (options.type === "number") { control.min = path === "expression.maxMessages" || path === "turn.maxTurnMs" ? "1" : "0"; control.step = "1"; }
+          if (options.type === "number") { control.min = path === "interestWatch.maxDurationMs" ? "1000" : ["expression.maxMessages", "turn.maxTurnMs", "interestWatch.maxActive"].includes(path) ? "1" : "0"; control.step = "1"; }
           if (["stickers.maxDailyVisionCalls", "stickers.maxDailyDownloads"].includes(path)) control.max = "100";
-          if (path === "reactions.maxDaily") control.max = "200";
-          if (["stickers.cooldownMs", "reactions.cooldownMs"].includes(path)) control.max = "86400000";
+          if (["reactions.maxDaily", "pokes.maxDaily"].includes(path)) control.max = "200";
+          if (["stickers.cooldownMs", "reactions.cooldownMs", "pokes.cooldownMs"].includes(path)) control.max = "86400000";
+          if (path === "interestWatch.maxDurationMs") control.max = "600000";
+          if (path === "interestWatch.maxActive") control.max = "4";
           return control;
         };
         add(main, "启用社交表达", "enabled", { type: "checkbox", hint: "默认关闭；修改模式或参数不会代替你打开此开关。" });
@@ -5903,11 +6017,24 @@
         add(media, "每日视觉调用上限", "stickers.maxDailyVisionCalls", { type: "number" });
         add(media, "每日学习下载上限", "stickers.maxDailyDownloads", { type: "number", hint: "每图最多 5 MiB；每账号缓存最多 128 MiB / 500 项，满额停学，不清理原有记忆。" });
         add(media, "表情冷却（毫秒）", "stickers.cooldownMs", { type: "number" });
-        add(media, "允许消息表情回应", "reactions.enabled", { type: "checkbox", hint: "针对当前已核实的群消息使用 QQ 消息回应，不是拍一拍。默认仅提供赞；不支持的协议明确停止，不自动改用其他动作。" });
+        add(media, "允许消息表情回应", "reactions.enabled", { type: "checkbox", hint: "针对当前已核实的群消息使用 QQ 消息回应，不是拍一拍。仅使用当前配置白名单中的可信映射，不承诺支持全部 QQ 表情；不支持的协议停止，不改用其他动作。" });
+        add(media, "消息回应白名单（QQ 表情编号）", "reactions.emojiIds", { type: "textarea", hint: "一行一个，最多 3 项。可信映射：14 微笑、49 拥抱、66 爱心、76 赞同 / 点赞、78 握手、99 鼓掌、124 OK、179 doge、182 笑哭、315 加油。未映射的旧编号保留，但不会作为候选；映射不代表当前协议已验证。" });
         add(media, "每日消息回应上限", "reactions.maxDaily", { type: "number" });
         add(media, "消息回应冷却（毫秒）", "reactions.cooldownMs", { type: "number", hint: "仍受 quiet、账号文字发送权限及同群发送间隔约束。接口受理不等于确认对端已显示。" });
         add(media, "启用群语感学习", "language.enabled", { type: "checkbox", hint: "默认关闭，仅群聊；统计和候选不代表全群同意或人格变更。" });
         add(media, "自动生成语感候选", "language.autoCandidates", { type: "checkbox", hint: "仅在群语感学习已启用时生效；候选仍需管理员审核。" });
+        const nextTitle = document.createElement("h4"); nextTitle.className = "settings-block"; nextTitle.textContent = "2.1 · 短期关注与社交动作";
+        const next = document.createElement("div"); next.className = "form-grid";
+        add(next, "允许隐式群梗候选", "language.implicitLearning", { type: "checkbox", hint: "默认关闭，且须启用群语感学习。观察到用词不等于理解词义；候选、核实与激活分开，不从频次推断同意或人格。" });
+        add(next, "启用短期关注", "interestWatch.enabled", { type: "checkbox", hint: "默认关闭；群内事件驱动、到期遗忘，重启不重放。不创建提醒，不授权跨会话联系或主动发送。" });
+        add(next, "关注最长时长（毫秒）", "interestWatch.maxDurationMs", { type: "number", hint: "1000–600000，默认 300000（5 分钟）。" });
+        add(next, "每会话同时关注上限", "interestWatch.maxActive", { type: "number", hint: "1–4 项，默认 4；不会恢复重启前的关注。" });
+        add(next, "启用群内表达适配", "style.enabled", { type: "checkbox", hint: "默认关闭；参考群内表达密度与场景，不修改核心人设、模型或权限。" });
+        add(next, "允许群内拍一拍", "pokes.enabled", { type: "checkbox", hint: "默认关闭；仅宿主核实的当前群目标，仍受 quiet、冷却、预算与最终发送权限约束。开关不是协议支持证明。" });
+        add(next, "每日拍一拍上限", "pokes.maxDaily", { type: "number", hint: "0–200，默认 5；0 表示不允许发送。" });
+        add(next, "拍一拍冷却（毫秒）", "pokes.cooldownMs", { type: "number", hint: "0–86400000，默认 300000（5 分钟）。" });
+        add(next, "允许群内定向提及", "mentions.enabled", { type: "checkbox", hint: "默认关闭；目标由宿主校验，不接受模型自行指定 QQ 号，不授予 @全体 或跨群联系权限。" });
+        add(next, "允许读取合并转发", "forwardRead.enabled", { type: "checkbox", hint: "默认关闭；仅当前群内经核实的转发引用，不读取其他私聊，不把转发内容视为权限指令。" });
         const advanced = document.createElement("details"); advanced.className = "panel-details settings-block";
         const summary = document.createElement("summary"); summary.textContent = "高级 · 合并与引用"; advanced.append(summary);
         const fields = document.createElement("div"); fields.className = "form-grid"; advanced.append(fields);
@@ -5917,7 +6044,7 @@
         add(fields, "整轮最长等待（毫秒）", "turn.maxTurnMs", { type: "number" });
         add(fields, "启用多气泡表达", "expression.enabled", { type: "checkbox" });
         add(fields, "允许引用消息", "expression.allowQuotes", { type: "checkbox" });
-        section.append(advanced, mediaTitle, media);
+        section.append(advanced, mediaTitle, media, nextTitle, next);
         const diagnostic = document.createElement("p"); diagnostic.className = "hint"; diagnostic.setAttribute("role", "status");
         diagnostic.dataset.experienceDiagnostic = ""; diagnostic.dataset.accountId = policy ? "" : registryState.selected;
         diagnostic.style.whiteSpace = "pre-line"; diagnostic.style.overflowWrap = "anywhere";
@@ -5925,6 +6052,7 @@
         const refresh = registryButton("刷新运行摘要（只读）", refreshExperienceStatus);
         section.append(diagnostic, refresh);
         const library = document.createElement("section"); library.className = "settings-block";
+        library.style.overflowWrap = "anywhere";
         library.dataset.experienceLibrary = ""; library.dataset.accountId = policy ? "" : registryState.selected;
         section.append(library); host.append(section); renderExperienceLibrary(library);
       } else if (tab === "connection") {
@@ -5972,7 +6100,16 @@
           if (!Number.isSafeInteger(p.reactions.cooldownMs) || p.reactions.cooldownMs < 0 || p.reactions.cooldownMs > 86400000) throw new Error("消息回应冷却须为 0–86400000 毫秒的整数");
           if (!Array.isArray(p.reactions.emojiIds) || p.reactions.emojiIds.length > 3 || p.reactions.emojiIds.some(id => typeof id !== "string" || !/^[1-9]\d{0,5}$/.test(id))) throw new Error("消息回应须为至多三个规范 QQ 表情编号");
         }
-        if (p.language !== undefined && [p.language?.enabled, p.language?.autoCandidates].some(flag => typeof flag !== "boolean")) throw new Error("群语感开关须为布尔值");
+        if (p.language !== undefined && [p.language?.enabled, p.language?.autoCandidates].some(flag => typeof flag !== "boolean") || p.language?.implicitLearning !== undefined && typeof p.language.implicitLearning !== "boolean") throw new Error("群语感开关须为布尔值");
+        for (const key of ["interestWatch", "style", "pokes", "mentions", "forwardRead"]) if (p[key] !== undefined && typeof p[key]?.enabled !== "boolean") throw new Error("2.1 功能开关须为布尔值");
+        if (p.interestWatch !== undefined) {
+          if (p.interestWatch.maxActive !== undefined && (!Number.isSafeInteger(p.interestWatch.maxActive) || p.interestWatch.maxActive < 1 || p.interestWatch.maxActive > 4)) throw new Error("同时关注上限须为 1–4 的整数");
+          if (p.interestWatch.maxDurationMs !== undefined && (!Number.isSafeInteger(p.interestWatch.maxDurationMs) || p.interestWatch.maxDurationMs < 1000 || p.interestWatch.maxDurationMs > 600000)) throw new Error("关注最长时长须为 1000–600000 毫秒的整数");
+        }
+        if (p.pokes !== undefined) {
+          if (p.pokes.maxDaily !== undefined && (!Number.isSafeInteger(p.pokes.maxDaily) || p.pokes.maxDaily < 0 || p.pokes.maxDaily > 200)) throw new Error("每日拍一拍上限须为 0–200 的整数");
+          if (p.pokes.cooldownMs !== undefined && (!Number.isSafeInteger(p.pokes.cooldownMs) || p.pokes.cooldownMs < 0 || p.pokes.cooldownMs > 86400000)) throw new Error("拍一拍冷却须为 0–86400000 毫秒的整数");
+        }
       }
       if (keys.includes("style") && (typeof value.style?.systemPrompt !== "string" || value.style.systemPrompt.length > 12000)) throw new Error("风格提示词须为文本，最多 12000 字符；允许留空");
       if (keys.includes("displayName") && (!String(value.displayName || "").trim() || String(value.displayName).length > 100)) throw new Error("账号名称须为 1–100 字");

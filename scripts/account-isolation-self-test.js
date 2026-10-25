@@ -120,6 +120,8 @@ function harness(config = fixtureConfig(), mutation = {}) {
     socialExperienceFor, evaluateConversationTurn, parseReplyPlan, replyPlanPrompt, executeReplyPlan,
     expressionStickersFor: () => null,
     expressionReactionsFor: () => null,
+    expressionNativeFor: () => null,
+    nativePokeBindings: new WeakMap(),
     expressionDiagnostics: new ExpressionDiagnostics(),
     logicalBotId, botConversationKey, botControlRevision, replyDeliveryConfig,
     accountKernel: new AccountRuntime(config), kernelConfigRevision: 1, pendingReplyHandoffs: [],
@@ -973,7 +975,56 @@ await test("native message reactions keep strict wire params and pass the real s
   check.equal(wires.length,1,"quiet applies to reaction writes too");
 });
 
-await test("reaction acceptance requires an unambiguous raw OneBot envelope", async () => {
+await test("native poke requires an opaque host proof and exact current wire target", async () => {
+  const h=harness(), ws=h.connect(A).ws, wires=[];
+  h.c.groupSendCoordinator=new GroupSendCoordinator({minDelayMs:()=>0});
+  h.c.oneBotRequestRaw=async (_socket,action,params)=>{wires.push({action,...structuredClone(params)});return {};};
+  new vm.Script(functionSource("oneBotRequest")).runInContext(h.c);
+  const item=h.config.accounts.items.find(row=>row.id===A);
+  item.socialExperience={enabled:true,shadowMode:false,conversationIds:[`group:${G}`],pokes:{enabled:true}};
+  h.c.configRevision="poke-policy";
+  const params={group_id:Number(G),user_id:Number(HUMAN)};
+  await assert.rejects(()=>h.c.oneBotRequest(ws,"group_poke",params),{code:"ACCOUNT_SEND_BLOCKED"});
+  const binding=h.c.oneBotBinding(ws,A);
+  h.c.nativePokeBindings.set(binding,{accountId:A,groupId:params.group_id,userId:params.user_id,isCurrent:()=>true});
+  await assert.rejects(()=>h.c.oneBotRequest(ws,"group_poke",{...params,user_id:Number(HUMAN)+1},{binding}),{code:"ACCOUNT_SEND_BLOCKED"});
+  await assert.rejects(()=>h.c.oneBotRequest(ws,"group_poke",{...params,message:"not allowed"},{binding}),{code:"ACCOUNT_SEND_BLOCKED"});
+  await h.c.oneBotRequest(ws,"group_poke",params,{binding});
+  check.equal(wires.length,1);check.equal(wires[0].action,"group_poke");
+  h.c.isQuiet=()=>true;
+  await assert.rejects(()=>h.c.oneBotRequest(ws,"group_poke",params,{binding}),{code:"ACCOUNT_SEND_BLOCKED"});
+  h.c.isQuiet=()=>false;h.c.nativePokeBindings.delete(binding);
+  await assert.rejects(()=>h.c.oneBotRequest(ws,"group_poke",params,{binding}),{code:"ACCOUNT_SEND_BLOCKED"});
+  for(const action of ["friend_poke","send_poke"])
+    await assert.rejects(()=>h.c.oneBotRequest(ws,action,params,{binding}),{code:"ACCOUNT_SEND_BLOCKED"});
+  check.equal(wires.length,1,"raw actions, target changes and quiet never gain wire authority");
+});
+
+await test("queued native poke proof, quiet or policy revocation stops before wire", async () => {
+  for(const mode of ["proof","quiet","policy"]) {
+    const h=harness(),ws=h.connect(A).ws,wires=[];
+    h.c.groupSendCoordinator=new GroupSendCoordinator({minDelayMs:()=>0});
+    h.c.oneBotRequestRaw=async()=>{wires.push(true);return {};};
+    new vm.Script(functionSource("oneBotRequest")).runInContext(h.c);
+    const item=h.config.accounts.items.find(row=>row.id===A);
+    item.socialExperience={enabled:true,shadowMode:false,conversationIds:[`group:${G}`],pokes:{enabled:true}};
+    h.c.configRevision="queued-poke-policy";
+    const params={group_id:Number(G),user_id:Number(HUMAN)},binding=h.c.oneBotBinding(ws,A);
+    let current=true;
+    h.c.nativePokeBindings.set(binding,{accountId:A,groupId:params.group_id,userId:params.user_id,isCurrent:()=>current});
+    const occupied=deferred(),release=deferred();
+    const blocker=h.c.groupSendCoordinator.dispatch(G,()=>{},()=>{occupied.resolve();return release.promise;});
+    await occupied.promise;
+    const pending=h.c.oneBotRequest(ws,"group_poke",params,{binding}).then(()=>true,()=>false);
+    if(mode==="proof")current=false;
+    if(mode==="quiet")h.c.isQuiet=()=>true;
+    if(mode==="policy")item.socialExperience.pokes.enabled=false;
+    release.resolve();await blocker;
+    check.equal(await pending,false,mode);check.equal(wires.length,0,mode);
+  }
+});
+
+await test("native actions, chat and forward reads require an unambiguous raw OneBot envelope", async () => {
   const h=harness(), ws=h.connect(A).ws, frames=[];
   h.config.accounts.items.find(row=>row.id===A).socialExperience={enabled:true,shadowMode:false,
     conversationIds:[`group:${G}`],reactions:{enabled:true}};
@@ -981,9 +1032,12 @@ await test("reaction acceptance requires an unambiguous raw OneBot envelope", as
   h.c.groupSendCoordinator=new GroupSendCoordinator({minDelayMs:()=>0});
   h.c.setTimeout=()=>1; h.c.clearTimeout=()=>{};
   for(const name of ["oneBotRequest","oneBotRequestRaw"]) new vm.Script(functionSource(name)).runInContext(h.c);
-  for(const ack of [{status:"ok",retcode:1404},{status:"failed",retcode:0},{status:"ok"},{status:"ok",retcode:0}]) {
+  for(const action of ["set_group_reaction","send_group_msg","get_forward_msg"])
+  for(const ack of [{status:"ok",retcode:1404},{status:"failed",retcode:0},{status:"ok"},{retcode:0},{status:"ok",retcode:0}]) {
     const started=deferred(); ws.send=raw=>{frames.push(JSON.parse(raw));started.resolve();};
-    const pending=h.c.oneBotRequest(ws,"set_group_reaction",{group_id:G,message_id:"123456",code:"76",is_set:true})
+    const params=action==="set_group_reaction"?{group_id:G,message_id:"123456",code:"76",is_set:true}
+      :action==="send_group_msg"?{group_id:G,message:"synthetic"}:{id:"current-source"};
+    const pending=h.c.oneBotRequest(ws,action,params)
       .then(()=>true,()=>false);
     await started.promise;
     await ws.callbacks.get("message")(JSON.stringify({self_id:QQ[A],echo:frames.at(-1).echo,data:{},...ack}));

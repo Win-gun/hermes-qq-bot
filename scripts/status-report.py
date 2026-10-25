@@ -44,10 +44,14 @@ def http_post(path, data):
     url = f"{BRIDGE_URL}{path}"
     body = json.dumps(data).encode()
     try:
+        token = http_get("/api/admin/session").get("token")
+        if not token:
+            return {"error": "admin session unavailable"}
         req = urllib.request.Request(
             url,
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "Origin": BRIDGE_URL,
+                     "x-hermes-qq-admin": token},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=15) as resp:

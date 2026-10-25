@@ -618,4 +618,107 @@ await test("abort between async guard resolution and caller continuation prevent
     assert.deepEqual(result, { sent: 0, accepted: 0, handled: false, partial: false, uncertain: false, receipts: [] });
   }
 });
+const nativeOptions = { allowedPokeIds: ["poke_host"], allowedMentionIds: ["mention_host"] };
+const poke = { type: "poke", pokeId: "poke_host" };
+const mention = { type: "mention", mentionId: "mention_host", content: "实际回答" };
+await test("native schema is host-allowlisted, no target/QQ/protocol fields", () => {
+  for (const item of [poke, mention]) {
+    assert.deepEqual(validateReplyPlan(rawPlan({ messages: [item] }), { ...nativeOptions, direct: false }).messages, [item]);
+    assert.throws(() => validateReplyPlan(rawPlan({ messages: [item] }), { direct: false }));
+    for (const key of ["target", "targetId", "userId", "group_id", "action", "params", "eventRef", "cq", "qq", "allowedPokeIds"])
+      assert.throws(() => validateReplyPlan(rawPlan({ messages: [{ ...item, [key]: "forged" }] }), { ...nativeOptions, direct: false }));
+  }
+  for (const item of [{ ...poke, pokeId: "foreign" }, { ...mention, mentionId: "foreign" },
+    { ...mention, content: "" }, { ...mention, content: "__SKIP__" }, { ...mention, content: "[CQ:at,qq=all]" },
+    { ...poke, content: "answer" }, { type: "forward", forwardId: "raw" }])
+    assert.throws(() => validateReplyPlan(rawPlan({ messages: [item] }), { ...nativeOptions, direct: false }));
+});
+await test("new opaque ID options reject sparse, oversized or malformed lists", () => {
+  for (const name of ["allowedPokeIds", "allowedMentionIds"]) for (const ids of [null, "x", Array(1), Array(4).fill("x"),
+    ["__proto__"], ["[CQ:at]"], ["all\n"], ["https://example.test"], [123]])
+    assert.throws(() => replyPlanPrompt({ [name]: ids }));
+});
+await test("direct action cannot swallow answer; reaction and poke share one action cap", () => {
+  assert.throws(() => validateReplyPlan(rawPlan({ messages: [poke] }), nativeOptions));
+  assert.equal(parse(rawPlan({ messages: [poke] }), nativeOptions).messages[0].type, "text");
+  const p = validateReplyPlan(rawPlan({ messages: [poke, mention] }), nativeOptions);
+  assert.deepEqual(p.messages, [mention, poke]);
+  assert.throws(() => validateReplyPlan(rawPlan({ messages: [poke, poke] }), { ...nativeOptions, direct: false }));
+  assert.throws(() => validateReplyPlan(rawPlan({ messages: [mention, mention] }), nativeOptions));
+  assert.throws(() => validateReplyPlan(rawPlan({ messages: [poke, { type: "reaction", reactionId: "r" }] }),
+    { ...nativeOptions, direct: false, allowedReactionIds: ["r"] }));
+  assert.throws(() => validateReplyPlan(rawPlan({ messages: [mention, { type: "text", content: "字" }] }),
+    { ...nativeOptions, maxTextLength: mention.content.length }));
+});
+await test("native authority JSON never masquerades as ordinary data", () => {
+  for (const field of ["target_id", "mentionId", "poke_id", "allowedMentionIds", "eventRef", "forward_ref", "forwardId"]) {
+    const raw = JSON.stringify({ data: { [field]: "DO_NOT_ECHO" } });
+    assert.equal(parse(raw, { direct: false }).action, "observe"); assert.ok(!JSON.stringify(parse(raw)).includes("DO_NOT_ECHO"));
+  }
+});
+await test("native prompt does not imply protocol capability or default permissions", () => {
+  const prompt = replyPlanPrompt(nativeOptions);
+  assert.match(prompt, /mention_host/); assert.match(prompt, /poke_host/); assert.match(prompt, /不是新消息/);
+  assert.match(prompt, /eventref token/); assert.match(replyPlanPrompt(), /不得输出 poke/);
+});
+await test("native adapters required only for requested type, allowlists checked again at execution", async () => {
+  const h = host(nativeOptions);
+  for (const item of [poke, mention]) await assert.rejects(execute(rawPlan({ messages: [item] }), h.options), /INVALID_REPLY_ADAPTER/);
+  const parsed = validateReplyPlan(rawPlan({ messages: [mention] }), nativeOptions);
+  await assert.rejects(execute(parsed, host({ sendMention: () => assert.fail() }).options), /INVALID_REPLY_PLAN/);
+  assert.equal(h.calls.length, 0);
+});
+await test("mention is independent safe text bubble with quote/signal and typed receipt", async () => {
+  const controller = new AbortController(); let args;
+  const h = host({ ...nativeOptions, signal: controller.signal,
+    sendMention: async (...values) => { args = values; return { messageId: "mention_ack", targetId: "DO_NOT_KEEP" }; } });
+  const result = await execute(rawPlan({ messages: [mention], replyToMessageId: "quote" }), h.options);
+  assert.deepEqual(args, ["mention_host", "实际回答", { quoteId: "quote", index: 0, signal: controller.signal }]);
+  assert.deepEqual(result.receipts, [{ index: 0, type: "mention", mentionId: "mention_host", content: "实际回答", status: "sent", messageId: "mention_ack" }]);
+  assert.equal(result.sent, 1); assert.equal(result.accepted, 0); assert.equal(h.calls.length, 0);
+});
+await test("poke accepted is not new message, quote, speech or content", async () => {
+  let args; const h = host({ ...nativeOptions, sendPoke: async (...values) => {
+    args = values; return { status: "accepted", actionId: "poke_action" };
+  } });
+  const result = await execute(rawPlan({ messages: [poke], replyToMessageId: "quote" }), h.options);
+  assert.deepEqual(args, ["poke_host", { signal: undefined }]);
+  assert.deepEqual(result.receipts, [{ index: 0, type: "poke", pokeId: "poke_host", status: "accepted", actionId: "poke_action" }]);
+  assert.equal(result.sent, 0); assert.equal(result.accepted, 1); assert.equal(result.handled, true);
+});
+await test("direct renderer sends answer before rejected optional poke", async () => {
+  const order = [], h = host({ ...nativeOptions, direct: true,
+    sendText: async () => { order.push("text"); return { messageId: "14" }; },
+    sendPoke: async () => { order.push("poke"); return { status: "rejected" }; } });
+  const result = await execute(rawPlan({ messages: [poke, { type: "text", content: "实际答案" }] }), h.options);
+  assert.deepEqual(order, ["text", "poke"]); assert.equal(result.sent, 1); assert.equal(result.partial, true);
+});
+await test("native guard/quiet denial and cancellation emit no fake attempted receipt", async () => {
+  for (const item of [poke, mention]) {
+    const controller = new AbortController(); let sends = 0;
+    const h = host({ ...nativeOptions, signal: controller.signal, beforeEach: ({ type }) => {
+      assert.equal(type, item.type); controller.abort(); return true;
+    }, sendPoke: async () => { sends++; }, sendMention: async () => { sends++; } });
+    assert.deepEqual((await execute(rawPlan({ messages: [item] }), h.options)).receipts, []); assert.equal(sends, 0);
+    const q = host({ ...nativeOptions, beforeEach: () => false, sendPoke: async () => assert.fail(), sendMention: async () => assert.fail() });
+    assert.deepEqual((await execute(rawPlan({ messages: [item] }), q.options)).receipts, []);
+  }
+});
+await test("native timeout/rejection/uncertain ACK never retries or sends suffix", async () => {
+  for (const item of [poke, mention]) for (const outcome of ["throw", {}, { status: "accepted", actionId: "x", message_id: "12" },
+    { status: "unsupported" }, { status: "rejected" }]) {
+    let sends = 0; const adapter = async () => { sends++; if (outcome === "throw") throw Error("timeout"); return outcome; };
+    const h = host({ ...nativeOptions, sendPoke: adapter, sendMention: adapter });
+    const result = await execute(rawPlan({ messages: [item, { type: "text", content: "never" }] }), h.options);
+    assert.equal(sends, 1); assert.equal(h.calls.length, 0); assert.equal(result.sent, 0); assert.equal(result.accepted, 0);
+    assert.equal(result.receipts.length, 1);
+  }
+});
+await test("late accepted poke after cancellation is recorded once without suffix", async () => {
+  const controller = new AbortController(); const h = host({ ...nativeOptions, signal: controller.signal,
+    sendPoke: async () => { controller.abort(); return { status: "accepted", actionId: "late" }; } });
+  const result = await execute(rawPlan({ messages: [poke, { type: "text", content: "never" }] }), h.options);
+  assert.equal(result.sent, 0); assert.equal(result.accepted, 1); assert.equal(result.partial, true);
+  assert.equal(h.calls.length, 0); assert.equal(h.durable.length, 1);
+});
 console.log(`PASS social-expression: ${checks} synthetic checks; no IO/model/QQ adapters used`);

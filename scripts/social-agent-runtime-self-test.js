@@ -49,6 +49,7 @@ function fixture(overrides = {}) {
       : withSocialAgentUsage({ action: "reply", messages: ["fake final"], throughSeq: 3 }, { inputTokens: 4, outputTokens: 2 }); },
     tools, sendIntent: async (scope, intent) => { sends.push({ scope, intent }); return overrides.send?.(scope, intent); },
     isCurrent: () => current, clock,
+    ...(overrides.applyInterest ? { applyInterest: overrides.applyInterest } : {}),
     onDecision: async (scope, decision) => { decisions.push({ scope, decision }); return overrides.onDecision?.(scope, decision); },
     applyContinuity: async (scope, proposal, metadata) => { continuity.push({ scope, proposal, metadata }); return overrides.applyContinuity?.(scope, proposal, metadata); }
   };
@@ -665,4 +666,30 @@ await check("expression intent after unread paging keeps actual observed sequenc
   assert.equal(f.state.intentFenceThroughSeq, 4);
 });
 
+await check("interest is optional, source-bounded and applied after confirmed send without another model", async () => {
+  const order=[];
+  const f=fixture({model:()=>({action:"reply",messages:["fixture reply"],interest:{kind:"member",sourceSeq:3,ttlMs:10000}}),
+    send:()=>{order.push("confirmed");},applyInterest:(scope,p,meta)=>{
+      order.push("interest");assert.deepEqual(scope,ctx);assert.equal(p.sourceSeq,3);assert.equal(meta.seenSeq,3);
+      assert(meta.seenMessageIds.includes("fake-message"));
+    }});
+  assert.equal(code(await f.run()),"SOCIAL_COMPLETED");assert.deepEqual(order,["confirmed","interest"]);
+  assert.equal(f.modelCalls.length,1);assert.equal(f.sends.length,1);
+});
+await check("uncertain send never creates attention and invalid interest never sends", async () => {
+  let applied=0;
+  const f=fixture({model:()=>({action:"reply",messages:["reply"],interest:{kind:"member",sourceSeq:3,ttlMs:1000}}),
+    send:()=>{throw Error("unknown ACK");},applyInterest:()=>{applied++;}});
+  assert.equal(code(await f.run()),"SOCIAL_CALLBACK_FAILED");assert.equal(applied,0);
+  for(const interest of [{kind:"member",sourceSeq:4,ttlMs:1000},{kind:"member",sourceSeq:3,ttlMs:600001},
+    {kind:"member",sourceSeq:3,ttlMs:1000,userId:"999"}]){
+    const bad=fixture({model:()=>({action:"reply",messages:["reply"],interest})});
+    assert.equal(code(await bad.run()),"SOCIAL_INVALID_INTEREST");assert.equal(bad.sends.length,0);
+  }
+});
+await check("reflection cannot register interest or acquire a sending loop", async () => {
+  let applied=0;const f=fixture({model:()=>({action:"observe",interest:{kind:"member",sourceSeq:3,ttlMs:1000}}),applyInterest:()=>{applied++;}});
+  assert.equal(f.runtime.observe({...ctx,reflectOnly:true}).queued,true);
+  assert.equal(code(await f.runtime.runDue()),"SOCIAL_INTEREST_REFUSED");assert.equal(applied,0);assert.equal(f.sends.length,0);
+});
 console.log(`social-agent-runtime: ${checks} checks passed (fake state/model/clock only)`);

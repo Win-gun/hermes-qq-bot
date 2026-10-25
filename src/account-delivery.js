@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { socialExperienceFor } from "./social-experience-policy.js";
+import { QQ_REACTION_LABELS } from "./message-reactions.js";
 
 function localMediaKind(value) {
   let filename = String(value || "");
@@ -67,16 +68,17 @@ export function messageContentTypes(message) {
   return [...types];
 }
 
-export function accountDeliveryDecision(config, accountId, action, params = {}, { quiet = false, activeGroupAccountId = "" } = {}) {
+export function accountDeliveryDecision(config, accountId, action, params = {}, { quiet = false, activeGroupAccountId = "", nativePokeVerified = false } = {}) {
   // Native poke is not a read action. Until a verified protocol capability,
   // target evidence and dedicated policy exist, fail closed even for group_poke
   // (whose name does not match the legacy send_* guard). The alternate reaction
   // endpoint is deliberately unsupported; it must not become a write bypass.
-  if (["group_poke", "friend_poke", "send_poke", "set_msg_emoji_like"].includes(action)) return {
+  if (["friend_poke", "send_poke", "set_msg_emoji_like"].includes(action) || action === "group_poke" && nativePokeVerified !== true) return {
     allowed: false, reason: "该原生交互能力尚未验证或授权", code: "ACCOUNT_SEND_BLOCKED", types: []
   };
   const reaction = action === "set_group_reaction";
-  if (!reaction && !/^send_/.test(action) && !/^upload_(?:group|private)_file$/.test(action)) return { allowed: true, types: [] };
+  const poke = action === "group_poke";
+  if (!reaction && !poke && !/^send_/.test(action) && !/^upload_(?:group|private)_file$/.test(action)) return { allowed: true, types: [] };
   const account = effectiveAccount(config, accountId);
   const groupId = params.group_id;
   const messageType = groupId ? "group" : "private";
@@ -85,15 +87,22 @@ export function accountDeliveryDecision(config, accountId, action, params = {}, 
   if (account.groupId && activeGroupAccountId !== accountId) return deny("该账号不是接管组当前成员");
   if (!accountScopeAllows(account, messageType, groupId)) return deny("该会话不在账号参与范围内");
   if (messageType === "group" && quiet) return deny("群聊处于 quiet 状态");
+  if (poke) {
+    const policy = socialExperienceFor({ socialExperience: account.socialExperience ?? config.socialExperience }, `group:${groupId}`);
+    if (!policy.active || policy.shadowMode || !policy.pokes.enabled || account.features?.chat !== true
+      || !Number.isSafeInteger(params.group_id) || params.group_id <= 0 || !Number.isSafeInteger(params.user_id) || params.user_id <= 0
+      || Object.keys(params).some(key => !["group_id", "user_id"].includes(key))) return deny("拍一拍未授权");
+  }
   if (reaction) {
     if (account.features?.chat !== true) return deny("账号未开启聊天参与");
     const policy = socialExperienceFor({ socialExperience: account.socialExperience ?? config.socialExperience }, `group:${groupId}`);
     if (!/^[1-9]\d{0,19}$/.test(String(groupId)) || !/^-?[1-9]\d{0,19}$/.test(String(params.message_id))
-      || typeof params.code !== "string" || !policy.reactions.emojiIds.includes(params.code) || params.is_set !== true
+      || typeof params.code !== "string" || !Object.hasOwn(QQ_REACTION_LABELS, params.code)
+      || !policy.reactions.emojiIds.includes(params.code) || params.is_set !== true
       || Object.keys(params).some(key => !["group_id", "message_id", "code", "is_set"].includes(key))
       || !policy.active || policy.shadowMode || !policy.reactions.enabled) return deny("消息回应未授权");
   }
-  let types = reaction ? ["text"] : messageContentTypes(params.message ?? params.messages);
+  let types = reaction || poke ? ["text"] : messageContentTypes(params.message ?? params.messages);
   if (/^upload_/.test(action)) types = [...new Set(["file", fileKind(params.name), fileKind(params.file), localMediaKind(params.file)])];
   if (!types.length) return deny("无法验证待发送内容类型");
   if (types.some((type) => account.sendTypes?.[type] !== true)) return deny("账号未允许发送该内容类型");

@@ -258,6 +258,15 @@ process.stdout.write("fixture text reply "+Date.now()+"\\n");
   await until(async () => (await current()).statuses.filter((item) => item.connected).length === 6, "all six reverse sockets identified");
 
   let createdId;
+  await test("manual sends require local same-origin admin authentication before any wire action", async()=>{
+    const writes=()=>actions.filter(row=>/^send_/.test(row.action)).length;
+    const before=writes();
+    for(const route of ["/send","/api/send_private"]) {
+      assert.equal((await request(route,"POST",{}, {"x-hermes-qq-admin":""})).status,403);
+      assert.equal((await request(route,"POST",{}, {origin:"https://invalid.example"})).status,403);
+    }
+    assert.equal(writes(),before);
+  });
   await test("POST adds seventh account disabled and does not provision", async () => {
     const value = await mutate("/api/accounts", "POST", { account: { id: "fixture-created", displayName: "created fixture", protocol: "napcat", qq: "91999" } }, 201);
     createdId = value.account?.id || value.items.find((item) => item.id === "fixture-created")?.id;

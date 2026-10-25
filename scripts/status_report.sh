@@ -15,8 +15,11 @@ fi
 
 send_msg() {
   local msg="$1"
+  local session
+  session=$(curl -sf --max-time 10 "$API_BASE/api/admin/session" | jq -er '.token') || return 1
   curl -sf -X POST "$API_BASE/api/send_private" \
     -H "Content-Type: application/json" \
+    -H "Origin: $API_BASE" -H "x-hermes-qq-admin: $session" \
     -d "$(jq -n --arg user_id "$OWNER_ID" --arg msg "$msg" '{user_id: $user_id, message: $msg}')" >/dev/null 2>&1
 }
 

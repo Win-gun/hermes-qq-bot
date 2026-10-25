@@ -1,3 +1,5 @@
+import { conversationTurnHints } from "./conversation-turn-manager.js";
+
 function asArray(value) {
   if (Array.isArray(value)) return value.filter(Boolean);
   return value == null ? [] : [value];
@@ -38,10 +40,79 @@ function relationTokens(text) {
   return new Set([...latin, ...chunks].filter((item) => !["这个", "那个", "然后", "但是", "就是", "可以", "什么", "怎么"].includes(item)));
 }
 
+function currentOf(input) {
+  return input.current || asArray(input.currentMessages).at(-1) || {};
+}
+
+function inputMessageIds(input) {
+  return unique([...asArray(input.messageIds), ...asArray(input.currentMessages || input.current).flatMap((item) => asArray(item?.messageIds))]);
+}
+
+function messagesForIds(messages, messageIds) {
+  const items = asArray(messages);
+  const wanted = new Set(messageIds);
+  return items.filter((item) => !asArray(item?.messageIds).length
+    || asArray(item.messageIds).some((id) => wanted.has(String(id))))
+    .map((item) => ({ ...item, messageIds: asArray(item?.messageIds).length
+      ? unique(item.messageIds).filter((id) => wanted.has(id))
+      : items.length === 1 ? [...messageIds] : [] }));
+}
+
+function withinLiveWindow(job, now, cfg) {
+  // Related chatter must not keep an old turn alive indefinitely.
+  return job && !job.dropped && !job.deliveryStarted
+    && now - job.createdAt <= cfg.windowMs && now - job.updatedAt <= cfg.windowMs;
+}
+
+function freshIncoming(incoming, now, cfg) {
+  const current = currentOf(incoming);
+  const at = current.sentAtMs ?? current.at;
+  return !Number.isFinite(at) || now - at <= cfg.windowMs;
+}
+
+function noteIncoming(state, incoming) {
+  const previous = state.lastInput;
+  // Observe and enqueue often see the same event in two host pipeline stages.
+  // Preserve its interruption boundary instead of turning stage two into a merge.
+  const sameEvent = previous?.senderId === incoming.senderId && incoming.messageIds.length
+    && incoming.messageIds.some((id) => previous.messageIds.includes(id));
+  incoming.interrupted = sameEvent ? previous.interrupted
+    : Boolean(previous && previous.senderId !== incoming.senderId);
+  state.lastInput = { senderId: incoming.senderId, messageIds: incoming.messageIds, interrupted: incoming.interrupted };
+}
+
+function compatibleTopic(job, incoming) {
+  const before = currentOf({ currentMessages: job.currentMessages });
+  const after = currentOf(incoming);
+  if (/^\/[a-z][\w-]*(?:\s|$)/iu.test(after.text || "")) return false;
+  return after.addressedTo !== "other"
+    && !(before.topicId && after.topicId && String(before.topicId) !== String(after.topicId));
+}
+
+function canMergeTurn(job, incoming, now, cfg) {
+  if (!withinLiveWindow(job, now, cfg) || !freshIncoming(incoming, now, cfg) || !sameAccount(job, incoming)
+    || !incoming.senderId || job.senderId !== incoming.senderId || !compatibleTopic(job, incoming)) return false;
+  const before = currentOf({ currentMessages: job.currentMessages });
+  const after = currentOf(incoming);
+  if (before.topicEnded === true || conversationTurnHints(before.text).topicEnded) return false;
+  const refs = asArray(after.replyContexts).map((item) => String(item?.messageId || "")).filter(Boolean);
+  // A resolved quote to a different turn is not a fragment of this question.
+  if (refs.length && !refs.some((id) => job.messageIds.includes(id))) return false;
+  if ((incoming.interrupted || after.interveningMessages > 0) && !conversationTurnHints(before.text).incomplete
+    && !messagesRelated(job, incoming)) return false;
+  return true;
+}
+
 function messagesRelated(job, incoming) {
+  if (!compatibleTopic(job, incoming)) return false;
+  const latest = currentOf({ currentMessages: job.currentMessages });
+  if (latest.topicEnded === true || conversationTurnHints(latest.text).topicEnded) return false;
   const contexts = asArray(incoming.current?.replyContexts);
   const ids = new Set(unique(job.messageIds));
-  if (contexts.some((item) => item?.isBot || ids.has(String(item?.messageId || "")))) return true;
+  if (contexts.some((item) => ids.has(String(item?.messageId || "")))) return true;
+  // An independent addressed question is its own turn, even on the same topic.
+  // Neither '?' nor an arbitrary bot quote assigns another user's question.
+  if (incoming.direct || contexts.length || /[?？]/u.test(currentOf(incoming).text || "")) return false;
   const before = relationTokens(asArray(job.currentMessages).map((item) => item?.text || "").join("\n"));
   const after = relationTokens(incoming.current?.text || "");
   let overlap = 0;
@@ -145,6 +216,9 @@ export class ReplyCoordinator {
     return false;
   }
 
+  // Optional current facts from the host: addressedTo ("bot"/"other"), opaque
+  // topicId, topicEnded, interveningMessages, sentAtMs (milliseconds). These are
+  // grouping hints, never permission to send; the host still owns wire guards.
   observeMessage({ conversationId, senderId, accountId = "", logicalBotId, current, event, messageIds = [], direct = false } = {}) {
     const cfg = this.config();
     if (!cfg.enabled || !cfg.liveEnabled) return { absorbed: false, contextUpdated: false };
@@ -153,17 +227,27 @@ export class ReplyCoordinator {
     if (!state) return { absorbed: false, contextUpdated: false };
     const incoming = {
       senderId: String(senderId || ""), accountId: String(accountId || ""), current, currentMessages: [current], event,
-      messageIds: unique(messageIds), direct, maxMergedMessages: cfg.maxMergedMessages, settleMs: cfg.settleMs
+      messageIds: inputMessageIds({ messageIds, current }), direct, maxMergedMessages: cfg.maxMergedMessages, settleMs: cfg.settleMs
     };
     const now = Date.now();
+    const unseenIds = incoming.messageIds.filter((id) => !this.isCovered([id], accountId, { logicalBotId: owner, conversationId }));
+    if (incoming.messageIds.length && !unseenIds.length) return { absorbed: true, contextUpdated: false, duplicate: true };
+    incoming.messageIds = unseenIds;
+    incoming.currentMessages = current ? [{ ...current, messageIds: unseenIds }] : [];
+    const duplicate = [state.active, ...state.pending].find((job) => job && !job.dropped
+      && job.senderId === incoming.senderId && incoming.messageIds.length
+      && incoming.messageIds.every((id) => job.messageIds.includes(id)));
+    if (duplicate) return { absorbed: true, contextUpdated: false, duplicate: true, jobId: duplicate.id };
+    noteIncoming(state, incoming);
     // A started burst is never regenerated/replayed, but its unsent remainder
     // can still yield to new relevant input. That input gets its own next job.
-    if (state.active?.deliveryStarted && state.active.expressionSending && sameAccount(state.active, incoming)
-      && (state.active.senderId === incoming.senderId || direct || messagesRelated(state.active, incoming))) {
+    if (state.active?.deliveryStarted && state.active.expressionSending && sameAccount(state.active, incoming) && freshIncoming(incoming, now, cfg)
+      && currentOf(incoming).addressedTo !== "other"
+      && (state.active.senderId === incoming.senderId || direct || (now - state.active.createdAt <= cfg.windowMs && messagesRelated(state.active, incoming)))) {
       state.active.stopRemaining?.("new-input-during-expression");
     }
     const mergeTarget = [state.active, ...state.pending].find((job) => (
-      job && !job.dropped && !job.deliveryStarted && sameAccount(job, incoming) && String(job.senderId) === incoming.senderId && now - Number(job.updatedAt || job.createdAt || 0) <= cfg.windowMs
+      canMergeTurn(job, incoming, now, cfg)
     ));
     if (mergeTarget) {
       if (direct && cfg.cancelProactiveOnDirect && ["active", "proactive", "delayed"].includes(mergeTarget.mode)) {
@@ -188,14 +272,20 @@ export class ReplyCoordinator {
       return { absorbed: true, contextUpdated: true, jobId: mergeTarget.id };
     }
     if (state.active && !state.active.dropped && !state.active.deliveryStarted && sameAccount(state.active, incoming)) {
-      if (direct && cfg.cancelProactiveOnDirect && ["active", "proactive", "delayed"].includes(state.active.mode)) {
+      if (direct && cfg.cancelProactiveOnDirect && freshIncoming(incoming, now, cfg)
+        && currentOf(incoming).addressedTo !== "other" && ["active", "proactive", "delayed"].includes(state.active.mode)) {
         this.cancelActive(state.active, "direct-message-preempted-proactive", { drop: true });
-      } else if (messagesRelated(state.active, incoming)) {
+      } else if (withinLiveWindow(state.active, now, cfg) && freshIncoming(incoming, now, cfg) && messagesRelated(state.active, incoming)) {
+        const relatedIds = state.active.relatedMessageIds || [];
+        if (incoming.messageIds.length && incoming.messageIds.every((id) => relatedIds.includes(id))) {
+          return { absorbed: false, contextUpdated: false, duplicate: true, jobId: state.active.id };
+        }
         if (Number(state.active.regenerationCount || 0) >= cfg.maxRegenerations) {
           return { absorbed: false, contextUpdated: false, saturatedJobId: state.active.id };
         }
         state.active.contextRevision = Number(state.active.contextRevision || 0) + 1;
         state.active.updatedAt = now;
+        state.active.relatedMessageIds = unique([...relatedIds, ...incoming.messageIds]).slice(-256);
         if (state.active.controller) this.cancelActive(state.active, "related-context-updated", { drop: false });
         return { absorbed: false, contextUpdated: true, jobId: state.active.id };
       }
@@ -240,6 +330,30 @@ export class ReplyCoordinator {
 
   cleanupState(state) {
     if (!state.active && !state.pending.length && this.states.get(state.key) === state) this.states.delete(state.key);
+  }
+
+  // Host-owned quiet/cancel gate for exactly one logical identity × conversation.
+  // This cancels unsent work only; wire-started results remain non-replayable.
+  invalidateConversation(conversationId, reason = "conversation-invalidated", accountId = "", scope = {}) {
+    const owner = this.logicalOwner(accountId, scope);
+    const state = this.states.get(laneKey(owner, String(conversationId || "unknown")));
+    const counts = { active: 0, pending: 0, dropped: 0 };
+    if (!state) return counts;
+    if (state.active && !state.active.dropped && !state.active.deliveryStarted) {
+      this.cancelActive(state.active, reason, { drop: true });
+      counts.active += 1;
+    }
+    for (const job of state.pending) {
+      if (job.dropped) continue;
+      job.dropped = true;
+      job.resolve?.({ ok: true, skipped: true, reason });
+      this.metrics.dropped += 1;
+      counts.pending += 1;
+    }
+    state.pending = [];
+    this.cleanupState(state);
+    counts.dropped = counts.active + counts.pending;
+    return counts;
   }
 
   refreshLogicalBot(logicalBotId, reason = "policy-updated") {
@@ -300,17 +414,23 @@ export class ReplyCoordinator {
 
   enqueue(input = {}) {
     const cfg = this.config();
+    const ids = inputMessageIds(input);
+    const owner = this.logicalOwner(input.accountId, input);
+    const conversationId = String(input.conversationId || "unknown");
+    const messageIds = ids.filter((id) => !this.isCovered([id], input.accountId, { logicalBotId: owner, conversationId }));
+    if (ids.length && !messageIds.length) return Promise.resolve({ ok: true, skipped: true, reason: "covered" });
+    const currentMessages = messagesForIds(input.currentMessages || input.current, messageIds);
     const job = {
       ...input,
       id: String(input.id || `reply_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`),
-      conversationId: String(input.conversationId || "unknown"),
+      conversationId,
       senderId: String(input.senderId || ""),
       accountId: String(input.accountId || ""),
-      logicalBotId: this.logicalOwner(input.accountId, input),
+      logicalBotId: owner,
       mode: String(input.mode || "reply"),
       direct: input.direct === true,
-      currentMessages: asArray(input.currentMessages || input.current),
-      messageIds: unique(input.messageIds),
+      currentMessages,
+      messageIds,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       contextRevision: 0,
@@ -319,12 +439,17 @@ export class ReplyCoordinator {
       dropped: false,
       preReplySent: false
     };
-    if (this.isCovered(job.messageIds, job.accountId, job)) return Promise.resolve({ ok: true, skipped: true, reason: "covered" });
     const state = this.state(job.conversationId, job.logicalBotId);
-    if (state.active?.deliveryStarted && state.active.expressionSending && sameAccount(state.active, job)
+    const duplicate = [state.active, ...state.pending].find((item) => item && !item.dropped
+      && item.senderId === job.senderId && job.messageIds.length
+      && job.messageIds.every((id) => item.messageIds.includes(id)));
+    if (duplicate) return Promise.resolve({ ok: true, absorbed: true, duplicate: true, jobId: duplicate.id });
+    noteIncoming(state, job);
+    if (state.active?.deliveryStarted && state.active.expressionSending && sameAccount(state.active, job) && freshIncoming(job, Date.now(), cfg)
+      && currentOf(job).addressedTo !== "other"
       && (state.active.senderId === job.senderId || job.direct)) state.active.stopRemaining?.("new-job-during-expression");
     const existing = [state.active, ...state.pending].find((item) => (
-      item && !item.dropped && !item.deliveryStarted && sameAccount(item, job) && item.senderId === job.senderId && Date.now() - Number(item.updatedAt || item.createdAt) <= cfg.windowMs
+      canMergeTurn(item, { ...job, current: currentMessages.at(-1) }, Date.now(), cfg)
     ));
     if (existing && cfg.liveEnabled) {
       if (job.direct && cfg.cancelProactiveOnDirect && ["active", "proactive", "delayed"].includes(existing.mode)) {
@@ -346,7 +471,7 @@ export class ReplyCoordinator {
         return Promise.resolve({ ok: true, absorbed: true, jobId: existing.id });
       }
     }
-    if (job.direct && cfg.cancelProactiveOnDirect) {
+    if (job.direct && cfg.cancelProactiveOnDirect && freshIncoming(job, Date.now(), cfg) && currentOf(job).addressedTo !== "other") {
       state.pending = state.pending.filter((item) => {
         const drop = sameAccount(item, job) && ["active", "proactive", "delayed"].includes(item.mode);
         if (drop) {
@@ -395,9 +520,20 @@ export class ReplyCoordinator {
 
   async runJob(job) {
     const cfg = this.config();
+    // A preceding job may have covered part of this batch while it was queued,
+    // including an uncertain wire attempt. Recheck before any execution.
+    const unseenIds = job.messageIds.filter((id) => !this.isCovered([id], job.accountId, job));
+    if (job.messageIds.length && !unseenIds.length) return { ok: true, skipped: true, reason: "covered" };
+    job.messageIds = unseenIds;
+    job.currentMessages = messagesForIds(job.currentMessages, unseenIds);
     while (!job.dropped) {
-      const settle = Math.max(0, Number(job.settleUntil || 0) - Date.now());
-      if (settle) await new Promise((resolve) => setTimeout(resolve, settle));
+      // A new fragment can extend settling while the previous timer is asleep.
+      // Recheck it, but never let refreshes extend the original live-turn cap.
+      let settle;
+      while (!job.dropped && (settle = Math.max(0,
+        Math.min(Number(job.settleUntil || 0), job.createdAt + cfg.windowMs) - Date.now())) > 0) {
+        await new Promise((resolve) => setTimeout(resolve, settle));
+      }
       if (job.dropped) break;
       const revision = Number(job.contextRevision || 0);
       const controller = new AbortController();

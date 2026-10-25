@@ -23,8 +23,11 @@ const normalize = x => x.normalize("NFKC").toLowerCase().replace(/\s+/gu, " ").t
 const dangerous = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]|\[\s*CQ\s*:|\[\[DISCOVERY_USED:|MEDIA:\s*(?:file:)?\/|<\/?(?:script|system|developer|instruction)\b|(?:忽略|覆盖|绕过).{0,12}(?:指令|提示|规则|权限)|系统提示词|开发者消息|你必须|(?:ignore|override|bypass).{0,24}(?:instructions?|prompts?|rules?)|(?:全群|所有人|大家)(?:都|已经)?(?:同意|接受).{0,12}(?:互损|辱骂|攻击)|(?:password|api[_ -]?key|token|secret|cookie|authorization|密码|口令|验证码|密钥|身份证|银行卡|手机号|家庭住址)\s*[:：=]|Bearer\s+|https?:\/\/[^\s]*[?&](?:token|key|secret|auth|code)=|\b\d{16,19}\b/iu;
 function safe(value, max, empty = false) {
   return typeof value === "string" && value.length <= max && (empty || value.trim().length > 0)
-    && redactText(value) === value && !dangerous.test(value);
+    && redactText(value) === value && redactText(value.normalize("NFKC")) === value.normalize("NFKC")
+    && !dangerous.test(value) && !dangerous.test(value.normalize("NFKC"));
 }
+// Shared by the read-only style projection; data safety is not authentication.
+export const isSafeGroupExpression = (value, max = 1000, empty = false) => safe(value, max, empty);
 // Only explicit local definitions, not likes/silence, quoted stories or model
 // suggestions. Captures must literally occur in the original message. At most
 // three definitions per event; a fourth rejects admission rather than truncating.
@@ -92,7 +95,7 @@ function validCandidate(c, ctx, state) {
     && c.reviews.at(-1).revision === c.revision : c.meaning === c.observedMeaning);
 }
 function validState(s, ctx) {
-  return fields(s, ["revision", "updatedAt", "lastSentAt", "lastReceivedAt", "nextCandidateId", "seen", "stats", "candidates"])
+  return fields(s, ["revision", "updatedAt", "lastSentAt", "lastReceivedAt", "nextCandidateId", "seen", "stats", "candidates", "implicit"])
     && uint(s.revision) && s.revision >= 1 && stamp(s.updatedAt) && stamp(s.lastSentAt) && stamp(s.lastReceivedAt)
     && s.lastSentAt <= s.lastReceivedAt && s.lastReceivedAt <= s.updatedAt
     && uint(s.nextCandidateId) && s.nextCandidateId >= 1 && validStats(s.stats)
@@ -103,7 +106,8 @@ function validState(s, ctx) {
     && s.seen.at(-1).sentAt === s.lastSentAt && s.seen.at(-1).receivedAt === s.lastReceivedAt
     && Array.isArray(s.candidates) && s.candidates.length <= MAX_CANDIDATES
     && new Set(s.candidates.map(c => c?.id)).size === s.candidates.length
-    && s.nextCandidateId === s.candidates.length + 1 && Array.from(s.candidates).every(c => validCandidate(c, ctx, s));
+    && s.nextCandidateId === s.candidates.length + 1 && Array.from(s.candidates).every(c => validCandidate(c, ctx, s))
+    && (!own(s, "implicit") || validImplicit(s.implicit, ctx, s.updatedAt));
 }
 // Inspect only the addressed bot/group. Corrupt neighbors are never projected,
 // repaired, cloned or used to block an unrelated scope.
@@ -143,7 +147,8 @@ function projectedStats(s) {
 export function observeGroupLanguage(root, args = {}) {
   const found = lookup(root, args);
   if (!found.ok) return found;
-  if (args.autoCandidates !== undefined && typeof args.autoCandidates !== "boolean") return fail("invalid_args");
+  if ((args.autoCandidates !== undefined && typeof args.autoCandidates !== "boolean")
+    || (args.implicitLearning !== undefined && typeof args.implicitLearning !== "boolean")) return fail("invalid_args");
   const m = args.message;
   if (!fields(m, ["messageId", "userId", "text", "sentAt", "receivedAt", "isBot", "isQuoted", "imageCount"])
     || !sourceValid({ messageId: m?.messageId, userId: m?.userId, sentAt: m?.sentAt, receivedAt: m?.receivedAt })
@@ -195,9 +200,17 @@ export function observeGroupLanguage(root, args = {}) {
   s.emojiCount += emoji; if (emoji) s.emojiMessageCount++;
   next.seen.push({ messageId: m.messageId, userId: m.userId, sentAt: m.sentAt, receivedAt: m.receivedAt });
   next.lastSentAt = m.sentAt; next.lastReceivedAt = next.updatedAt = m.receivedAt; next.revision++;
+  // Admission is opt-in independently of the legacy explicit-definition path.
+  // All work is on the detached latest draft: any failure publishes NOTHING.
+  let implicitIds;
+  if (args.implicitLearning === true && args.autoCandidates !== false) {
+    const admitted = observeImplicit(next, prior, args, m);
+    if (!admitted.ok) return admitted;
+    implicitIds = admitted.ids;
+  }
   if (!validState(next, args)) return fail("backpressure");
   publish(root, args, next);
-  return { ok: true, revision: next.revision, candidateIds: ids };
+  return { ok: true, revision: next.revision, candidateIds: ids, ...(implicitIds ? { implicitIds } : {}) };
 }
 
 /** Read-only, detached admin view; missing scopes create NOTHING. Candidate
@@ -244,16 +257,280 @@ export function reviewGroupSlang(root, args = {}) {
   return { ok: true, revision: c.revision, scopeRevision: next.revision, status: c.status };
 }
 
+// Implicit learning is deliberately a small lexical learner, NOT a person-fact
+// extractor. It only observes short utterances/quoted terms, and deterministically
+// binds a next-turn explanation to the previous original message from another
+// sender (<=2 minutes). No likes, silence, frequency threshold or model score can
+// establish a meaning, verify it, activate it, or grant consent/persona authority.
+// The optional v1 extension leaves every legacy definition/review intact.
+const TERM = /^[\p{L}\p{N}\p{Extended_Pictographic}_·-]{2,16}$/u;
+const implicitId = (ctx, n) => `implicit:${ctx.logicalId}:${ctx.conversationId}:${n}`;
+const legacyRejected = (state, term) => state.candidates.some(c => ["rejected", "revoked"].includes(c.status)
+  && normalize(c.term) === normalize(term));
+const REVIEW_STAGE = Object.freeze({ verify: "Verified", activate: "Active", reject: "Deprecated", deprecate: "Deprecated" });
+const termSafe = value => safe(value, 16) && TERM.test(value) && !/^\d+$/u.test(value)
+  && !/(?:是|在|指的|表示|住|来自|叫|姓|身份|职业|老婆|老公|女友|男友|生日|年龄|电话|地址|喜欢|讨厌|患有|得了|拥有)/u.test(value);
+// P1 fail-closed vocabulary: generic expressive acts only. Arbitrary paraphrases,
+// names, identities, relationships and biographical claims are NOT admissible.
+// A broader semantic learner needs a separately reviewed admission contract.
+const ACT_WORDS = /^(?:(?:表示|用于|形容|调侃|回应|邀请|自嘲|感叹|吐槽|一起|想|正在|反复|暂时|有点|一下|休息|摸鱼|放松|无奈|惊讶|开心|失望|赞同|拒绝|请求|讨论|庆祝|催促|等待|加油|下班|工作|学习|吃饭|睡觉|开玩笑|修改|需求|代码|测试|失败|成功|重试|回滚|赶工|加班|拖延|事情|进度|完成|没有|可以|不要|继续|重新|停止|开始|解决|问题|感谢|抱歉|太|很|又|先|再|别|不|了|的|地|得|和|或|与|、|，|\s))+$/u;
+const lexicalMeaning = x => safe(x, 80) && x.trim() === x && ACT_WORDS.test(x) && /休息|摸鱼|放松|无奈|惊讶|开心|失望|赞同|拒绝|请求|讨论|庆祝|催促|等待|加油|下班|工作|学习|吃饭|睡觉|开玩笑|修改|需求|代码|测试|失败|成功|重试|回滚|赶工|加班|拖延|进度|完成|解决|感谢|抱歉/u.test(x);
+function explanation(text, term) {
+  const named = new RegExp(`^[“「『"]?${term}[”」』"]?(?:指的是|就是说|就是|表示)[:：]?\\s*(.+?)[。！!]?$`, "u");
+  const match = named.exec(text) || /^(?:就是|指的是)[:：]?\s*(.+?)[。！!]?$/u.exec(text);
+  return match && lexicalMeaning(match[1]) ? match[1] : null;
+}
+function usageContext(quote, term) {
+  const m = new RegExp(`^[“「『"]?${term}[”」』"]?[,，：:\\s]+(.+?)[。！!]?$`, "u").exec(quote);
+  return m && lexicalMeaning(m[1]) ? m[1] : null;
+}
+const correction = (text, term) => new RegExp(`^[“「『"]?${term}[”」』"]?(?:不是这个意思|不是这意思|这个解释不对|别再用|不要再用)`, "u").exec(text)?.[0] || null;
+const adjacentCorrection = text => /^(?:不是这个意思|不是这意思|这个解释不对|别再用这个梗|不要再用这个梗)/u.exec(text)?.[0] || null;
+function occurrenceTerms(text) {
+  const result = [];
+  if (termSafe(text) && !/^(?:就是|指的是)|不是这(?:个)?意思|这个解释不对|别再用|不要再用|在本群|在这里/u.test(text)) result.push(text);
+  for (const m of text.matchAll(/[“「『"]([\p{L}\p{N}\p{Extended_Pictographic}_·-]{2,16})[”」』"]/gu)) {
+    if (termSafe(m[1]) && !result.some(x => normalize(x) === normalize(m[1]))) result.push(m[1]);
+  }
+  return result;
+}
+const sourceOf = e => ({ messageId: e.messageId, userId: e.userId, sentAt: e.sentAt, receivedAt: e.receivedAt });
+const evidenceOf = entry => entry.events.filter(e => ["occurrence", "explanation", "correction"].includes(e.type));
+const proposalOf = entry => entry.events.find(e => e.type === "proposal");
+const hasSources = (entry, ids) => Array.isArray(ids) && ids.length >= 2 && ids.length <= MAX_EVIDENCE
+  && new Set(ids).size === ids.length && ids.every(token)
+  && ids.every(id => evidenceOf(entry).some(e => e.messageId === id && e.type !== "correction"))
+  && new Set(evidenceOf(entry).filter(e => ids.includes(e.messageId)).map(e => e.userId)).size >= 2;
+const hasSemanticSource = (entry, ids) => evidenceOf(entry).some(e => ids.includes(e.messageId)
+  && (e.type === "explanation" || (e.type === "occurrence" && usageContext(e.quote, entry.term))));
+function implicitLifecycle(entry, now) {
+  let lifecycle = "Observed", meaning;
+  for (const e of entry.events) {
+    if (e.type === "proposal") { lifecycle = "Candidate"; meaning = e.meaning; }
+    if (e.type === "explanation" && meaning && e.meaning !== meaning) lifecycle = "Deprecated";
+    if (e.type === "correction") lifecycle = "Deprecated";
+    if (e.type === "review") lifecycle = REVIEW_STAGE[e.action];
+  }
+  return now >= entry.expiresAt ? "Deprecated" : lifecycle;
+}
+function validImplicit(book, ctx, updatedAt) {
+  if (!fields(book, ["version", "entries"]) || book.version !== 1 || !Array.isArray(book.entries)
+    || book.entries.length > MAX_CANDIDATES || new Set(book.entries.map(c => normalize(typeof c?.term === "string" ? c.term : ""))).size !== book.entries.length) return false;
+  return Array.from(book.entries).every((c, index) => {
+    if (!fields(c, ["id", "term", "createdAt", "expiresAt", "events"]) || c.id !== implicitId(ctx, index + 1)
+      || !termSafe(c.term) || !stamp(c.createdAt) || c.expiresAt !== c.createdAt + TTL || !stamp(c.expiresAt)
+      || !Array.isArray(c.events) || !c.events.length || c.events.length > 13 || c.events[0]?.at !== c.createdAt) return false;
+    let at = c.createdAt, stage = "Observed", proof = [], proposal = null, reviews = 0;
+    for (const e of c.events) {
+      if (!plain(e) || !stamp(e.at) || e.at < at || e.at > updatedAt || stage === "Deprecated") return false;
+      at = e.at;
+      if (["occurrence", "explanation", "correction"].includes(e.type)) {
+        if (!fields(e, ["type", "at", "messageId", "userId", "sentAt", "receivedAt", "quote", "meaning", "adjacentMessageId"])
+          || !sourceValid(sourceOf(e)) || e.at !== e.receivedAt || !safe(e.quote, 192)
+          || proof.some(p => p.messageId === e.messageId) || proof.length >= (e.type === "correction"
+            || (e.type === "explanation" && proposal && e.meaning !== proposal.meaning) ? 9 : MAX_EVIDENCE)) return false;
+        if (e.type !== "correction" && (!["Observed", "Candidate"].includes(stage) || e.at >= c.expiresAt)) return false;
+        if (e.type === "occurrence" && ((e.quote !== c.term && !usageContext(e.quote, c.term)) || own(e, "meaning") || own(e, "adjacentMessageId"))) return false;
+        if (e.type === "explanation") {
+          const adjacent = proof.find(p => p.messageId === e.adjacentMessageId && p.type === "occurrence");
+          if (!adjacent || adjacent.userId === e.userId || e.sentAt < adjacent.sentAt || e.sentAt - adjacent.sentAt > 120000
+            || !lexicalMeaning(e.meaning) || explanation(e.quote, c.term) !== e.meaning) return false;
+          if (proposal && e.meaning !== proposal.meaning) stage = "Deprecated";
+        }
+        if (e.type === "correction") {
+          if (own(e, "meaning")) return false;
+          if (correction(e.quote, c.term) !== e.quote) {
+            const adjacent = proof.find(p => p.messageId === e.adjacentMessageId && p.type === "occurrence");
+            if (adjacentCorrection(e.quote) !== e.quote || !adjacent || adjacent.userId === e.userId
+              || e.sentAt < adjacent.sentAt || e.sentAt - adjacent.sentAt > 120000) return false;
+          } else if (own(e, "adjacentMessageId")) return false;
+          stage = "Deprecated";
+        }
+        proof.push(e);
+      } else if (e.type === "proposal") {
+        if (!fields(e, ["type", "at", "origin", "meaning", "sourceMessageIds"]) || stage !== "Observed" || proposal
+          || e.at >= c.expiresAt || !lexicalMeaning(e.meaning) || !["adjacency", "model"].includes(e.origin)
+          || !hasSources({ events: proof }, e.sourceMessageIds)
+          || (e.origin === "model" && !hasSemanticSource({ term: c.term, events: proof }, e.sourceMessageIds))
+          || (e.origin === "adjacency" && !proof.some(p => p.type === "explanation" && p.meaning === e.meaning && e.sourceMessageIds.includes(p.messageId)))) return false;
+        proposal = e; stage = "Candidate";
+      } else if (e.type === "review") {
+        if (!fields(e, ["type", "at", "actorId", "action"]) || !token(e.actorId) || ++reviews > 3
+          || !["verify", "activate", "reject", "deprecate"].includes(e.action)) return false;
+        if (e.action === "verify" && (stage !== "Candidate" || !proposal || e.at >= c.expiresAt)) return false;
+        if (e.action === "activate" && (stage !== "Verified" || e.at >= c.expiresAt)) return false;
+        stage = REVIEW_STAGE[e.action];
+      } else return false;
+    }
+    return proof.length > 0;
+  });
+}
+function observeImplicit(next, prior, ctx, m) {
+  const entries = next.implicit?.entries || [], ids = [];
+  const priorMessage = prior?.seen.at(-1);
+  const adjacent = priorMessage && priorMessage.messageId !== m.messageId && priorMessage.userId !== m.userId
+    && m.sentAt - priorMessage.sentAt >= 0 && m.sentAt - priorMessage.sentAt <= 120000;
+  const related = adjacent ? entries.filter(c => c.events.some(e => e.type === "occurrence" && e.messageId === priorMessage.messageId)) : [];
+  // Correction prose is never fresh slang intake, and cannot lose priority just
+  // because it also happens to quote new terms at the candidate-capacity limit.
+  const correcting = entries.some(c => correction(m.text, c.term)) || (related.length === 1 && adjacentCorrection(m.text));
+  const terms = correcting ? [] : occurrenceTerms(m.text);
+  if (terms.length > 3) return fail("backpressure");
+  for (const term of terms) {
+    if (legacyRejected(next, term)) continue;
+    if (!entries.some(c => normalize(c.term) === normalize(term))) {
+      if (entries.length >= MAX_CANDIDATES) return fail("backpressure");
+      entries.push({ id: implicitId(ctx, entries.length + 1), term, createdAt: m.receivedAt,
+        expiresAt: m.receivedAt + TTL, events: [] });
+    }
+  }
+  const event = (type, quote) => ({ type, at: m.receivedAt, ...sourceOf(m), quote });
+  for (const c of entries) {
+    if (implicitLifecycle(c, 0) === "Deprecated" || legacyRejected(next, c.term)) continue;
+    // Corrections have a reserved evidence slot, apply even to Active/expired
+    // entries, and NEVER become new meanings or positive evidence.
+    const namedCorrection = correction(m.text, c.term);
+    const neighboringCorrection = related.length === 1 && related[0].id === c.id ? adjacentCorrection(m.text) : null;
+    if (namedCorrection || neighboringCorrection) {
+      c.events.push({ ...event("correction", namedCorrection || neighboringCorrection),
+        ...(!namedCorrection ? { adjacentMessageId: priorMessage.messageId } : {}) });
+      ids.push(c.id);
+      continue;
+    }
+    if (!["Observed", "Candidate"].includes(implicitLifecycle(c, m.receivedAt))) continue;
+    const meaning = related.length === 1 && related[0].id === c.id && m.text.length <= 192 ? explanation(m.text, c.term) : null;
+    const observed = terms.includes(c.term);
+    if (!observed && !meaning) continue;
+    const conflict = meaning && proposalOf(c) && meaning !== proposalOf(c).meaning;
+    if (evidenceOf(c).length >= MAX_EVIDENCE && !conflict) continue; // Reserve a correction/conflict slot.
+    c.events.push(meaning ? { ...event("explanation", m.text), meaning, adjacentMessageId: priorMessage.messageId }
+      : event("occurrence", m.text.length <= 192 && usageContext(m.text, c.term) ? m.text : c.term));
+    ids.push(c.id);
+    if (meaning && !proposalOf(c)) {
+      const ids = evidenceOf(c).map(e => e.messageId);
+      if (hasSources(c, ids)) c.events.push({ type: "proposal", at: m.receivedAt, origin: "adjacency", meaning, sourceMessageIds: ids });
+    }
+  }
+  if (entries.length) next.implicit = { version: 1, entries };
+  return { ok: true, ids };
+}
+
+/** Detached admin-only provenance. Read defaults never persist. revision is the
+ * event count; lifecycle is an explicit projection, not a second mutable status. */
+export function listImplicitGroupLanguage(root, ctx = {}) {
+  const found = lookup(root, ctx);
+  if (!found.ok) return found;
+  if (!stamp(ctx.now) || (found.state && ctx.now < found.state.updatedAt)) return fail("invalid_time");
+  return { ok: true, revision: found.state?.revision || 0, entries: (found.state?.implicit?.entries || []).map(c => ({
+    id: c.id, term: c.term, revision: c.events.length,
+    lifecycle: legacyRejected(found.state, c.term) ? "Deprecated" : implicitLifecycle(c, ctx.now),
+    createdAt: c.createdAt, expiresAt: c.expiresAt, evidence: clone(evidenceOf(c)),
+    proposal: clone(proposalOf(c) || null), reviews: clone(c.events.filter(e => e.type === "review"))
+  })) };
+}
+function implicitTarget(root, args) {
+  const found = lookup(root, args);
+  if (!found.ok) return found;
+  if (!token(args.id) || !uint(args.expectedRevision) || args.expectedRevision < 1 || !stamp(args.now)) return fail("invalid_args");
+  const entry = found.state?.implicit?.entries.find(c => c.id === args.id);
+  if (!entry) return fail("unknown_candidate");
+  if (entry.events.length !== args.expectedRevision) return fail("stale_revision");
+  if (args.now < found.state.updatedAt) return fail("stale_time");
+  if (implicitLifecycle(entry, 0) === "Deprecated" || legacyRejected(found.state, entry.term)) return fail("terminal_candidate");
+  return { ok: true, state: found.state, entry };
+}
+function appendImplicit(root, args, state, entry, event) {
+  const next = clone(state), target = next.implicit.entries.find(c => c.id === entry.id);
+  target.events.push(event); next.updatedAt = args.now; next.revision++;
+  if (!validState(next, args)) return fail("invalid_state");
+  publish(root, args, next);
+  return { ok: true, id: entry.id, revision: target.events.length, scopeRevision: next.revision,
+    lifecycle: implicitLifecycle(target, args.now) };
+}
+/** Host-only admission of a proposal from an ALREADY performed, pinned model
+ * call. No model/IO/ACK here. Only stored original evidence IDs are accepted;
+ * model-supplied IDs, quotes, scopes, lifecycle, confidence or actors cannot add
+ * evidence or approval. Host must pin id/revision BEFORE its existing await and
+ * check cancellation/policy/route in the latest-draft transaction. */
+export function proposeGroupSlang(root, args = {}) {
+  if (!plain(args)) return fail("invalid_args");
+  if (args.implicitLearning !== true) return fail(typeof args.implicitLearning === "boolean" || args.implicitLearning === undefined ? "implicit_disabled" : "invalid_args");
+  const found = implicitTarget(root, args);
+  if (!found.ok) return found;
+  const p = args.proposal;
+  if (!fields(p, ["meaning", "sourceMessageIds"]) || !lexicalMeaning(p.meaning) || !hasSources(found.entry, p.sourceMessageIds)
+    || !hasSemanticSource(found.entry, p.sourceMessageIds)) return fail("invalid_proposal");
+  if (args.now >= found.entry.expiresAt) return fail("expired");
+  if (proposalOf(found.entry)) return fail("proposal_exists");
+  return appendImplicit(root, args, found.state, found.entry, { type: "proposal", at: args.now,
+    origin: "model", meaning: p.meaning, sourceMessageIds: [...p.sourceMessageIds] });
+}
+/** Separate verify and activate CAS decisions by an authenticated, scope-bound
+ * local administrator. Rejection/correction is terminal for the normalized term;
+ * no confidence, repetition or later model output can resurrect it. */
+export function reviewImplicitGroupSlang(root, args = {}) {
+  if (!plain(args)) return fail("invalid_args");
+  const actor = args.actor;
+  if (!fields(actor, ["id", "authorized", "logicalId", "conversationId"]) || !token(actor.id) || actor.authorized !== true
+    || actor.logicalId !== args.logicalId || actor.conversationId !== args.conversationId) return fail("unauthorized");
+  if (!["verify", "activate", "reject", "deprecate"].includes(args.action)) return fail("invalid_args");
+  const found = implicitTarget(root, args);
+  if (!found.ok) return found;
+  if (["verify", "activate"].includes(args.action) && args.now >= found.entry.expiresAt) return fail("expired");
+  const stage = implicitLifecycle(found.entry, 0);
+  if ((args.action === "verify" && stage !== "Candidate") || (args.action === "activate" && stage !== "Verified")) return fail("invalid_transition");
+  return appendImplicit(root, args, found.state, found.entry, { type: "review", action: args.action, at: args.now, actorId: actor.id });
+}
+
+function relevant(query, term, meaning) {
+  const q = normalize(query);
+  if (!q) return false;
+  if (q.includes(normalize(term))) return true;
+  // Bounded literal semantic anchors, not embeddings or guessed associations.
+  // Stop generic words from turning every short conversation into a hit.
+  const m = normalize(meaning).replace(/表示|用于|形容|调侃|回应|邀请|自嘲|感叹|吐槽|一起|正在|有点|一下|事情|问题|可以|没有|暂时|反复|想/gu, " ");
+  for (const [part] of m.matchAll(/\p{Script=Han}{2,}|[a-z]{3,}/gu)) {
+    if (/^[a-z]/u.test(part)) {
+      if (new RegExp(`\\b${part}\\b`, "u").test(q)) return true;
+    } else for (let i = 0; i < part.length - 1; i++) {
+      if (q.includes(part.slice(i, i + 2))) return true;
+    }
+  }
+  return false;
+}
+/** Read-only model-safe results, <=3, without source/actor IDs, evidence or raw
+ * query. Existing confirmed explicit definitions remain valid. Context matching
+ * may use meaning anchors without requiring the current message to name a term.
+ * This returns data, never wire/send authority. Host owns enabled/shadow/quiet. */
+export function retrieveGroupSlang(root, ctx = {}) {
+  const found = lookup(root, ctx);
+  if (!found.ok || !found.state || !stamp(ctx.now) || ctx.now < found.state.updatedAt
+    || !safe(ctx.query, 1000, true) || (ctx.serious !== undefined && typeof ctx.serious !== "boolean")
+    || (ctx.quiet !== undefined && typeof ctx.quiet !== "boolean") || ctx.serious === true || ctx.quiet === true) return [];
+  // Expiry withdraws this record, not a separately reviewed legacy definition.
+  // Only an actual correction/rejection is a cross-path term tombstone.
+  const terminal = new Set((found.state.implicit?.entries || []).filter(c => implicitLifecycle(c, 0) === "Deprecated").map(c => normalize(c.term)));
+  const rejected = new Set(found.state.candidates.filter(c => ["rejected", "revoked"].includes(c.status)).map(c => normalize(c.term)));
+  const result = found.state.candidates.filter(c => c.status === "confirmed" && c.expiresAt > ctx.now
+    && !terminal.has(normalize(c.term)) && !rejected.has(normalize(c.term)) && relevant(ctx.query, c.term, c.meaning))
+    .map(c => ({ term: c.term, meaning: c.meaning }));
+  for (const c of found.state.implicit?.entries || []) {
+    const proposal = proposalOf(c);
+    if (implicitLifecycle(c, ctx.now) !== "Active" || rejected.has(normalize(c.term)) || !proposal
+      || !relevant(ctx.query, c.term, proposal.meaning) || result.some(x => normalize(x.term) === normalize(c.term))) continue;
+    result.push({ term: c.term, meaning: proposal.meaning });
+  }
+  return result.slice(0, 3);
+}
+
 /** Read-only model projection. No source text/QQ/actor IDs, no candidate prose or
  * raw query. Definitions are untrusted data, NEVER personality/consent authority.
- * Stable insertion order, <=3 literal relevant confirmed definitions, 30-day TTL.
+ * Stable insertion order, <=3 relevant confirmed/Active definitions, 30-day TTL.
  * Expression statistics are descriptive, not a mandate or acceptance inference. */
 export function groupLanguagePrompt(root, ctx = {}) {
   const found = lookup(root, ctx);
   if (!found.ok || !found.state || !stamp(ctx.now) || ctx.now < found.state.updatedAt || !safe(ctx.query, 1000, true)) return "";
-  const query = normalize(ctx.query);
-  const slang = found.state.candidates.filter(c => c.status === "confirmed" && c.expiresAt > ctx.now
-    && query.includes(normalize(c.term))).slice(0, 3).map(c => ({ term: c.term, meaning: c.meaning }));
+  const slang = retrieveGroupSlang(root, ctx);
   const s = projectedStats(found.state.stats);
   const preferences = { sampleCount: s.messageCount, averageTextLength: s.averageTextLength,
     averageIntervalMs: s.averageIntervalMs, imageRatio: s.imageRatio, emojiRatio: s.emojiRatio,

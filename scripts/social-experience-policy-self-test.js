@@ -13,6 +13,13 @@ assert.equal(legacy.stickers.autonomousEligibility, false);
 assert.equal(legacy.stickers.maxDailyDownloads, 16);
 assert.equal(legacy.reactions.enabled, false);
 assert.deepEqual(legacy.reactions.emojiIds, ["76"]);
+for (const section of ["interestWatch", "style", "pokes", "mentions", "forwardRead"])
+  assert.equal(legacy[section].enabled, false, `${section} defaults off`);
+assert.equal(legacy.language.implicitLearning, false);
+for (const bad of [{ interestWatch: { maxDurationMs: 600001 } }, { interestWatch: { maxActive: 5 } },
+  { pokes: { maxDaily: 201 } }, { pokes: { cooldownMs: -1 } }, { mentions: { enabled: 1 } },
+  { forwardRead: { enabled: "true" } }, { language: { implicitLearning: "yes" } }])
+  assert.throws(() => validateSocialExperiencePolicy(bad));
 for (const bad of [{ stickers: { groupLearning: "true" } }, { stickers: { autonomousEligibility: 1 } },
   { stickers: { maxDailyDownloads: 101 } }, { reactions: { enabled: "yes" } }, { reactions: { maxDaily: 201 } },
   { reactions: { emojiIds: [76] } }, { reactions: { emojiIds: ["file:///tmp/a"] } },
@@ -57,6 +64,9 @@ for (let i = 0; i < 4; i++) diagnostics.record("turns", "account:alpha", { reaso
 assert.equal(diagnostics.snapshot().recent.length, 2);
 assert.equal(diagnostics.snapshot().turns, 4);
 assert(!JSON.stringify(diagnostics.snapshot()).includes("PRIVATE"));
+diagnostics.record("styles", "account:alpha", { reason: "private_ascii_evidence", score: Infinity, content: "PRIVATE" });
+assert.equal(diagnostics.snapshot().recent.at(-1).reason, undefined);
+assert.equal(diagnostics.snapshot().recent.at(-1).score, undefined);
 assert.equal(parseReplyPlan(JSON.stringify({ version: 1, action: "reply", replyToMessageId: null,
   messages: [{ type: "text", content: "__LEARN__ 这是合成的澄清问题？" }] })).messages[0].content, "这是合成的澄清问题？");
 const queue = new ReplyCoordinator({ config: { responseQueue: { minDelayMs: 0 } } });

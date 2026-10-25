@@ -29,17 +29,20 @@ const skipped = ack => ack !== null && typeof ack === "object" && !Array.isArray
  * sent counts confirmed wire ACKs (not durable receipts); uncertain also covers
  * unknown receipt durability. accepted counts reaction API acceptance, never
  * visible delivery or bot speech. partial counts sent + accepted plan items. */
-export async function executeReplyPlan(plan, { sendText, sendSticker, sendReaction, allowedStickerIds = [], allowedReactionIds = [], beforeEach, onReceipt, signal,
+export async function executeReplyPlan(plan, { sendText, sendSticker, sendReaction, sendMention, sendPoke,
+  allowedStickerIds = [], allowedReactionIds = [], allowedMentionIds = [], allowedPokeIds = [], direct = false, beforeEach, onReceipt, signal,
   sleep = wait, minIntervalMs = 800, maxIntervalMs = 2000 } = {}) {
   if (![sendText, beforeEach, onReceipt, sleep].every(fn => typeof fn === "function")) throw new TypeError("INVALID_REPLY_ADAPTER");
   if (![minIntervalMs, maxIntervalMs].every(n => Number.isSafeInteger(n) && n >= 0 && n <= 60000)
     || minIntervalMs > maxIntervalMs) throw new TypeError("INVALID_REPLY_INTERVAL");
   // Copy before any await, so host/model mutations cannot change later messages.
-  const ready = validateReplyPlan(plan, { maxMessages: 4, direct: false,
-    allowedStickerIds, allowedReactionIds,
+  const ready = validateReplyPlan(plan, { maxMessages: 4, direct,
+    allowedStickerIds, allowedReactionIds, allowedMentionIds, allowedPokeIds,
     allowedQuoteIds: plan?.replyToMessageId == null ? [] : [plan.replyToMessageId] });
   if (ready.messages.some(item => item.type === "sticker") && typeof sendSticker !== "function") throw new TypeError("INVALID_REPLY_ADAPTER");
   if (ready.messages.some(item => item.type === "reaction") && typeof sendReaction !== "function") throw new TypeError("INVALID_REPLY_ADAPTER");
+  if (ready.messages.some(item => item.type === "poke") && typeof sendPoke !== "function") throw new TypeError("INVALID_REPLY_ADAPTER");
+  if (ready.messages.some(item => item.type === "mention") && typeof sendMention !== "function") throw new TypeError("INVALID_REPLY_ADAPTER");
   const receipts = [];
   let sent = 0, accepted = 0, uncertain = false;
   const cancelled = () => signal?.aborted === true;
@@ -66,9 +69,11 @@ export async function executeReplyPlan(plan, { sendText, sendSticker, sendReacti
     const item = ready.messages[index];
     let type = item.type;
     const content = type === "sticker" ? item.fallbackText || "" : item.content;
-    const quoteId = type !== "reaction" && index === 0 ? ready.replyToMessageId : null;
+    const native = ["reaction", "poke"].includes(type);
+    const quoteId = !native && index === 0 ? ready.replyToMessageId : null;
     const guard = async () => !cancelled() && !denied(await beforeEach({ index, content, quoteId, signal, type,
-      ...(type === "sticker" ? { stickerId: item.stickerId } : type === "reaction" ? { reactionId: item.reactionId } : {}) })) && !cancelled();
+      ...(type === "sticker" ? { stickerId: item.stickerId } : type === "reaction" ? { reactionId: item.reactionId }
+        : type === "poke" ? { pokeId: item.pokeId } : type === "mention" ? { mentionId: item.mentionId } : {}) })) && !cancelled();
     try {
       if (index > 0) await pause(index);
       if (!await guard() || cancelled()) break;
@@ -76,11 +81,13 @@ export async function executeReplyPlan(plan, { sendText, sendSticker, sendReacti
     let receipt;
     try {
       let ack = type === "reaction" ? await sendReaction(item.reactionId, { signal })
+        : type === "poke" ? await sendPoke(item.pokeId, { signal })
+        : type === "mention" ? await sendMention(item.mentionId, content, { quoteId, index, signal })
         : type === "sticker" ? await sendSticker(item.stickerId, { quoteId, index }) : await sendText(content, { quoteId, index });
-      if (type === "reaction") {
+      if (native) {
         const valid = ack?.status === "accepted" && typeof ack.actionId === "string" && messageId(ack.actionId) !== null
           && ack.messageId === undefined && ack.message_id === undefined;
-        receipt = { index, type, reactionId: item.reactionId,
+        receipt = { index, type, ...(type === "reaction" ? { reactionId: item.reactionId } : { pokeId: item.pokeId }),
           ...(valid ? { status: "accepted", actionId: ack.actionId,
             ...(messageId(ack.targetMessageId) !== null ? { targetMessageId: ack.targetMessageId } : {}) }
             : { status: ["rejected", "unsupported"].includes(ack?.status) ? ack.status : "uncertain" }) };
@@ -95,12 +102,14 @@ export async function executeReplyPlan(plan, { sendText, sendSticker, sendReacti
         }
         const ambiguousSkip = type === "sticker" && ack && typeof ack === "object" && "skipped" in ack;
         const id = !ambiguousSkip && ack && typeof ack === "object" ? messageId(ack.messageId) : null;
-        receipt = { index, type, ...(type === "sticker" ? { stickerId: item.stickerId } : {}), content,
+        receipt = { index, type, ...(type === "sticker" ? { stickerId: item.stickerId }
+          : type === "mention" ? { mentionId: item.mentionId } : {}), content,
           ...(ack === false ? { status: "failed" } : id !== null ? { status: "sent", messageId: id } : { status: "uncertain" }) };
       }
     } catch { receipt = { index, type, ...(type === "sticker" ? { stickerId: item.stickerId }
-      : type === "reaction" ? { reactionId: item.reactionId } : {}), status: "uncertain",
-      ...(type !== "reaction" ? { content } : {}) }; }
+      : type === "reaction" ? { reactionId: item.reactionId } : type === "poke" ? { pokeId: item.pokeId }
+        : type === "mention" ? { mentionId: item.mentionId } : {}), status: "uncertain",
+      ...(!native ? { content } : {}) }; }
     receipts.push(receipt);
     if (receipt.status === "sent") sent++;
     if (receipt.status === "accepted") accepted++;
