@@ -16,6 +16,7 @@ import { ensureRequestedTaskArtifacts } from "../src/task-artifacts.js";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "hermesqq-security-test-"));
 const results = [];
+const fakeChildProcessesOnly = process.argv.includes("--fake-child-processes-only");
 
 function deferred() {
   let resolve, reject;
@@ -88,7 +89,7 @@ async function testPdfPolicy() {
   assert.equal(fs.existsSync(renderDir), false, "cleanup must also run after a spawn exception");
   // Exercise the exact locally installed Pandoc, not a fabricated sanitizer result.
   const pandoc = ["/usr/local/bin/pandoc", "/opt/homebrew/bin/pandoc"].find((file) => fs.existsSync(file));
-  if (pandoc) {
+  if (pandoc && !fakeChildProcessesOnly) {
     let markdownCalls = 0;
     const renderMarkdown = artifactHarness((command, args, options) => {
       if (/pandoc$/.test(command)) {
@@ -110,11 +111,15 @@ async function testPdfPolicy() {
     const formatted = renderMarkdown({ task: { objective: "PDF", expectedArtifacts: ["格式.pdf"] }, artifacts: [{ name: "formatted.md" }], outputsDir });
     assert.equal(formatted.ok, true);
     assert.equal(markdownCalls, 1);
-  } else results.push("pandoc-formatting:skipped-no-pandoc");
+  } else results.push(fakeChildProcessesOnly ? "pandoc-formatting:skipped-fake-child-processes-only" : "pandoc-formatting:skipped-no-pandoc");
   results.push("pdf-escaped-content-csp-offline-sandbox-cleanup");
 }
 
 async function testRealChrome() {
+  if (fakeChildProcessesOnly) {
+    results.push("real-chrome:skipped-fake-child-processes-only");
+    return;
+  }
   const binaries = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge", "/Applications/Chromium.app/Contents/MacOS/Chromium"];
   if (!binaries.some((file) => fs.existsSync(file))) {

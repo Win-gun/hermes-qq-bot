@@ -1,11 +1,19 @@
 import fs from "node:fs";
 import path from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { CapabilityError, canonicalNoFollowPath, hasUnresolvedSideEffects, normalizeWorkGrant } from "./work-capabilities.js";
+import { sanitizeArchiveValue } from "./privacy-filter.js";
 
 function asArray(value) {
   if (Array.isArray(value)) return value.filter((item) => item !== undefined && item !== null);
   if (value === undefined || value === null || value === "") return [];
   return [value];
+}
+
+function nextCounter(value) {
+  const previous = value === undefined ? 0 : value;
+  if (!Number.isSafeInteger(previous) || previous < 0 || previous >= Number.MAX_SAFE_INTEGER) throw new CapabilityError("TASK_COUNTER_INVALID");
+  return previous + 1;
 }
 
 function safeId(value, fallback = "task") {
@@ -17,8 +25,14 @@ function writeJsonAtomic(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
   const tmp = `${filePath}.${randomBytes(6).toString("hex")}.tmp`;
   try {
-    fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    const fd = fs.openSync(tmp, "wx", 0o600);
+    try {
+      fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`);
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
     fs.renameSync(tmp, filePath);
+    const directory = fs.openSync(path.dirname(filePath), "r");
+    try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
   } finally {
     if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
   }
@@ -67,7 +81,7 @@ function backupBeforeOwnerMigration(filePath) {
 }
 
 export class TaskRuntime {
-  constructor({ rootDir, config, execute, notify, log = () => {}, warn = () => {}, ownerForAccount = (id) => id ? `account:${id}` : "legacy:default" }) {
+  constructor({ rootDir, config, execute, notify, log = () => {}, warn = () => {}, ownerForAccount = (id) => id ? `account:${id}` : "legacy:default", clock = Date.now }) {
     this.rootDir = rootDir;
     this.getConfig = typeof config === "function" ? config : () => config || {};
     this.execute = execute;
@@ -75,10 +89,17 @@ export class TaskRuntime {
     this.log = log;
     this.warn = warn;
     this.ownerForAccount = ownerForAccount;
+    this.clock = clock;
     this.tasks = new Map();
     this.running = new Set();
     this.queue = [];
     this.controllers = new Map();
+    this.publishedTasks = new Map();
+    this.stateListeners = new Set();
+    this.stateTail = Promise.resolve();
+    this.stateFailures = [];
+    this.stateFailureCount = 0;
+    this.stateObservedFailure = 0;
     this.load();
   }
 
@@ -147,10 +168,12 @@ export class TaskRuntime {
         task.lastError = "bridge restarted while task was active";
         needsWrite = true;
         interrupted = true;
+        task.revision = (Number.isSafeInteger(task.revision) ? task.revision : 0) + 1;
       }
       if (needsWrite) writeJsonAtomic(filePath, task);
       if (interrupted) appendJsonl(path.join(baseDir, name, "events.jsonl"), { at: task.interruptedAt, type: "interrupted", reason: task.lastError });
       this.tasks.set(task.id, task);
+      this.publishedTasks.set(task.id, structuredClone(task));
     }
   }
 
@@ -177,6 +200,11 @@ export class TaskRuntime {
       requiresAuthenticatedBrowser: input.requiresAuthenticatedBrowser === true,
       permissionTier: input.permissionTier || "isolated",
       grants: [],
+      revision: 0,
+      attempt: 0,
+      attemptId: "",
+      grantRevision: 0,
+      operationLedger: [],
       supplements: [],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -195,9 +223,72 @@ export class TaskRuntime {
   }
 
   persist(task) {
-    task.updatedAt = new Date().toISOString();
-    writeJsonAtomic(this.taskPath(task.id), task);
+    const previous = this.publishedTasks.get(task.id);
+    task.revision = nextCounter(previous?.revision);
+    task.attempt = Number.isSafeInteger(task.attempt) ? task.attempt : 0;
+    task.attemptId ||= "";
+    task.grantRevision = Number.isSafeInteger(task.grantRevision) ? task.grantRevision : 0;
+    task.operationLedger ||= [];
+    task.updatedAt = new Date(this.clock()).toISOString();
+    try { writeJsonAtomic(this.taskPath(task.id), task); }
+    catch (error) {
+      // Never expose an uncommitted grant/receipt through getTask after failure.
+      if (previous) {
+        for (const key of Object.keys(task)) delete task[key];
+        Object.assign(task, structuredClone(previous));
+      } else this.tasks.delete(task.id);
+      task.authorityBlocked = true;
+      throw new CapabilityError("TASK_DURABILITY_UNKNOWN");
+    }
     this.tasks.set(task.id, task);
+    this.publishedTasks.set(task.id, structuredClone(task));
+    this.publishState(task);
+  }
+
+  // Detached, redacted projections only. Replay never pumps tasks or replays an
+  // operation/notification. Listeners are asynchronous, not on the chat lane.
+  snapshot(taskId) {
+    const project = task => task ? immutableSnapshot(this.tasks.get(task.id)?.authorityBlocked ? { ...task, authorityBlocked: true } : task) : null;
+    if (taskId !== undefined) return project(this.publishedTasks.get(String(taskId)));
+    return Object.freeze([...this.publishedTasks.values()].map(project));
+  }
+
+  subscribeState(listener, { replay = false } = {}) {
+    if (typeof listener !== "function") throw new TypeError("state listener must be a function");
+    const subscription = { listener };
+    this.stateListeners.add(subscription);
+    if (replay) for (const task of this.publishedTasks.values()) this.publishState(task, [subscription], true);
+    return () => this.stateListeners.delete(subscription);
+  }
+
+  publishState(task, subscriptions = [...this.stateListeners], replay = false) {
+    const snapshot = immutableSnapshot(task);
+    this.stateTail = this.stateTail.then(async () => {
+      await Promise.all(subscriptions.map(async subscription => {
+        if (!this.stateListeners.has(subscription)) return;
+        try { await subscription.listener(snapshot, Object.freeze({ replay })); }
+        catch {
+          this.stateFailureCount += 1;
+          this.stateFailures.push(Object.freeze({ taskId: snapshot.id, revision: snapshot.revision, replay, code: "TASK_STATE_PROJECTION_FAILED" }));
+          this.stateFailures = this.stateFailures.slice(-128);
+          try { this.warn("task state projection failed"); } catch { /* projection cannot fail execution */ }
+        }
+      }));
+    });
+  }
+
+  stateBarrier() {
+    const pending = this.stateTail, observed = this.stateObservedFailure;
+    return pending.then(() => {
+      const failures = this.stateFailureCount;
+      this.stateObservedFailure = Math.max(this.stateObservedFailure, failures);
+      if (failures > observed) {
+        const error = new CapabilityError("TASK_STATE_PROJECTION_FAILED");
+        error.failures = Object.freeze([...this.stateFailures]);
+        throw error;
+      }
+      return Object.freeze({ ok: true });
+    });
   }
 
   event(task, type, detail = {}) {
@@ -224,8 +315,13 @@ export class TaskRuntime {
 
   canConfirm(task, actor = {}) {
     if (!assignedOwner(task)) return { ok: false, owner: false, reason: "任务归属未分配，已隔离，不能执行。" };
+    if (task.authorityBlocked) return { ok: false, code: "TASK_DURABILITY_UNKNOWN", reason: "任务授权持久状态不确定，已停止新动作。" };
     const cfg = this.config();
+    if (!cfg.enabled) return { ok: false, reason: "正式任务已停用。" };
     const actorId = String(actor.userId || "");
+    if (!actorId || /^(model|ai|agent|tool)$/i.test(actor.source || "") || actor.kind === "model"
+      || actor.accountId !== undefined && actor.accountId !== task.accountId
+      || actor.logicalBotId !== undefined && actor.logicalBotId !== task.logicalBotId) return { ok: false, code: "HUMAN_ACTOR_REQUIRED", reason: "任务确认需要已验证的人类身份。" };
     const owner = cfg.ownerUserIds.includes(actorId);
     if (task.requiresLocalFiles || task.requiresComputer || task.requiresAuthenticatedBrowser) {
       return owner ? { ok: true, owner } : { ok: false, owner, reason: "该任务涉及本机或登录态，只能由主人确认。" };
@@ -240,9 +336,11 @@ export class TaskRuntime {
   confirm(taskId, actor = {}) {
     const task = this.get(taskId);
     if (!task) return { ok: false, reason: "任务不存在。" };
+    if (this.running.has(task.id)) return { ok: false, task, code: "TASK_BUSY", reason: "旧执行尚未退出。" };
+    if (hasUnresolvedSideEffects(task)) return { ok: false, task, code: "UNRESOLVED_SIDE_EFFECT", reason: "存在已声明或结果不确定的执行副作用，不能恢复重放；此限制不包括通知回执。" };
     if (!["offered", "interrupted", "failed"].includes(task.status)) return { ok: false, task, reason: `任务当前状态是 ${task.status}。` };
     const permission = this.canConfirm(task, actor);
-    if (!permission.ok) return { ok: false, task, reason: permission.reason };
+    if (!permission.ok) return { ok: false, task, ...(permission.code ? { code: permission.code } : {}), reason: permission.reason };
     task.confirmedBy = String(actor.userId || "");
     task.confirmedAt = new Date().toISOString();
     task.status = "queued";
@@ -268,33 +366,99 @@ export class TaskRuntime {
     const task = this.get(taskId);
     if (!task) return { ok: false, reason: "任务不存在。" };
     if (!this.config().ownerUserIds.includes(String(actor.userId || ""))) return { ok: false, reason: "只有主人可以授予本机权限。" };
-    const type = String(grant?.type || "").toLowerCase();
-    if (!["read", "write", "computer", "authenticated_browser"].includes(type)) return { ok: false, reason: "未知授权类型。" };
-    let target = String(grant?.target || grant?.path || "").trim();
-    if (["read", "write"].includes(type)) {
-      if (!target || target.includes("\0")) return { ok: false, reason: "需要提供有效路径。" };
-      target = path.resolve(target);
-    }
-    const item = { type, target, purpose: String(grant?.purpose || "").slice(0, 300), grantedBy: String(actor.userId), grantedAt: new Date().toISOString() };
-    task.grants = [...asArray(task.grants).filter((existing) => !(existing.type === type && existing.target === target)), item];
+    if (task.authorityBlocked) return { ok: false, code: "TASK_DURABILITY_UNKNOWN", reason: "授权持久状态不确定，已停止新动作。" };
+    if (!assignedOwner(task) || ["completed", "cancelled"].includes(task.status)) return { ok: false, code: "TASK_NOT_GRANTABLE", reason: "任务已结束或归属未分配。" };
+    let item;
+    try { item = normalizeWorkGrant(task, grant, actor, this.clock()); }
+    catch (error) { return { ok: false, code: error.code || "GRANT_INVALID", reason: "授权目标、期限或身份无效，需要明确范围；不能使用旧 computer 广泛授权。" }; }
+    if (task.status === "waiting_permission" && hasUnresolvedSideEffects(task)) return { ok: false, code: "UNRESOLVED_SIDE_EFFECT", reason: "副作用结果未确定，不能重新排队。" };
+    task.grantRevision = nextCounter(task.grantRevision);
+    item.grantRevision = task.grantRevision;
+    task.grants = [...asArray(task.grants), item];
     if (task.status === "waiting_permission") {
       task.status = "queued";
       task.currentStage = "授权完成，重新排队";
     }
     task.lastProgressAt = Date.now();
-    task.lastProgressText = `已收到 ${type} 授权${target ? `：${path.basename(target)}` : ""}。`;
+    task.lastProgressText = `已收到 ${item.capability} 范围授权。`;
     this.persist(task);
-    this.event(task, "permission_granted", item);
+    this.event(task, "permission_granted", { grantId: item.id, capability: item.capability, grantRevision: task.grantRevision, grantedBy: item.grantedBy });
     if (task.status === "queued" && !this.queue.includes(task.id)) this.queue.push(task.id);
     queueMicrotask(() => this.pump());
-    return { ok: true, task, grant: item };
+    return { ok: true, task, grant: publicGrant(item) };
+  }
+
+  revoke(taskId, grantId, actor = {}) {
+    const task = this.get(taskId);
+    if (!task) return { ok: false, code: "TASK_NOT_FOUND", reason: "任务不存在。" };
+    if (!this.config().ownerUserIds.includes(String(actor.userId || "")) || /^(model|ai|agent|tool)$/i.test(actor.source || "")
+      || actor.kind === "model" || actor.accountId !== undefined && actor.accountId !== task.accountId
+      || actor.logicalBotId !== undefined && actor.logicalBotId !== task.logicalBotId) return { ok: false, code: "HUMAN_ACTOR_REQUIRED", reason: "只有已验证的主人可撤销授权。" };
+    const grant = asArray(task.grants).find(item => item.id === grantId);
+    if (!grant) return { ok: false, code: "GRANT_NOT_FOUND", reason: "授权不存在。" };
+    if (grant.revokedAt) return { ok: true, task, grant: publicGrant(grant) };
+    grant.revokedAt = new Date(this.clock()).toISOString();
+    grant.revokedBy = String(actor.userId);
+    task.grantRevision = nextCounter(task.grantRevision);
+    if (this.running.has(task.id)) {
+      task.status = "waiting_permission";
+      task.currentStage = "授权已撤销";
+      task.lastProgressText = "授权已撤销，等待当前执行停止。";
+    }
+    // Abort even if persistence fails; never let a failed revoke keep dispatching.
+    this.controllers.get(task.id)?.abort();
+    this.persist(task);
+    this.event(task, "permission_revoked", { grantId, grantRevision: task.grantRevision, revokedBy: String(actor.userId) });
+    return { ok: true, task, grant: publicGrant(grant) };
+  }
+
+  /** Sole-runtime-writer CAS for CapabilityBroker; no args, targets or raw errors.
+   * Persisted claimed/uncertain records survive restart and block replay. This
+   * is an audit ledger in the existing task store, NOT a second work queue.
+   */
+  recordOperation(record) {
+    const task = this.get(record?.taskId);
+    const reject = code => { throw new CapabilityError(code); };
+    if (!task || record.logicalBotId !== task.logicalBotId || record.accountId !== task.accountId) reject("TASK_IDENTITY_MISMATCH");
+    if (record.status === "claimed" && task.authorityBlocked) reject("TASK_DURABILITY_UNKNOWN");
+    if (typeof record.operationId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(record.operationId)
+      || !["claimed", "succeeded", "failed", "uncertain"].includes(record.status)) reject("INVALID_OPERATION_RECORD");
+    const ledger = asArray(task.operationLedger);
+    const existing = ledger.find(item => item.operationId === record.operationId);
+    if (record.status === "claimed") {
+      if (existing) reject("OPERATION_DUPLICATE");
+      if (!["planning", "running", "reviewing", "delivering"].includes(task.status) || record.attemptId !== task.attemptId
+        || record.attempt !== task.attempt || record.grantRevision !== task.grantRevision) reject("TASK_AUTHORITY_CHANGED");
+      if (record.sideEffect !== true && record.sideEffect !== false || !/^[a-f0-9]{64}$/.test(record.operationDigest || "")) reject("INVALID_OPERATION_RECORD");
+      if (record.sideEffect && hasUnresolvedSideEffects(task)) reject("UNRESOLVED_SIDE_EFFECT");
+      if (record.externalGrantId && ledger.some(item => item.externalGrantId === record.externalGrantId)) reject("EXTERNAL_GRANT_CONSUMED");
+      if (ledger.length >= 2048) reject("OPERATION_LEDGER_FULL");
+      const entry = Object.fromEntries(["taskId", "operationId", "attemptId", "attempt", "logicalBotId", "accountId", "capability", "action", "grantId", "grantRevision",
+        "externalGrantId", "operationDigest", "targetDigest", "backendId", "sideEffect"].map(key => [key, record[key]]));
+      task.operationLedger = [...ledger, { ...entry, status: "claimed", claimedAt: new Date(this.clock()).toISOString() }];
+    } else {
+      if (!existing || existing.status !== "claimed") reject("OPERATION_TRANSITION_DENIED");
+      for (const key of ["attemptId", "attempt", "logicalBotId", "accountId", "capability", "action", "grantId", "grantRevision", "externalGrantId", "operationDigest", "targetDigest", "backendId", "sideEffect"]) {
+        if (existing[key] !== record[key]) reject("OPERATION_RECORD_MISMATCH");
+      }
+      if (record.status === "failed" && record.applied !== false) reject("OPERATION_CERTAINTY_REQUIRED");
+      existing.status = record.status;
+      existing.settledAt = new Date(this.clock()).toISOString();
+      if (record.status === "failed") existing.applied = false;
+      if (typeof record.code === "string" && /^[A-Z][A-Z0-9_]{0,79}$/.test(record.code)) existing.code = record.code;
+      task.operationLedger = ledger;
+    }
+    this.persist(task);
+    this.event(task, "operation", { operationId: record.operationId, status: record.status, capability: record.capability, attemptId: record.attemptId });
+    return { ok: true, durable: true };
   }
 
   cancel(taskId, actor = {}) {
     const task = this.get(taskId);
     if (!task) return { ok: false, reason: "任务不存在。" };
     const actorId = String(actor.userId || "");
-    const allowed = actorId === String(task.userId) || this.config().ownerUserIds.includes(actorId);
+    const allowed = actorId && !/^(model|ai|agent|tool)$/i.test(actor.source || "") && actor.kind !== "model"
+      && (actorId === String(task.userId) || this.config().ownerUserIds.includes(actorId));
     if (!allowed) return { ok: false, reason: "只有任务发起人或主人可以取消。" };
     task.status = "cancelled";
     task.currentStage = "已取消";
@@ -328,13 +492,22 @@ export class TaskRuntime {
   artifacts(taskId) {
     const task = this.get(taskId);
     if (!task) return [];
-    const outputDir = this.outputsDir(task.id);
-    if (!fs.existsSync(outputDir)) return [];
-    return fs.readdirSync(outputDir).map((name) => {
-      const filePath = path.join(outputDir, name);
-      const stat = fs.statSync(filePath);
-      return stat.isFile() ? { id: safeId(name), name, size: stat.size, updatedAt: stat.mtime.toISOString(), filePath } : null;
-    }).filter(Boolean);
+    try {
+      // Canonicalize the host-owned base (macOS /var can be a system alias),
+      // but reject links in every task-owned path component below that base.
+      const base = fs.realpathSync(this.config().workspaceBaseDir);
+      const outputDir = path.join(base, safeId(task.id), "outputs");
+      canonicalNoFollowPath(outputDir);
+      return fs.readdirSync(outputDir).map((name) => {
+        try {
+          const filePath = path.join(outputDir, name);
+          const checked = canonicalNoFollowPath(filePath);
+          const stat = fs.lstatSync(filePath);
+          return !checked.directory && stat.isFile() && containsPath(outputDir, checked.path)
+            ? { id: createHash("sha256").update(name, "utf8").digest("hex"), name, size: stat.size, updatedAt: stat.mtime.toISOString(), filePath: checked.path } : null;
+        } catch { return null; }
+      }).filter(Boolean);
+    } catch { return []; }
   }
 
   deliveryArtifacts(task) {
@@ -344,13 +517,27 @@ export class TaskRuntime {
   }
 
   artifactPath(taskId, artifactId) {
-    const artifact = this.artifacts(taskId).find((item) => item.id === safeId(artifactId) || item.name === artifactId);
-    if (!artifact || !containsPath(this.outputsDir(taskId), artifact.filePath)) return "";
-    return artifact.filePath;
+    if (typeof artifactId !== "string" || !artifactId || artifactId === "." || artifactId === ".." || /[/\\\0]/.test(artifactId)) return "";
+    const artifacts = this.artifacts(taskId);
+    // Names and IDs are exact, case-sensitive namespaces. Never sanitize the
+    // requested string: an absent Chinese/punctuated filename must not resolve
+    // to another artifact just because both collapse to the same legacy ID.
+    let artifact = artifacts.find(item => item.name === artifactId)
+      || artifacts.find(item => item.id === artifactId);
+    if (!artifact) {
+      const legacy = artifacts.filter(item => safeId(item.name) === artifactId);
+      if (legacy.length === 1) [artifact] = legacy;
+    }
+    try {
+      if (!artifact || !containsPath(fs.realpathSync(this.outputsDir(taskId)), artifact.filePath)
+        || canonicalNoFollowPath(artifact.filePath).directory) return "";
+      return artifact.filePath;
+    } catch { return ""; }
   }
 
   async pump() {
     const cfg = this.config();
+    if (!cfg.enabled) return;
     // Scan each queued item once so a busy logical lane cannot block a peer lane.
     let remaining = this.queue.length;
     while (this.running.size < cfg.maxConcurrentGlobal && this.queue.length && remaining-- > 0) {
@@ -379,12 +566,16 @@ export class TaskRuntime {
   }
 
   async run(task) {
-    if (!assignedOwner(task)) return;
+    if (!assignedOwner(task) || this.running.has(task.id) || !this.config().enabled) return;
     const controller = new AbortController();
     this.controllers.set(task.id, controller);
     this.running.add(task.id);
     let heartbeat;
     try {
+      if (task.authorityBlocked) throw new CapabilityError("TASK_DURABILITY_UNKNOWN");
+      if (hasUnresolvedSideEffects(task)) throw new CapabilityError("UNRESOLVED_SIDE_EFFECT");
+      task.attempt = nextCounter(task.attempt);
+      task.attemptId = `attempt_${randomBytes(12).toString("hex")}`;
       task.status = "planning";
       task.currentStage = "制定执行计划";
       task.lastProgressAt = Date.now();
@@ -395,11 +586,13 @@ export class TaskRuntime {
       if (!task.suppressStartNotice) await this.notifySafely(task, { type: "started", text: `收到，任务 ${task.id} 开始执行。` });
       if (controller.signal.aborted || task.status === "cancelled") return;
       heartbeat = setInterval(() => {
-        if (!this.running.has(task.id)) return;
-        task.lastProgressAt = Date.now();
-        task.lastProgressText = `仍在执行：${task.currentStage || task.status}`;
-        this.persist(task);
-        this.notifySafely(task, { type: "heartbeat", text: `任务 ${task.id} 还在执行，当前阶段：${task.status}。` });
+        if (!this.running.has(task.id) || controller.signal.aborted) return;
+        try {
+          task.lastProgressAt = Date.now();
+          task.lastProgressText = `仍在执行：${task.currentStage || task.status}`;
+          this.persist(task);
+          this.notifySafely(task, { type: "heartbeat", text: `任务 ${task.id} 还在执行，当前阶段：${task.status}。` });
+        } catch { controller.abort(); }
       }, this.config().progressHeartbeatMs);
       task.status = "running";
       task.currentStage = "执行任务";
@@ -413,8 +606,14 @@ export class TaskRuntime {
         task.executionSupplementCount = supplementCount;
         this.persist(task);
         result = await this.execute(task, { signal: controller.signal, outputsDir: this.outputsDir(task.id), config: this.config() });
+        if (!result || typeof result !== "object" || Array.isArray(result) || typeof result.ok !== "boolean"
+          || result.waitingPermission !== undefined && typeof result.waitingPermission !== "boolean"
+          || result.waitingPermission === true && result.ok !== false) {
+          task.resultSummary = String(typeof result === "string" ? result : result?.summary || "").slice(0, 4000);
+          throw new CapabilityError("TASK_RESULT_INVALID");
+        }
         passes += 1;
-        if (asArray(task.supplements).length <= supplementCount || result?.waitingPermission || result?.ok === false || passes >= 2) break;
+        if (asArray(task.supplements).length <= supplementCount || result?.waitingPermission || result?.ok === false || passes >= 2 || hasUnresolvedSideEffects(task)) break;
         task.previousResultSummary = String(result?.summary || "").slice(0, 3000);
         task.currentStage = "合并补充要求";
         task.lastProgressAt = Date.now();
@@ -424,6 +623,7 @@ export class TaskRuntime {
         await this.notifySafely(task, { type: "progress", text: `任务 ${task.id} 收到新补充，正在合并到下一阶段。` });
       } while (!controller.signal.aborted);
       if (task.status === "cancelled" || controller.signal.aborted) return;
+      if (result.ok && hasUnresolvedSideEffects(task)) throw new CapabilityError("UNRESOLVED_SIDE_EFFECT");
       task.status = result?.waitingPermission ? "waiting_permission" : result?.ok === false ? "failed" : "completed";
       task.currentStage = task.status === "waiting_permission" ? "等待授权" : task.status === "completed" ? "已完成" : "执行失败";
       task.lastProgressAt = Date.now();
@@ -442,7 +642,7 @@ export class TaskRuntime {
           : task.status === "waiting_permission"
             ? `任务 ${task.id} 正在等待主人授权。${task.resultSummary ? `\n${task.resultSummary}` : ""}`
             : `任务 ${task.id} 执行失败：${task.lastError || "未知错误"}`,
-        artifacts: this.deliveryArtifacts(task)
+        artifacts: task.status === "completed" ? this.deliveryArtifacts(task) : []
       });
     } catch (err) {
       if (controller.signal.aborted || task.status === "cancelled") return;
@@ -468,8 +668,52 @@ export function publicTask(task) {
   if (!task) return null;
   const copy = JSON.parse(JSON.stringify(task));
   copy.logicalBotId = typeof task.logicalBotId === "string" ? task.logicalBotId : "";
-  for (const grant of asArray(copy.grants)) {
-    if (["read", "write"].includes(grant.type)) grant.target = path.basename(grant.target || "") || "已授权路径";
-  }
+  copy.revision = Number.isSafeInteger(task.revision) ? task.revision : 0;
+  copy.grantRevision = Number.isSafeInteger(task.grantRevision) ? task.grantRevision : 0;
+  copy.attempt = Number.isSafeInteger(task.attempt) ? task.attempt : 0;
+  copy.attemptId = typeof task.attemptId === "string" ? task.attemptId : "";
+  copy.grants = asArray(copy.grants).map(publicGrant);
+  return sanitizeTaskView(copy);
+}
+
+// Read-only output filtering, NOT a grant/identity transformation or a complete
+// secret detector. Keep host IDs stable for projections and API addressing;
+// sanitize all free-form model/user text and obvious credential-bearing fields.
+const TASK_VIEW_IDS = new Set(["id", "taskId", "logicalBotId", "accountId", "conversationId", "groupId", "userId",
+  "grantedBy", "confirmedBy", "cancelledBy", "revokedBy", "operationId", "attemptId", "grantId", "externalGrantId",
+  "backendId", "operationDigest", "targetDigest"]);
+function sanitizeTaskView(value, key = "") {
+  if (/password|passkey|secret|token|cookie|authorization|api.?key|credential|private.?key/i.test(key)
+    && value !== null && ["string", "object"].includes(typeof value)) return "[已过滤]";
+  if (Array.isArray(value)) return value.map(item => sanitizeTaskView(item, key));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value)
+    .filter(([name]) => !["__proto__", "constructor", "prototype"].includes(name))
+    .map(([name, item]) => [name, sanitizeTaskView(item, name)]));
+  if (typeof value !== "string" || TASK_VIEW_IDS.has(key)) return value;
+  // The shared filter covers sk-* keys, labeled secrets, PII and URL queries.
+  // Add common unprefixed API-key/header forms to free-form summaries as well.
+  return sanitizeArchiveValue(value
+    .replace(/-----BEGIN (?:[A-Z ]*PRIVATE KEY)-----[\s\S]*?-----END (?:[A-Z ]*PRIVATE KEY)-----/g, "[已过滤]")
+    .replace(/(\b(?:api[-_ ]?key|authorization|set-cookie|cookie)\b["']?\s*[:=]\s*["']?)(?:Bearer\s+)?[^\s,;"']+/gi, "$1[已过滤]")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [已过滤]"));
+}
+
+function publicGrant(grant) {
+  const copy = Object.fromEntries(["id", "version", "taskId", "logicalBotId", "accountId", "type", "capability", "grantRevision",
+    "grantedBy", "grantedAt", "expiresAt", "revokedAt", "revokedBy"].filter(key => grant[key] !== undefined).map(key => [key, grant[key]]));
+  if (grant.humanActor) copy.humanActor = { userId: grant.humanActor.userId, source: grant.humanActor.source };
+  if (["read", "write", "local_read", "local_write", "isolated_files", "code"].includes(grant.type || grant.capability)) {
+    copy.target = path.basename(grant.target || grant.scope?.path || grant.scope?.target || "") || "已授权路径";
+  } else if (grant.target) copy.target = "已脱敏目标";
+  if (grant.scope) copy.scope = { actions: asArray(grant.scope.actions).filter(item => typeof item === "string" && /^[a-z_]+$/.test(item)), redacted: true };
+  if (grant.purpose) copy.purpose = "已脱敏用途";
   return copy;
+}
+
+function immutableSnapshot(task) {
+  const freeze = value => {
+    if (value && typeof value === "object") { for (const item of Object.values(value)) freeze(item); Object.freeze(value); }
+    return value;
+  };
+  return freeze(publicTask(task));
 }
