@@ -1,6 +1,6 @@
 {
   "name": "qq-hermes-onebot-bridge",
-  "version": "1.0.0-beta.24",
+  "version": "1.0.0-beta.25",
   "description": "Local desktop manager and OneBot bridge for Hermes-powered QQ bots",
   "main": "desktop/main.cjs",
   "private": true,
@@ -43,6 +43,7 @@
     "test:packaged-core": "node scripts/packaged-core-self-test.js",
     "test:bot-commands": "node scripts/bot-command-routing-self-test.js && node scripts/bot-command-routing-integration-self-test.js",
     "test:docker-backup": "node scripts/docker-migration-self-test.js",
+    "test:snowluma": "node scripts/snowluma-mounts-self-test.js && node scripts/docker-migration-self-test.js",
     "memory:rebuild": "node scripts/memory-rebuild.js",
     "memory:rebuild:apply": "node scripts/memory-rebuild.js --apply",
     "app:start": "electron-forge start",

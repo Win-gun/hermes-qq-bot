@@ -131,13 +131,13 @@ try {
     ? Buffer.from(name.endsWith(".css") ? ":root { --fixture: '中文'; }\n" : "globalThis.consoleAssetFixture = '中文';\n")
     : fs.readFileSync(path.join(root, "public", name))]));
   const assetPaths = assets.map(({ name }) => `public/${name}`);
-  for (const file of assetPaths) check(releaseFiles.includes(file), `Web release whitelist includes ${file}`);
+  for (const file of [...assetPaths, "src/snowluma-mounts.js"]) check(releaseFiles.includes(file), `Web release whitelist includes ${file}`);
   if (!selfCheck) check(checkFiles(assetPaths).length === 0, "real assets pass release content safety checks");
   const sourceScript = fs.readFileSync(path.join(root, "scripts", "package-source.mjs"), "utf8");
   const sourceFiles = vm.runInNewContext(`${between(sourceScript, "const sourceFiles =", "const version =")}\nsourceFiles;`, { releaseFiles });
-  for (const file of [...assetPaths, "scripts/console-assets-self-test.js"]) check(sourceFiles.includes(file), `source whitelist includes ${file}`);
+  for (const file of [...assetPaths, "src/snowluma-mounts.js", "scripts/console-assets-self-test.js"]) check(sourceFiles.includes(file), `source whitelist includes ${file}`);
   const forge = createRequire(import.meta.url)(path.join(root, "forge.config.cjs"));
-  for (const file of assetPaths) check(!forge.packagerConfig.ignore.some((rule) => rule.test(`/${file}`)), `Forge retains ${file} at app root`);
+  for (const file of [...assetPaths, "src/snowluma-mounts.js"]) check(!forge.packagerConfig.ignore.some((rule) => rule.test(`/${file}`)), `Forge retains ${file} at app root`);
 
   const roots = [path.join(temp, "development"), path.join(temp, "Hermes QQ Bot.app", "Contents", "Resources", "app.asar")];
   for (const resourceRoot of roots) {

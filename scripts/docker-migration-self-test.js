@@ -14,6 +14,7 @@ const fixturePath = path.join(temp, "docker-state.json");
 const originalPath = process.env.PATH;
 const originalFixture = process.env.HERMES_QQ_DOCKER_FIXTURE;
 const destinations = { snowlumaData: "/app/snowluma-data", appConfig: "/app/.config", localShare: "/app/.local/share" };
+const imagePin = `fixture/snowluma:2.1.1@sha256:${"2".repeat(64)}`;
 const readFixture = () => JSON.parse(fs.readFileSync(fixturePath, "utf8"));
 let tests = 0;
 function check(value, message) { tests += 1; assert.ok(value, message); }
@@ -64,7 +65,7 @@ save();
   process.env.HERMES_QQ_DOCKER_FIXTURE = fixturePath;
 
   const items = [
-    { id: "alpha" }, { id: "paused-bot", enabled: false }, { id: "third" },
+    { id: "alpha", snowlumaImage: imagePin }, { id: "paused-bot", enabled: false }, { id: "third" },
     { id: "archived", archived: true }, { id: "protocol-off", protocolEnabled: false },
     { id: "external", managed: false }, { id: "orphan", archived: true }
   ].map((item) => ({ protocol: "snowluma", protocolContainer: `existing-${item.id}`, ...item,
@@ -77,8 +78,12 @@ save();
   for (const item of items.filter((item) => item.managed !== false)) {
     for (const volume of Object.values(item.snowlumaVolumes)) fixture.volumes[volume] = Buffer.from(`fixture-volume:${volume}`).toString("base64");
     if (item.id !== "orphan") fixture.containers[item.protocolContainer] = {
-      State: { Running: true }, Config: { Image: "fixture:only" },
-      Mounts: Object.entries(destinations).map(([key, Destination]) => ({ Type: "volume", Name: item.snowlumaVolumes[key], Destination }))
+      State: { Running: true }, Config: { Image: item.snowlumaImage || "fixture:only" },
+      Mounts: [
+        // 2.1.1 aliases the same gateway volume; other accounts retain the old layout.
+        ...(item.id === "alpha" ? [{ Type: "volume", Name: item.snowlumaVolumes.snowlumaData, Destination: "/app/data" }] : []),
+        ...Object.entries(destinations).map(([key, Destination]) => ({ Type: "volume", Name: item.snowlumaVolumes[key], Destination }))
+      ]
     };
   }
   fs.writeFileSync(fixturePath, JSON.stringify(fixture));
@@ -90,15 +95,39 @@ save();
   check(Object.values(readFixture().containers).every((item) => item.State.Running), "cancel must restart every previously running fixture container");
   check(!fs.readdirSync(temp).some((name) => name.endsWith(".hermesqqbackup")), "cancel must not leave a backup");
 
+  const backupCallStart = readFixture().calls.length; // Exclude the cancelled export above.
   const backup = await createBackup(options);
+  const exportCalls = readFixture().calls.slice(backupCallStart).filter((args) =>
+    args[0] === "run" && args[args.indexOf("-v") + 1]?.endsWith(":/source:ro"));
   check(backup.manifest.accounts.length === items.length, "manifest must list every account including external and archived");
   check(backup.manifest.dockerVolumes.length === 18, "backup must preserve paused, protocol-off, archived and orphan volumes");
   check(backup.manifest.accountRegistry.failoverGroups[0].memberIds.join(",") === "alpha,paused-bot", "manifest must preserve group membership order");
   check(!JSON.stringify(readFixture().calls).includes("existing-external") && !JSON.stringify(readFixture().calls).includes("must-not-be-touched"), "external accounts and stale projections must never operate Docker");
   check(backup.manifest.dockerVolumes.every((record) => record.volume.startsWith("existing-")), "manifest must retain source volume names");
+  check(backup.manifest.formatVersion === 1, "dual mounts must retain the existing backup format");
+  check(exportCalls.length === 18, "dual-mounted gateway alias must not add an export command");
+  for (const item of items.filter((item) => item.managed !== false)) {
+    const records = backup.manifest.dockerVolumes.filter((record) => record.accountId === item.id);
+    check(records.length === 3 && new Set(records.map((record) => record.key)).size === 3,
+      `each managed account must retain exactly three logical volume records: ${item.id}`);
+    check(records.every((record) => record.destination === destinations[record.key]),
+      `new and old layouts must use the legacy-compatible destination manifest: ${item.id}`);
+    for (const record of records) {
+      const exports = exportCalls.filter((args) => args[args.indexOf("-v") + 1] === `${record.volume}:/source:ro`);
+      check(exports.length === 1, `each source volume must be exported exactly once, including aliases: ${item.id}/${record.key}`);
+      check(exports[0][exports[0].indexOf("--entrypoint") + 2] === record.image,
+        `export must use the manifest image: ${item.id}/${record.key}`);
+    }
+  }
+  check(backup.manifest.dockerVolumes.filter((record) => record.accountId === "alpha").every((record) => record.image === imagePin),
+    "dual-mounted account must retain its image pin in all three volume records");
 
+  const restoreCallStart = readFixture().calls.length;
   const restored = await restoreBackup({ path: backup.path, password: options.password, stateRoot: destination });
+  const importCalls = readFixture().calls.slice(restoreCallStart).filter((args) =>
+    args[0] === "run" && args.includes("-i") && args[args.indexOf("-v") + 1]?.endsWith(":/target"));
   check(restored.restoredVolumes.length === 18 && restored.parkedContainers.length === 5, "all existing managed accounts must be staged for rollback");
+  check(importCalls.length === 18, "restore must import three logical volumes per managed account, not the alias");
   const restoredConfig = JSON.parse(fs.readFileSync(path.join(destination, "config.json"), "utf8"));
   for (const item of restoredConfig.accounts.items) {
     check(item.protocolContainer === `existing-${item.id}`, `stable transport identity must survive restore: ${item.id}`);
@@ -110,8 +139,14 @@ save();
       const volume = item.snowlumaVolumes[key];
       check(restored.restoredVolumes.includes(volume), `authoritative item volume must be rewritten: ${item.id}/${key}`);
       check(readFixture().volumes[volume] === fixture.volumes[`existing-${item.id}-${key}`], "fixture volume bytes must survive restore");
+      const imports = importCalls.filter((args) => args[args.indexOf("-v") + 1] === `${volume}:/target`);
+      const record = backup.manifest.dockerVolumes.find((record) => record.accountId === item.id && record.key === key);
+      check(imports.length === 1 && imports[0][imports[0].indexOf("--entrypoint") + 2] === record.image,
+        `restore must inherit the recorded image for each legacy-compatible volume: ${item.id}/${key}`);
     }
   }
+  check(restoredConfig.accounts.items.find((item) => item.id === "alpha").snowlumaImage === imagePin
+    && restoredConfig.accounts.primary.snowlumaImage === imagePin, "restore must preserve the image pin in the authoritative item and legacy projection");
   check(restoredConfig.accounts.primary.snowlumaVolumes.snowlumaData === restoredConfig.accounts.items[0].snowlumaVolumes.snowlumaData, "legacy projection must reflect rewritten items");
   check(restoredConfig.accounts.items.find((item) => item.id === "archived").archived, "restore must not unarchive accounts");
   check(restoredConfig.accounts.items.find((item) => item.id === "paused-bot").enabled === false, "restore must preserve bot pause independently of protocol state");

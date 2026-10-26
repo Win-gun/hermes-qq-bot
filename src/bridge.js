@@ -88,6 +88,7 @@ import { normalizeVoiceReplyMode, voiceReplyMode, shouldSendVoiceReply } from ".
 import { audioFormat, decodeOneBotAudioBase64, trustedQqAudioUrl } from "./voice-audio.js";
 import { sanitizeChatReply } from "./reply-safety.js";
 import { normalizeTaskWebDomains, taskWebQuery, taskWebSourceAllowed } from "./task-web-policy.js";
+import { snowlumaMountArgs } from "./snowluma-mounts.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -5399,6 +5400,8 @@ async function createSnowLumaAccountContainer(account, currentConfig) {
   const { webuiPort, noVncPort, vncPort, wsPort } = snowlumaPortsForAccount(account);
   const image = String(account.snowlumaImage || "motricseven7/snowluma:latest");
   const volumes = snowlumaManagedVolumes(account);
+  const mountArgs = snowlumaMountArgs(files, volumes);
+  fs.mkdirSync(path.join(files.dataDir, "hermes-task-uploads"), { recursive: true });
   const args = [
     "run", "-d",
     "--name", container,
@@ -5409,16 +5412,8 @@ async function createSnowLumaAccountContainer(account, currentConfig) {
     "-p", `127.0.0.1:${noVncPort}:6081`,
     "-p", `127.0.0.1:${vncPort}:5900`,
     "-p", `127.0.0.1:${wsPort}:3001`,
-    "-v", `${files.dataDir}:/app/data`,
-    "-v", `${files.configDir}:/app/config`,
+    ...mountArgs,
   ];
-  if (volumes) {
-    args.push(
-      "-v", `${volumes.snowlumaData}:/app/snowluma-data`,
-      "-v", `${volumes.appConfig}:/app/.config`,
-      "-v", `${volumes.localShare}:/app/.local/share`
-    );
-  }
   args.push(image);
   const result = await runCommand("docker", args, { timeoutMs: 120000, killGraceMs: 1200 });
   return {

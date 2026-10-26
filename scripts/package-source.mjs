@@ -5,6 +5,8 @@ import { root, releaseFiles, checkFiles, checkArchive, report } from "./release-
 
 const sourceFiles = Object.freeze([...new Set([
   ...releaseFiles,
+  "docs/SNOWLUMA-UPGRADE.md",
+  "scripts/snowluma-mounts-self-test.js",
   "scripts/memory-background-self-test.js", "scripts/memory-background-benchmark.js",
   "scripts/memory-extraction-async-self-test.js",
   "scripts/memory-verification-self-test.js",

@@ -44,6 +44,7 @@ export const releaseFiles = Object.freeze([
   "src/bot-capabilities.js",
   "src/bot-command-routing.js",
   "src/bridge.js",
+  "src/snowluma-mounts.js",
   "src/behavior-settings.js",
   "src/archive-search-index.js",
   "src/archive-search-service.js",
@@ -126,6 +127,9 @@ function cleanName(name) {
 }
 
 function sensitivePath(name) {
+  // Exact vetted source/docs paths only; snowluma* runtime directories remain
+  // forbidden, and these files still undergo the ordinary content checks.
+  if (["src/snowluma-mounts.js", "scripts/snowluma-mounts-self-test.js", "docs/SNOWLUMA-UPGRADE.md"].includes(name)) return false;
   const parts = name.toLowerCase().split("/");
   const base = parts.at(-1);
   if (parts.some((part) => /^(?:node_modules|data|logs|secrets|napcat(?:-.+)?|snowluma.*|out|\.git)$/.test(part))) return true;
