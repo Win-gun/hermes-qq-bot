@@ -75,7 +75,10 @@ function contextData(value, stats) {
     if (item === null || typeof item === "boolean") return item;
     if (typeof item === "number" && Number.isFinite(item)) return item;
     if (typeof item === "string") {
-      if (item.length > 12000 || (chars += item.length) > 64000) fail("AGENT_PROMPT_CONTEXT_LIMIT");
+      // The complete context still has one 64k budget. A single search bundle
+      // may legitimately contain 14k characters; do not reject it at 12k while
+      // allowing the same evidence split into many fields.
+      if (item.length > 64000 || (chars += item.length) > 64000) fail("AGENT_PROMPT_CONTEXT_LIMIT");
       const safe = scrubText(item);
       if (safe !== item) stats.redactedValues++;
       return safe;

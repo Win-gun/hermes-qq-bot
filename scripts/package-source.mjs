@@ -5,6 +5,11 @@ import { root, releaseFiles, checkFiles, checkArchive, report } from "./release-
 
 const sourceFiles = Object.freeze([...new Set([
   ...releaseFiles,
+  "scripts/agent-life-self-test.js", "scripts/agent-prompt-self-test.js",
+  "scripts/digital-life-ui-self-test.js", "scripts/digital-life-integration-self-test.js",
+  "scripts/work-capabilities-self-test.js", "scripts/work-backends-self-test.js",
+  "scripts/work-local-files-self-test.js", "scripts/work-plan-self-test.js",
+  "scripts/task-delivery-self-test.js", "scripts/task-artifacts-async-self-test.js",
   "docs/SNOWLUMA-UPGRADE.md",
   "scripts/snowluma-mounts-self-test.js",
   "scripts/memory-background-self-test.js", "scripts/memory-background-benchmark.js",

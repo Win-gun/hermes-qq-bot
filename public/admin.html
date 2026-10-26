@@ -973,7 +973,38 @@
       </section>
 
       <section id="page-tasks" class="page">
-        <div class="grid two">
+        <div class="card settings-block" id="agentLifePanel">
+          <h3>账号 Agent <span id="agentLifePill" class="pill">未加载</span></h3>
+          <div class="field"><label for="taskAccountSelect">管理账号</label><select id="taskAccountSelect"><option value="">暂无账号</option></select></div>
+          <p id="agentLifeIdentity" class="hint">任务、工作策略和活动按账号隔离；设置能力不等于执行授权。</p>
+          <p id="agentLifeFeedback" class="hint" role="status" aria-live="polite"></p>
+          <div class="grid two">
+            <div>
+              <h4>活动与工作状态</h4>
+              <pre id="agentLifeActivity">选择账号后加载。</pre>
+              <p id="agentLifeGui" class="hint">GUI 能力尚未验证。</p>
+              <details><summary>近期工作记录（仅阶段与状态）</summary><div id="agentLifeEpisodes" class="list"></div></details>
+            </div>
+            <div>
+              <h4>工作能力配置</h4>
+              <div id="agentLifeEditor">
+                <div class="switch-row"><div><strong>启用账号 Agent</strong><span>保持原有人格；不自动授予文件、登录态或电脑权限。</span></div><input id="agentLifeEnabled" type="checkbox" aria-label="启用账号 Agent" disabled /></div>
+                <div class="switch-row"><div><strong>启用工作能力</strong><span>每个任务仍需匹配可用后端及明确授权。</span></div><input id="agentWorkEnabled" type="checkbox" aria-label="启用工作能力" disabled /></div>
+                <div class="form-grid">
+                  <div class="field"><label for="agentSocialPreset">社交档位</label><select id="agentSocialPreset" disabled><option value="existing">保持既有</option><option value="observant">观察</option><option value="balanced">均衡</option><option value="engaged">积极参与</option></select></div>
+                  <div class="field"><label for="agentWorkBackend">工作后端</label><select id="agentWorkBackend" disabled></select></div>
+                  <div class="field"><label for="agentWorkMaxActions">单次最多动作（1–32）</label><input id="agentWorkMaxActions" type="number" min="1" max="32" step="1" disabled /></div>
+                </div>
+                <p id="agentWorkBackendState" class="hint">未配置 / 未验证的后端不可执行。</p>
+                <div id="agentWorkCapabilities" class="form-grid" aria-label="工作能力"></div>
+              </div>
+              <div class="row settings-block"><button id="saveAgentLifeBtn" type="button" disabled>保存此账号工作策略</button><button id="refreshAgentLifeBtn" class="secondary" type="button">刷新状态（保留草稿）</button></div>
+              <details id="agentLifeConflict" class="hidden"><summary>服务器配置已变化，请核对</summary><pre id="agentLifeLatest"></pre><div class="row"><button id="rebaseAgentLifeBtn" class="secondary" type="button">核对后采用最新修订（保留草稿）</button><button id="discardAgentLifeBtn" class="danger" type="button">丢弃草稿并重新加载</button></div></details>
+            </div>
+          </div>
+          <details class="settings-block"><summary>Prompt 组合预览（已保存配置，不调用模型）</summary><div class="row"><label for="agentPromptMode">场景</label><select id="agentPromptMode"><option value="direct">直接对话</option><option value="social">社交参与</option><option value="search">联网搜索</option><option value="task">正式任务</option></select><button id="agentPromptPreviewBtn" class="secondary" type="button">生成预览</button></div><p id="agentPromptStatus" class="hint" role="status"></p><pre id="agentPromptPreview">尚未预览；未保存草稿不会参与组合。</pre></details>
+        </div>
+        <div class="grid two" id="taskQueueGrid">
           <div class="card">
             <h3>任务模式配置 <span id="taskModePill" class="pill">加载中</span></h3>
             <div class="switch-row">
@@ -1008,6 +1039,26 @@
             <div id="taskList" class="list mt-16"></div>
           </div>
         </div>
+        <div id="taskGrantPanel" class="card hidden mt-24" role="region" aria-labelledby="taskGrantTitle">
+          <div class="row space-between"><h3 id="taskGrantTitle" class="heading-inline">主人逐任务授权</h3><button id="closeTaskGrantBtn" class="ghost" type="button">关闭授权</button></div>
+          <p id="taskGrantIdentity" class="hint"></p>
+          <p class="warning">仅主人任务可授权。只允许当前任务、当前机器人、指定范围及有效期；不开放全局电脑。外写必须确认一次性具体操作，授权不代表操作已执行。</p>
+          <form id="taskGrantForm">
+            <div class="form-grid">
+              <div class="field"><label for="taskGrantType">权限类型</label><select id="taskGrantType"><option value="read">本地只读</option><option value="write">本地写入</option><option value="isolated_browser">隔离浏览器</option><option value="authenticated_browser">登录态浏览器</option><option value="desktop_observe">指定应用观察</option><option value="desktop_input">指定应用输入</option><option value="app">指定应用操作</option><option value="code">指定路径运行代码</option><option value="external_write">一次性外部写入</option></select></div>
+              <div class="field"><label for="taskGrantExpiry">有效期</label><select id="taskGrantExpiry"><option value="60000">1 分钟</option><option value="120000">2 分钟</option><option value="900000">15 分钟</option><option value="3600000">1 小时</option></select></div>
+              <div class="field full"><label for="taskGrantTarget">具体目标（文件绝对路径 / 域名 / 应用 ID / 外写接收目标）</label><input id="taskGrantTarget" required maxlength="512" autocomplete="off" placeholder="必须精确指定，不接受 * 或全局范围" /></div>
+              <div class="field full"><label for="taskGrantActions">允许的动作（逗号分隔）</label><input id="taskGrantActions" required autocomplete="off" /><p id="taskGrantActionsHint" class="hint"></p></div>
+              <div id="taskGrantBrowserFields" class="field full hidden"><label for="taskGrantSession">受控浏览器会话 ID</label><input id="taskGrantSession" maxlength="160" autocomplete="off" /><p class="hint">仅此会话和目标域名；不会授予全部浏览器登录态。</p></div>
+              <div id="taskGrantExternalFields" class="field full hidden"><label for="taskGrantDigest">待确认操作的 operationDigest（64 位 SHA-256）</label><input id="taskGrantDigest" maxlength="64" autocomplete="off" /><p class="hint">须来自主机待确认操作，与具体目标对应；不是任意文字或模型自行声明。</p></div>
+            </div>
+            <label><input id="taskGrantConfirm" type="checkbox" required /> 我是此任务主人，已核对机器人、任务、动作及目标范围</label>
+            <p id="taskGrantFeedback" class="hint" role="status" aria-live="polite"></p>
+            <div class="row"><button id="submitTaskGrantBtn" type="submit">仅授权此任务</button></div>
+          </form>
+          <h4>当前授权</h4><div id="taskGrantList" class="list"></div>
+        </div>
+        <div id="taskTimelinePanel" class="card hidden mt-24"><div class="row space-between"><h3 id="taskTimelineTitle" class="heading-inline">任务时间线</h3><button id="closeTaskTimelineBtn" class="ghost" type="button">关闭时间线</button></div><p class="hint">只展示主机阶段、事件类型与时间；不展示模型思维链、工具参数或私人文件内容。</p><ol id="taskTimelineList" aria-live="polite"></ol></div>
         <div id="taskArtifactPanel" class="card hidden mt-24">
           <div class="row space-between">
             <h3 class="heading-inline" id="taskArtifactTitle">任务产物</h3>
@@ -1276,6 +1327,9 @@
     let activeTaskArtifacts = [];
     let activeArtifactTaskId = "";
     let artifactPreviewRevision = 0;
+    let artifactPanelRevision = 0;
+    const artifactObjectUrls = new Set();
+    const agentLifeState = { selected: "", drafts: new Map(), tasksRequest: 0, promptRequest: 0, grant: null, timelineRequest: 0 };
     let reviewerData = null;
     let memoryIntegrityData = null;
     let selectedGroupId = "";
@@ -1350,26 +1404,31 @@
       }
     }
 
-    async function api(path, opts = {}) {
+    async function api(path, opts = {}, responseType = "json") {
       const method = String(opts.method || "GET").toUpperCase();
       const accountAdmin = /^\/api\/(?:accounts|account-groups)(?:[/?]|$)/.test(path);
       const configAdmin = method === "PATCH" && /^\/api\/config(?:[?]|$)/.test(path);
       const socialAdmin = /^\/api\/social-agent(?:[/?]|$)/.test(path);
-      if (socialAdmin) opts = { ...opts, cache: "no-store" };
-      const sessionAdmin = accountAdmin || configAdmin || socialAdmin || ["/send", "/api/send_private"].includes(path);
+      const tasksAdmin = /^\/api\/tasks(?:[/?]|$)/.test(path);
+      if (socialAdmin || tasksAdmin) opts = { ...opts, cache: "no-store" };
+      const sessionAdmin = accountAdmin || configAdmin || socialAdmin || tasksAdmin || ["/send", "/api/send_private"].includes(path);
       if (sessionAdmin) {
         const headers = new Headers(opts.headers || {});
         if (!headers.has("x-hermes-qq-admin")) headers.set("x-hermes-qq-admin", await ensureAdminSession());
         if (!["GET", "HEAD"].includes(method) && !headers.has("content-type")) headers.set("content-type", "application/json");
         opts = { ...opts, headers, ...(!["GET", "HEAD"].includes(method) && opts.body === undefined ? { body: "{}" } : {}) };
       }
-      const res = await fetch(path, opts);
+      const res = await fetch(path, { ...opts, credentials: "same-origin", redirect: "error" });
+      if (sessionAdmin && res.status === 403) adminSessionToken = ""; // Never replay a mutation or an uncertain download.
+      if (responseType === "blob") {
+        if (!res.ok) { const error = new Error(`HTTP ${res.status}`); error.status = res.status; throw error; }
+        return res.blob();
+      }
       const text = await res.text();
       let body;
       try { body = text ? JSON.parse(text) : {}; }
       catch { body = { ok: false, error: text }; }
       if (!res.ok) {
-        if (sessionAdmin && res.status === 403) adminSessionToken = ""; // Do not replay a mutation.
         const error = new Error(body.error || res.statusText || `HTTP ${res.status}`);
         error.status = res.status;
         if (typeof body.blockedReason === "string") error.blockedReason = body.blockedReason;
@@ -2448,6 +2507,328 @@
       syncProtocolFields();
     }
 
+    // DIGITAL_LIFE_UI_START — account drafts are memory-only and pin their CAS revision.
+    const agentWorkLabels = { public_web: "公开网络", isolated_browser: "隔离浏览器", authenticated_browser: "登录态浏览器", isolated_files: "隔离文件", local_read: "本地只读", local_write: "本地写入", code: "代码执行", desktop_observe: "桌面观察", desktop_input: "桌面输入", app: "应用操作", external_write: "外部写入" };
+    const taskGrantActions = { read: ["read"], write: ["write"], isolated_browser: ["navigate", "read", "snapshot", "click", "fill", "type", "press", "upload"], authenticated_browser: ["navigate", "read", "snapshot", "click", "fill", "type", "press", "upload"], desktop_observe: ["capture", "list_apps"], desktop_input: ["click", "type", "key", "scroll", "drag", "set_value"], app: ["launch", "focus", "observe"], code: ["run"], external_write: ["send", "upload", "post"] };
+    function lifeNode(tag, text, className) {
+      const el = document.createElement(tag);
+      if (text !== undefined) el.textContent = text;
+      if (className) el.className = className;
+      return el;
+    }
+
+    function lifeDraft(id = agentLifeState.selected) {
+      if (!agentLifeState.drafts.has(id)) agentLifeState.drafts.set(id, { policy: null, revision: null, latest: null, dirty: false, conflict: false, busy: false, request: 0, edit: 0, error: "", saveError: "", data: null });
+      return agentLifeState.drafts.get(id);
+    }
+
+    function lifeBackendReady(backend) {
+      return backend?.verified === true && backend?.available === true;
+    }
+
+    function renderLifeAccounts() {
+      const items = registryState.items || [];
+      const select = $("taskAccountSelect");
+      const previous = agentLifeState.selected;
+      if (!items.some(item => item.id === previous)) agentLifeState.selected = items[0]?.id || "";
+      const signature = JSON.stringify(items.map(item => [item.id, item.displayName]));
+      if (select.dataset.signature !== signature) {
+        select.replaceChildren(...items.map(item => { const option = lifeNode("option", item.displayName || item.id); option.value = item.id; return option; }));
+        if (!items.length) select.appendChild(lifeNode("option", "暂无可管理账号"));
+        select.dataset.signature = signature;
+      }
+      select.value = agentLifeState.selected;
+      select.disabled = !items.length;
+      if (previous !== agentLifeState.selected) {
+        clearTaskPanels(); agentLifeState.promptRequest++;
+        $("agentPromptPreview").textContent = "尚未预览；未保存草稿不会参与组合。"; $("agentPromptStatus").textContent = "";
+      }
+    }
+
+    function renderAgentLife({ fields = false } = {}) {
+      const id = agentLifeState.selected, d = lifeDraft(id), data = d.data;
+      $("agentLifeIdentity").textContent = id ? `账号 ${id} · 逻辑机器人 ${data?.logicalBotId || "未知"} · 工作策略不是执行授权` : "暂无账号；请先在账号状态页配置。";
+      $("agentLifePill").textContent = d.error ? "加载失败" : d.saveError ? "保存未确认" : !data ? "未加载" : d.conflict ? "修订冲突" : d.dirty ? "未保存" : data.activity?.state || "状态未知";
+      $("agentLifeFeedback").textContent = d.error || d.saveError || (d.busy ? "正在保存；草稿仍归属此账号。" : d.conflict ? "服务器修订已变化，未覆盖草稿。请核对最新配置后再保存。" : d.dirty ? "此账号有未保存草稿；切换账号和自动刷新不会覆盖。" : "仅保存此账号策略，不改模型和其他账号。");
+      $("agentLifeConflict").classList.toggle("hidden", !d.conflict);
+      $("agentLifeLatest").textContent = d.conflict ? JSON.stringify(d.latest?.policy || {}, null, 2) : "";
+      $("saveAgentLifeBtn").disabled = !id || !d.policy || !d.dirty || d.conflict || d.busy || !!d.error;
+      $("agentLifeActivity").textContent = data ? `活动：${data.activity?.state || "未知"}\n工作：${data.policy?.work?.enabled ? "已启用（不代表正在运行）" : "已关闭"}\n当前任务：${data.activity?.taskId || "未提供"}` : "尚未取得状态；不推断工作已开始。";
+      const backend = data?.backends?.find(item => item.id === d.policy?.work?.backendId);
+      const guiReady = lifeBackendReady(backend) && backend.capabilities?.some(c => ["desktop_observe", "desktop_input", "app"].includes(c));
+      $("agentLifeGui").textContent = guiReady ? "后端报告了经验证的应用 / 桌面能力；仍需主人逐任务指定应用、动作和期限。" : "没有经验证且可用的 GUI 后端，不提供全局电脑权限。";
+      $("agentWorkBackendState").textContent = backend ? `${backend.id}：${lifeBackendReady(backend) ? "已验证且可用" : "不可执行"}${backend.reason ? ` · ${backend.reason}` : ""}` : "后端未配置；不可执行。";
+      const episodes = Array.isArray(data?.episodes) ? data.episodes.slice(-12).reverse() : [];
+      $("agentLifeEpisodes").replaceChildren(...(episodes.length ? episodes.map(e => lifeNode("p", `${e.taskId || "未命名任务"} · ${e.status || "未知"}`, "hint")) : [lifeNode("p", "暂无工作记录。", "hint")]));
+      for (const field of ["agentLifeEnabled", "agentWorkEnabled", "agentSocialPreset", "agentWorkBackend", "agentWorkMaxActions"]) $(field).disabled = !d.policy || d.busy || !!d.error;
+      for (const input of $("agentWorkCapabilities").querySelectorAll("input")) input.disabled = !d.policy || d.busy || !!d.error || !lifeBackendReady(backend) || !backend?.capabilities?.includes(input.dataset.capability);
+      if (!fields) return;
+      $("agentLifeEnabled").checked = d.policy?.enabled === true;
+      $("agentWorkEnabled").checked = d.policy?.work?.enabled === true;
+      $("agentSocialPreset").value = d.policy?.socialPreset || "existing";
+      $("agentWorkMaxActions").value = d.policy?.work?.maxActions ?? 12;
+      const backends = [...(Array.isArray(data?.backends) ? data.backends : [])];
+      if (d.policy?.work?.backendId && !backends.some(b => b.id === d.policy.work.backendId)) backends.push({ id: d.policy.work.backendId, reason: "未配置" });
+      $("agentWorkBackend").replaceChildren(...backends.map(b => { const option = lifeNode("option", `${b.id} · ${lifeBackendReady(b) ? "已验证且可用" : "不可执行"}`); option.value = b.id; return option; }));
+      $("agentWorkBackend").value = d.policy?.work?.backendId || "";
+      const capabilities = $("agentWorkCapabilities"); capabilities.replaceChildren();
+      for (const [capability, title] of Object.entries(agentWorkLabels)) {
+        const field = lifeNode("div", undefined, "field"), label = lifeNode("label", title), input = lifeNode("input");
+        input.type = "checkbox"; input.checked = d.policy?.work?.capabilities?.includes(capability) === true;
+        input.dataset.capability = capability;
+        input.disabled = !d.policy || d.busy || !!d.error || !lifeBackendReady(backend) || !backend?.capabilities?.includes(capability);
+        input.addEventListener("change", () => {
+          if (agentLifeState.selected !== id || d.busy) return;
+          d.policy.work.capabilities = input.checked ? [...new Set([...d.policy.work.capabilities, capability])] : d.policy.work.capabilities.filter(c => c !== capability);
+          d.dirty = true; d.edit++; renderAgentLife();
+        });
+        label.append(input); field.append(label); capabilities.append(field);
+      }
+    }
+
+    async function loadAgentLife(id = agentLifeState.selected) {
+      if (!id) { renderAgentLife({ fields: true }); return; }
+      const d = lifeDraft(id), request = ++d.request;
+      try {
+        const data = await api(`/api/tasks/agent-life?account_id=${encodeURIComponent(id)}`);
+        if (request !== d.request) return;
+        if (data.ok === false || data.accountId !== id || data.revision == null || !data.policy?.work) throw new Error(data.error || "Agent 接口响应不完整或账号不匹配");
+        d.error = ""; d.data = data; d.latest = data;
+        if (d.dirty || d.busy) { if (d.revision !== data.revision) d.conflict = true; }
+        else { d.policy = structuredClone(data.policy); d.revision = data.revision; d.conflict = false; }
+        if (agentLifeState.selected === id) renderAgentLife({ fields: !d.dirty && !d.busy });
+      } catch (error) {
+        if (request !== d.request) return;
+        d.error = `Agent 状态加载失败：${error.message}。已有草稿保留。`;
+        if (agentLifeState.selected === id) renderAgentLife({ fields: true });
+      }
+    }
+
+    function editAgentLife() {
+      const d = lifeDraft();
+      if (!d.policy || d.busy) return;
+      d.policy.enabled = $("agentLifeEnabled").checked;
+      d.policy.socialPreset = $("agentSocialPreset").value;
+      d.policy.work.enabled = $("agentWorkEnabled").checked;
+      d.policy.work.backendId = $("agentWorkBackend").value;
+      // Keep raw numeric drafts (including empty/invalid input) until explicit save.
+      d.policy.work.maxActions = $("agentWorkMaxActions").value;
+      d.dirty = true; d.edit++; renderAgentLife({ fields: false });
+    }
+
+    async function saveAgentLife() {
+      const id = agentLifeState.selected, d = lifeDraft(id);
+      if (!id || !d.policy || !d.dirty || d.busy || d.conflict || d.error) return;
+      const policy = structuredClone(d.policy), max = Number(policy.work.maxActions);
+      if (!Number.isInteger(max) || max < 1 || max > 32) return toast("动作预算必须为 1–32 的整数。", "bad");
+      policy.work.maxActions = max;
+      const backend = d.data?.backends?.find(b => b.id === policy.work.backendId);
+      if (policy.work.enabled && (!lifeBackendReady(backend) || policy.work.capabilities.some(c => !backend.capabilities?.includes(c)))) return toast("所选后端或能力尚未验证可用；请关闭工作能力或调整配置。", "bad");
+      const edit = d.edit, expectedRevision = d.revision;
+      let verified = false;
+      d.busy = true; d.saveError = ""; d.request++; renderAgentLife({ fields: true });
+      try {
+        const result = await api(`/api/accounts/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ expectedRevision, patch: { digitalLife: policy } }) });
+        if (result.ok === false) throw new Error(result.error || "保存失败");
+        const saved = await api(`/api/tasks/agent-life?account_id=${encodeURIComponent(id)}`);
+        if (saved.ok === false || saved.accountId !== id || saved.revision == null || lifePolicySignature(saved.policy) !== lifePolicySignature(policy)) throw new Error("保存回读未确认一致，请刷新核对后再操作");
+        d.request++; d.data = saved; d.latest = saved; d.revision = saved.revision;
+        if (d.edit === edit) { d.dirty = false; d.policy = structuredClone(saved.policy); }
+        d.conflict = false; d.error = "";
+        verified = true;
+        toast(`账号 ${id} 工作策略已保存`);
+      } catch (error) {
+        if (error.status === 409) d.conflict = true;
+        d.saveError = `保存未确认：${error.message}。草稿保留，不自动重试。`;
+      } finally {
+        d.busy = false;
+        if (!verified) await loadAgentLife(id);
+        if (agentLifeState.selected === id) renderAgentLife({ fields: true });
+      }
+    }
+
+    function lifePolicySignature(policy) {
+      if (!policy?.work || !Array.isArray(policy.work.capabilities)) return "invalid";
+      return JSON.stringify([policy.enabled, policy.socialPreset, policy.work.enabled, policy.work.backendId, [...policy.work.capabilities].sort(), policy.work.maxActions]);
+    }
+
+    async function previewAgentPrompt() {
+      const id = agentLifeState.selected, mode = $("agentPromptMode").value, request = ++agentLifeState.promptRequest;
+      if (!id) return;
+      $("agentPromptStatus").textContent = "正在组合已保存配置；不调用模型。";
+      $("agentPromptPreview").textContent = "加载中…";
+      try {
+        const result = await api("/api/tasks/prompt-preview", { method: "POST", body: JSON.stringify({ accountId: id, mode }) });
+        if (request !== agentLifeState.promptRequest || id !== agentLifeState.selected) return;
+        if (result.ok === false || typeof result.composition?.text !== "string") throw new Error(result.error || "预览响应不完整");
+        $("agentPromptPreview").textContent = result.composition.text;
+        // Only composer metadata, never task model traces or tool/file contents.
+        const layers = Array.isArray(result.composition.layers) ? result.composition.layers : [];
+        const diagnostics = Array.isArray(result.composition.diagnostics) ? result.composition.diagnostics : [];
+        $("agentPromptStatus").textContent = `账号 ${id} · ${mode} · 已保存配置 · 层：${layers.map(l => typeof l === "string" ? l : l.id || l.name || "未命名").join("、") || "未提供"} · 诊断：${diagnostics.map(d => typeof d === "string" ? d : d.code || "未命名").join("、") || "无"}`;
+      } catch (error) {
+        if (request === agentLifeState.promptRequest && id === agentLifeState.selected) { $("agentPromptStatus").textContent = `预览失败：${error.message}`; $("agentPromptPreview").textContent = "未取得预览。"; }
+      }
+    }
+
+    function clearTaskPanels() {
+      closeTaskArtifacts(); agentLifeState.grant = null; agentLifeState.timelineRequest++;
+      $("taskGrantPanel").classList.add("hidden"); $("taskTimelinePanel").classList.add("hidden");
+    }
+
+    function grantCapability(type) {
+      return ({ read: "local_read", write: "local_write" })[type] || type;
+    }
+
+    function grantAvailability(task, type) {
+      if (task?.permissionTier !== "owner") return "只有主人任务可以申请此授权；身份由服务端核验。";
+      if (task.revision == null || !task.accountId || !task.logicalBotId) return "任务缺少修订或机器人身份，不能安全授权。";
+      const data = lifeDraft(task.accountId).data;
+      const backend = data?.backends?.find(b => b.id === data.policy?.work?.backendId);
+      if (!lifeBackendReady(backend) || !backend.capabilities?.includes(grantCapability(type))) return "所选工作后端未验证可用，或不支持此能力。";
+      return "";
+    }
+
+    function taskGrantBody(task, fields) {
+      const { type } = fields, actions = String(fields.actions).split(",").map(s => s.trim()).filter(Boolean), target = String(fields.target).trim();
+      if (task?.permissionTier !== "owner" || task.revision == null || !task.accountId || !task.logicalBotId) throw new Error("任务身份或修订无效");
+      if (!taskGrantActions[type] || !actions.length || new Set(actions).size !== actions.length || actions.some(a => !taskGrantActions[type].includes(a))) throw new Error("请填写此类型允许的具体动作");
+      if (!target || target.length > 512 || /[*\u0000-\u001f]/.test(target)) throw new Error("目标必须具体，不能使用通配符");
+      const expiresInMs = Number(fields.expiresInMs), maxTtl = type === "external_write" ? 120000 : 3600000;
+      if (!Number.isInteger(expiresInMs) || expiresInMs < 1000 || expiresInMs > maxTtl) throw new Error(type === "external_write" ? "外写授权最长 2 分钟且仅一次" : "授权有效期需在 1 秒至 1 小时内");
+      let scope = { actions };
+      if (["read", "write", "code"].includes(type)) {
+        if (!/^(?:\/(?!$)|[A-Za-z]:[\\/])/.test(target)) throw new Error("必须指定文件或代码目录的绝对路径，不能授权根目录");
+        if (/^(?:[A-Za-z]:)?[\\/.]+$/.test(target) || target.split(/[\\/]/).some(s => s === "..")) throw new Error("不能授权根目录或包含上级路径的范围");
+        scope = { ...scope, path: target, recursive: false };
+      } else if (type.endsWith("browser")) {
+        const domains = target.split(",").map(s => s.trim());
+        if (domains.some(d => !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}$/.test(d) || d.endsWith(".local") || d.endsWith(".localhost")) || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(fields.sessionId || "")) throw new Error("请指定准确的公开域名和受控会话 ID");
+        scope = { ...scope, domains, sessionId: fields.sessionId };
+      } else if (type === "external_write") {
+        if (!/^[a-f0-9]{64}$/.test(fields.operationDigest || "")) throw new Error("需填写主机待确认操作的 64 位摘要");
+        scope = { ...scope, target, operationDigest: fields.operationDigest, oneShot: true };
+      } else {
+        const apps = target.split(",").map(s => s.trim());
+        if (apps.some(a => !a || /^(all|any|desktop|全部|全局)$/i.test(a))) throw new Error("必须指定应用 ID，不能授权整个桌面");
+        scope = { ...scope, apps };
+      }
+      return { type, target, scope, expiresInMs, expectedRevision: task.revision };
+    }
+
+    function renderTaskGrant() {
+      const state = agentLifeState.grant;
+      if (!state) return;
+      const task = state.task, type = $("taskGrantType").value;
+      $("taskGrantIdentity").textContent = `任务 ${task.id} · 账号 ${task.accountId || "未知"} · 机器人 ${task.logicalBotId || "未知"} · 修订 ${task.revision ?? "未知"} · ${task.summary || ""}`;
+      $("taskGrantBrowserFields").classList.toggle("hidden", !type.endsWith("browser"));
+      $("taskGrantExternalFields").classList.toggle("hidden", type !== "external_write");
+      $("taskGrantActionsHint").textContent = `允许的动作：${taskGrantActions[type].join(", ")}；只填写本次所需。`;
+      for (const option of $("taskGrantExpiry").options) option.disabled = type === "external_write" && Number(option.value) > 120000;
+      if (type === "external_write" && Number($("taskGrantExpiry").value) > 120000) $("taskGrantExpiry").value = "120000";
+      const live = taskData?.tasks?.find(t => t.id === task.id);
+      const error = live?.revision !== task.revision ? "任务修订已变化，请关闭后重新打开授权表单核对。" : grantAvailability(task, type);
+      $("taskGrantFeedback").textContent = error || state.error || (state.busy ? "提交中；不会自动重放。" : "尚未授权；提交后由服务端再次核验主人和任务修订。");
+      $("submitTaskGrantBtn").disabled = state.busy || !!error;
+      const list = $("taskGrantList"); list.replaceChildren();
+      for (const grant of Array.isArray(task.grants) ? task.grants : []) {
+        const row = lifeNode("div", undefined, "list-item"), expired = !Number.isFinite(Date.parse(grant.expiresAt)) || Date.parse(grant.expiresAt) <= Date.now();
+        row.append(lifeNode("p", `${grant.type || grant.capability || "未知类型"} · ${grant.revokedAt ? "已撤销" : expired ? "过期 / 期限未知" : "有效"} · 到期 ${grant.expiresAt || "未知"}`, "hint"));
+        const scope = grant.scope || {};
+        row.append(lifeNode("p", `目标：${scope.path || scope.target || scope.domains?.join(", ") || scope.apps?.join(", ") || grant.target || "未提供（旧授权）"} · 动作：${scope.actions?.join(", ") || "未知"}${scope.oneShot ? " · 仅一次" : ""}`, "hint"));
+        const revoke = lifeNode("button", "撤销此授权", "danger"); revoke.type = "button";
+        revoke.disabled = state.busy || task.permissionTier !== "owner" || !!grant.revokedAt || !grant.id || live?.revision !== task.revision;
+        revoke.addEventListener("click", () => submitTaskGrant(grant.id)); row.append(revoke); list.append(row);
+      }
+      if (!list.children.length) list.append(lifeNode("p", "暂无授权。", "hint"));
+    }
+
+    function openTaskGrant(taskId) {
+      const task = taskData?.tasks?.find(t => t.id === taskId);
+      if (!task) return;
+      closeTaskArtifacts(); agentLifeState.timelineRequest++; $("taskTimelinePanel").classList.add("hidden");
+      agentLifeState.grant = { task: structuredClone(task), busy: false, error: "" };
+      $("taskGrantForm").reset(); $("taskGrantActions").value = "read";
+      $("taskGrantPanel").classList.remove("hidden"); renderTaskGrant();
+      $("taskGrantPanel").scrollIntoView({ block: "nearest" }); $("taskGrantType").focus();
+    }
+
+    async function submitTaskGrant(grantId = "") {
+      const state = agentLifeState.grant;
+      if (!state || state.busy) return;
+      const task = state.task, live = taskData?.tasks?.find(t => t.id === task.id);
+      try {
+        if (task.permissionTier !== "owner" || task.revision == null || !task.accountId || !task.logicalBotId || live?.revision !== task.revision) throw new Error("任务身份或修订已变化，请重新打开核对");
+        let body;
+        if (grantId) body = { grantId, expectedRevision: task.revision };
+        else {
+          if (!$("taskGrantConfirm").checked) throw new Error("请先核对并勾选确认");
+          const unavailable = grantAvailability(task, $("taskGrantType").value); if (unavailable) throw new Error(unavailable);
+          body = taskGrantBody(task, { type: $("taskGrantType").value, target: $("taskGrantTarget").value, actions: $("taskGrantActions").value, expiresInMs: $("taskGrantExpiry").value, sessionId: $("taskGrantSession").value, operationDigest: $("taskGrantDigest").value });
+        }
+        state.busy = true; state.error = ""; renderTaskGrant();
+        const result = await api(`/api/tasks/${encodeURIComponent(task.id)}/${grantId ? "revoke" : "grant"}`, { method: "POST", body: JSON.stringify(body) });
+        if (result.ok === false) throw new Error(result.error || "授权操作失败");
+        if (agentLifeState.grant === state) { agentLifeState.grant = null; $("taskGrantPanel").classList.add("hidden"); }
+        toast(grantId ? "授权已撤销" : "已提交此任务范围授权；不代表操作已执行");
+        await refreshAgentFeatures();
+      } catch (error) { state.error = `${error.message}。未自动重试。`; }
+      finally { state.busy = false; if (agentLifeState.grant === state) renderTaskGrant(); }
+    }
+
+    function taskStageLabel(stage) {
+      const value = typeof stage === "string" ? stage : stage?.id || stage?.stage || stage?.name;
+      return typeof value === "string" && /^[\p{L}\p{N}_: .-]{1,80}$/u.test(value) ? value : "未提供阶段代码";
+    }
+
+    async function showTaskTimeline(taskId) {
+      clearTaskPanels(); const request = ++agentLifeState.timelineRequest;
+      const task = taskData?.tasks?.find(t => t.id === taskId);
+      if (!task) return;
+      $("taskTimelineTitle").textContent = `任务时间线 · ${taskId} · ${task.logicalBotId || task.accountId || "身份未知"}`;
+      $("taskTimelineList").replaceChildren(lifeNode("li", `当前阶段：${taskStageLabel(task.currentStage)} · 状态：${task.status || "未知"}`), lifeNode("li", "正在加载事件…"));
+      $("taskTimelinePanel").classList.remove("hidden");
+      try {
+        const data = await api(`/api/tasks/${encodeURIComponent(taskId)}/events`);
+        if (request !== agentLifeState.timelineRequest) return;
+        if (data.ok === false || !Array.isArray(data.events)) throw new Error(data.error || "事件响应不完整");
+        const events = data.events.slice(-80);
+        $("taskTimelineList").replaceChildren(lifeNode("li", `当前阶段：${taskStageLabel(task.currentStage)} · 状态：${task.status || "未知"}`), ...events.map(e => {
+          const time = Date.parse(e.at); return lifeNode("li", `${Number.isFinite(time) ? new Date(time).toLocaleString() : "时间未知"} · ${taskStageLabel(e.type)}${e.stage ? ` · ${taskStageLabel(e.stage)}` : ""}`);
+        }));
+        if (!events.length) $("taskTimelineList").append(lifeNode("li", "暂无事件记录。"));
+      } catch (error) { if (request === agentLifeState.timelineRequest) $("taskTimelineList").append(lifeNode("li", `事件加载失败：${error.message}`)); }
+    }
+
+    function wireAgentLife() {
+      $("taskAccountSelect").addEventListener("change", async () => {
+        agentLifeState.selected = $("taskAccountSelect").value; agentLifeState.promptRequest++;
+        clearTaskPanels(); taskData = null; renderTasks(); renderAgentLife({ fields: true });
+        $("agentPromptPreview").textContent = "尚未预览；未保存草稿不会参与组合。"; $("agentPromptStatus").textContent = "";
+        await refreshAgentFeatures();
+      });
+      for (const id of ["agentLifeEnabled", "agentWorkEnabled", "agentSocialPreset", "agentWorkBackend", "agentWorkMaxActions"]) $(id).addEventListener(id === "agentWorkMaxActions" ? "input" : "change", editAgentLife);
+      $("saveAgentLifeBtn").addEventListener("click", saveAgentLife);
+      $("refreshAgentLifeBtn").addEventListener("click", () => loadAgentLife());
+      $("rebaseAgentLifeBtn").addEventListener("click", () => {
+        const d = lifeDraft(); if (!d.latest || d.busy || d.error || !confirm("已核对上方最新服务器配置？将仅在最新修订上保存本账号工作策略草稿。")) return;
+        d.revision = d.latest.revision; d.conflict = false; d.saveError = ""; renderAgentLife();
+      });
+      $("discardAgentLifeBtn").addEventListener("click", async () => {
+        const d = lifeDraft(); if (d.busy || !confirm("丢弃此账号未保存工作策略并重新加载？")) return;
+        d.dirty = false; d.conflict = false; d.saveError = ""; await loadAgentLife();
+      });
+      $("agentPromptPreviewBtn").addEventListener("click", previewAgentPrompt);
+      $("agentPromptMode").addEventListener("change", () => { agentLifeState.promptRequest++; $("agentPromptPreview").textContent = "场景已切换，请重新生成预览。"; $("agentPromptStatus").textContent = ""; });
+      $("taskGrantType").addEventListener("change", () => { $("taskGrantActions").value = taskGrantActions[$("taskGrantType").value][0]; $("taskGrantConfirm").checked = false; if (agentLifeState.grant) agentLifeState.grant.error = ""; renderTaskGrant(); });
+      $("taskGrantForm").addEventListener("submit", e => { e.preventDefault(); submitTaskGrant(); });
+      $("closeTaskGrantBtn").addEventListener("click", () => { agentLifeState.grant = null; $("taskGrantPanel").classList.add("hidden"); });
+      $("closeTaskTimelineBtn").addEventListener("click", () => { agentLifeState.timelineRequest++; $("taskTimelinePanel").classList.add("hidden"); });
+      window.addEventListener("beforeunload", event => { if ([...agentLifeState.drafts.values()].some(d => d.dirty)) { event.preventDefault(); event.returnValue = ""; } });
+      window.addEventListener("pagehide", closeTaskArtifacts);
+    }
+    // DIGITAL_LIFE_UI_END
+
     function renderTasks() {
       const data = taskData || { tasks: [], running: 0, queued: 0 };
       const tasks = Array.isArray(data.tasks) ? data.tasks : [];
@@ -2456,6 +2837,7 @@
       $("taskRuntimeSummary").textContent = `运行中：${Number(data.running || 0)}\n排队中：${Number(data.queued || 0)}\n会话并发：${cfg?.taskMode?.maxConcurrentPerConversation || 1}\n全局并发：${cfg?.taskMode?.maxConcurrentGlobal || 2}`;
       const list = $("taskList");
       list.replaceChildren();
+      if (data.ok === false) { list.append(lifeNode("p", `任务加载失败：${data.error || "未知错误"}`, "alert")); return; }
       if (!tasks.length) {
         const empty = document.createElement("div");
         empty.className = "hint";
@@ -2480,7 +2862,7 @@
         title.textContent = task.summary || task.objective || "未命名任务";
         const detail = document.createElement("span");
         detail.className = "task-meta";
-        detail.textContent = `复杂度 ${task.complexity || "standard"} · 思考 ${task.reasoningEffort || "medium"} · 会话 ${task.conversationId || "-"} · 发起人 ${task.senderName || task.userId || "-"} · ${task.updatedAt ? new Date(task.updatedAt).toLocaleString() : ""}`;
+        detail.textContent = `账号 ${task.accountId || "未知"} · 机器人 ${task.logicalBotId || "未知"} · 阶段 ${taskStageLabel(task.currentStage)} · 复杂度 ${task.complexity || "standard"} · 思考 ${task.reasoningEffort || "medium"} · 会话 ${task.conversationId || "-"} · 发起人 ${task.senderName || task.userId || "-"} · ${task.updatedAt ? new Date(task.updatedAt).toLocaleString() : ""}`;
         item.append(header, title, detail);
         if (task.objective && task.objective !== task.summary) {
           const more = document.createElement("details");
@@ -2493,6 +2875,8 @@
         }
         const actions = document.createElement("div");
         actions.className = "row";
+        const timeline = lifeNode("button", "阶段时间线", "secondary");
+        timeline.dataset.taskAction = "timeline"; timeline.dataset.taskId = task.id; actions.append(timeline);
         if (["interrupted", "offered"].includes(task.status)) {
           const resume = document.createElement("button");
           resume.className = "secondary";
@@ -2515,12 +2899,14 @@
           cancel.dataset.taskId = task.id;
           actions.appendChild(cancel);
         }
-        if (task.status === "waiting_permission") {
+        if (task.status === "waiting_permission" || task.grants?.length) {
           const grant = document.createElement("button");
           grant.className = "secondary";
           grant.textContent = "主人授权";
           grant.dataset.taskAction = "grant";
           grant.dataset.taskId = task.id;
+          grant.disabled = task.permissionTier !== "owner";
+          grant.title = "仅主人任务；按任务、机器人、范围及有效期授权或撤销";
           actions.appendChild(grant);
         }
         if (task.status === "completed") {
@@ -2555,47 +2941,60 @@
     }
 
     async function refreshAgentFeatures() {
+      renderLifeAccounts();
+      const accountId = agentLifeState.selected, request = ++agentLifeState.tasksRequest;
       const [tasks, reviewer, integrity] = await Promise.all([
-        api(`/api/tasks?ts=${Date.now()}`).catch((err) => ({ ok: false, tasks: [], error: err.message })),
+        accountId ? api(`/api/tasks?account_id=${encodeURIComponent(accountId)}&ts=${Date.now()}`).catch((err) => ({ ok: false, tasks: [], error: err.message })) : Promise.resolve({ tasks: [] }),
         api(`/api/reviewer/status?ts=${Date.now()}`).catch((err) => ({ ok: false, metrics: {}, error: err.message })),
         api(`/api/memory/integrity?ts=${Date.now()}`).catch((err) => ({ ok: false, totals: {}, error: err.message }))
       ]);
+      if (request !== agentLifeState.tasksRequest || accountId !== agentLifeState.selected) return;
       taskData = tasks;
       reviewerData = reviewer;
       memoryIntegrityData = integrity;
       renderTasks();
+      renderTaskGrant();
       renderReviewerAndIntegrity();
+      await loadAgentLife(accountId);
     }
 
     async function taskAction(taskId, action) {
-      let body = {};
+      if (action === "grant") return openTaskGrant(taskId);
+      if (action === "timeline") return showTaskTimeline(taskId);
+      if (!["resume", "supplement", "cancel"].includes(action)) throw new Error("不支持的任务操作");
+      const task = taskData?.tasks?.find(item => item.id === taskId);
+      if (!task || action !== "cancel" && task.revision == null) throw new Error("任务修订缺失，请刷新任务后重新核对");
+      let body = action === "cancel" ? {} : { expectedRevision: task.revision };
       if (action === "supplement") {
         const text = prompt("补充任务要求：");
         if (!text) return;
-        body = { text };
-      }
-      if (action === "grant") {
-        const type = prompt("授权类型：read / write / computer / authenticated_browser", "read");
-        if (!type) return;
-        const target = prompt(type === "read" || type === "write" ? "绝对路径：" : "授权用途：");
-        if (!target) return;
-        body = { type, target, purpose: "admin console explicit grant" };
+        body = { ...body, text };
       }
       const result = await api(`/api/tasks/${encodeURIComponent(taskId)}/${action}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      if (result.ok === false) throw new Error(result.error || "任务操作失败");
       toast(action === "cancel" ? "任务已取消" : "任务已进入队列");
       await refreshAgentFeatures();
       return result;
     }
 
     async function showTaskArtifacts(taskId) {
-      const result = await api(`/api/tasks/${encodeURIComponent(taskId)}/artifacts`);
-      const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
-      if (!artifacts.length) return toast("这个任务没有可下载产物", "bad");
-      activeTaskArtifacts = artifacts;
+      clearTaskPanels();
+      const request = artifactPanelRevision;
       activeArtifactTaskId = taskId;
       $("taskArtifactTitle").textContent = `任务产物 · ${taskId}`;
+      $("taskArtifactPreview").textContent = "正在加载产物…";
+      $("taskArtifactPanel").classList.remove("hidden");
       const list = $("taskArtifactList");
       list.replaceChildren();
+      let result;
+      try {
+        result = await api(`/api/tasks/${encodeURIComponent(taskId)}/artifacts`);
+        if (result.ok === false) throw new Error(result.error || "产物加载失败");
+      } catch (error) { if (request === artifactPanelRevision) $("taskArtifactPreview").textContent = `产物加载失败：${error.message}`; return; }
+      if (request !== artifactPanelRevision || taskId !== activeArtifactTaskId) return;
+      const artifacts = Array.isArray(result.artifacts) ? result.artifacts : [];
+      activeTaskArtifacts = artifacts;
+      if (!artifacts.length) { $("taskArtifactPreview").textContent = "这个任务没有可下载产物。"; return; }
       for (const artifact of artifacts) {
         const row = document.createElement("div");
         row.className = "list-item";
@@ -2610,54 +3009,88 @@
         preview.className = "secondary";
         preview.textContent = "预览";
         preview.dataset.artifactId = artifact.id;
-        const link = document.createElement("a");
-        link.href = `/api/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(artifact.id)}`;
+        const link = document.createElement("button");
+        link.type = "button";
         link.textContent = "下载";
-        link.setAttribute("download", artifact.name);
-        link.className = "pill";
+        link.dataset.artifactId = artifact.id;
+        link.dataset.artifactDownload = "true";
+        link.className = "secondary";
         actions.append(preview, link);
         row.append(name, size, actions);
         list.appendChild(row);
       }
-      $("taskArtifactPanel").classList.remove("hidden");
       $("taskArtifactPanel").scrollIntoView({ block: "nearest", behavior: "smooth" });
       await previewTaskArtifact(artifacts[0]);
     }
 
     async function previewTaskArtifact(artifact) {
       const revision = ++artifactPreviewRevision;
+      const taskId = activeArtifactTaskId;
       const preview = $("taskArtifactPreview");
+      releaseArtifactUrls();
       preview.replaceChildren();
       const ext = String(artifact.name || "").split(".").pop().toLowerCase();
-      const url = `/api/tasks/${encodeURIComponent(activeArtifactTaskId)}/artifacts/${encodeURIComponent(artifact.id)}?preview=1`;
-      if (["png", "jpg", "jpeg", "gif", "webp"].includes(ext)) {
-        const image = document.createElement("img");
-        image.alt = artifact.name;
-        image.src = url;
-        image.addEventListener("error", () => { preview.textContent = "图片预览失败，请下载查看。"; });
-        preview.appendChild(image);
-      } else if (ext === "pdf") {
-        const frame = document.createElement("iframe");
-        frame.title = `${artifact.name} PDF 预览`;
-        frame.setAttribute("sandbox", "");
-        frame.src = url;
-        preview.appendChild(frame);
-      } else if (["txt", "md", "json"].includes(ext) && Number(artifact.size || 0) <= 1024 * 1024) {
-        preview.textContent = "正在读取文本...";
-        try {
-          const response = await fetch(url, { cache: "no-store" });
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const content = await response.text();
-          if (revision !== artifactPreviewRevision) return;
-          const text = document.createElement("pre");
-          text.textContent = content;
-          preview.replaceChildren(text);
-        } catch (error) {
-          if (revision === artifactPreviewRevision) preview.textContent = `预览失败：${error.message}`;
-        }
-      } else {
+      const textType = ["txt", "md", "json"].includes(ext), imageType = ["png", "jpg", "jpeg", "gif", "webp"].includes(ext);
+      if ((!textType && !imageType && ext !== "pdf") || textType && Number(artifact.size || 0) > 1024 * 1024) {
         preview.textContent = "此文件不支持在线预览，或文本超过 1 MB；请使用左侧下载按钮。";
+        return;
       }
+      preview.textContent = "正在鉴权读取…";
+      try {
+        const blob = await fetchTaskArtifact(taskId, artifact.id, true);
+        if (revision !== artifactPreviewRevision || taskId !== activeArtifactTaskId) return;
+        if (blob.size > (textType ? 1024 * 1024 : 20 * 1024 * 1024)) throw new Error("文件超出在线预览大小限制，请下载查看");
+        if (textType) {
+          const content = await blob.text();
+          if (revision !== artifactPreviewRevision || taskId !== activeArtifactTaskId) return;
+          const text = lifeNode("pre", content); preview.replaceChildren(text);
+        } else {
+          // Pin the renderer MIME; an API mislabel must not turn a file into HTML.
+          const mime = ext === "pdf" ? "application/pdf" : ({ jpg: "image/jpeg", jpeg: "image/jpeg" })[ext] || `image/${ext}`;
+          const url = URL.createObjectURL(new Blob([blob], { type: mime })); artifactObjectUrls.add(url);
+          const media = document.createElement(imageType ? "img" : "iframe");
+          if (imageType) media.alt = artifact.name;
+          else {
+            media.title = `${artifact.name} PDF 预览`; media.setAttribute("referrerpolicy", "no-referrer");
+            // Chromium blocks its native PDF viewer inside a sandboxed iframe.
+            // Only authenticated bytes retyped as application/pdf reach it;
+            // HTML/SVG and arbitrary server URLs never enter this renderer.
+          }
+          media.src = url;
+          media.addEventListener("error", () => { if (revision === artifactPreviewRevision && taskId === activeArtifactTaskId) { preview.textContent = "预览失败，请下载查看。"; releaseArtifactUrls(); } });
+          preview.replaceChildren(media);
+          if (!imageType) preview.append(lifeNode("p", "使用浏览器原生 PDF 查看器；若此浏览器不支持内嵌 PDF，请使用左侧下载。", "hint"));
+        }
+      } catch (error) {
+        if (revision === artifactPreviewRevision && taskId === activeArtifactTaskId) preview.textContent = `预览失败：${error.message}`;
+      }
+    }
+
+    async function fetchTaskArtifact(taskId, artifactId, preview = false) {
+      const path = `/api/tasks/${encodeURIComponent(taskId)}/artifacts/${encodeURIComponent(artifactId)}${preview ? "?preview=1" : ""}`;
+      return api(path, { cache: "no-store" }, "blob");
+    }
+
+    function releaseArtifactUrls() {
+      for (const url of artifactObjectUrls) URL.revokeObjectURL(url);
+      artifactObjectUrls.clear();
+    }
+
+    function closeTaskArtifacts() {
+      artifactPanelRevision++; artifactPreviewRevision++; activeArtifactTaskId = ""; activeTaskArtifacts = [];
+      $("taskArtifactPanel").classList.add("hidden"); $("taskArtifactPreview").replaceChildren(); $("taskArtifactList").replaceChildren();
+      releaseArtifactUrls();
+    }
+
+    async function downloadTaskArtifact(artifact) {
+      const taskId = activeArtifactTaskId, revision = artifactPanelRevision;
+      if (!taskId) return;
+      const blob = await fetchTaskArtifact(taskId, artifact.id);
+      if (taskId !== activeArtifactTaskId || revision !== artifactPanelRevision) return;
+      const url = URL.createObjectURL(blob); artifactObjectUrls.add(url);
+      const link = document.createElement("a"); link.href = url; link.download = artifact.name; document.body.append(link); link.click(); link.remove();
+      // The browser needs time to consume the URL. Closing/switching also revokes it.
+      setTimeout(() => { if (artifactObjectUrls.delete(url)) URL.revokeObjectURL(url); }, 60000);
     }
 
     function verificationKey(item) {
@@ -4720,7 +5153,7 @@
       move(voiceGrid.children[1], voiceAdvanced);
       voiceGrid.classList.remove("two");
       $("voice-behavior-panel").appendChild(voiceAdvanced);
-      const taskGrid = $("page-tasks").querySelector(".grid.two");
+      const taskGrid = $("taskQueueGrid");
       const taskSettings = disclose("任务权限与运行参数", "taskSettingsDetails");
       move($("taskMode.enabled")?.closest(".card"), taskSettings);
       taskGrid.classList.remove("two");
@@ -4904,7 +5337,7 @@
       for (const btn of document.querySelectorAll("[data-tabs] [data-tab]")) btn.addEventListener("click", () => switchTab(btn.closest("[data-tabs]").dataset.tabs, btn.dataset.tab));
       for (const btn of document.querySelectorAll("[data-jump]")) btn.addEventListener("click", () => switchPage(btn.dataset.jump));
       for (const el of document.querySelectorAll("input, textarea, select")) {
-        if (el.closest("#page-api-center, #routinePanel, #memoryVerification") || el.matches("[data-console-theme]")) continue;
+        if (el.closest("#page-api-center, #routinePanel, #memoryVerification, #agentLifePanel, #taskGrantPanel") || el.matches("[data-console-theme]")) continue;
         if (el.id === "automationAccountSelect" || el.id === "memorySearch" || el.id === "memoryDetailSearch" || el.id === "archiveSearch" || el.id === "send.groupSelect" || el.id === "modelPreset" || el.id === "aiProfileSelect" || el.id === "styleProfileSelect" || el.id === "promptAccountSelect" || el.id === "voiceSecretInput" || el.id.startsWith("send.") || el.id.startsWith("backup") || el.id.startsWith("desktop")) continue;
         el.addEventListener("input", markDirty);
         el.addEventListener("change", markDirty);
@@ -5082,13 +5515,9 @@
         const button = event.target.closest("[data-artifact-id]");
         if (!button) return;
         const artifact = activeTaskArtifacts.find((item) => item.id === button.dataset.artifactId);
-        if (artifact) previewTaskArtifact(artifact).catch((error) => toast(error.message, "bad"));
+        if (artifact) (button.dataset.artifactDownload ? downloadTaskArtifact(artifact) : previewTaskArtifact(artifact)).catch((error) => toast(error.message, "bad"));
       });
-      $("closeTaskArtifactsBtn").addEventListener("click", () => {
-        artifactPreviewRevision += 1;
-        $("taskArtifactPanel").classList.add("hidden");
-        $("taskArtifactPreview").replaceChildren();
-      });
+      $("closeTaskArtifactsBtn").addEventListener("click", closeTaskArtifacts);
       $("showMainLog").addEventListener("click", () => { currentLogKind = "main"; renderLogs(); });
       $("showErrorLog").addEventListener("click", () => { currentLogKind = "error"; renderLogs(); });
       $("copyLogBtn").addEventListener("click", () => copyText($("logView").textContent || ""));
@@ -7168,6 +7597,7 @@
 
     mountAdminPanels();
     wireEvents();
+    wireAgentLife();
     wireMemoryVerification();
     mountAccountRegistry();
     socialUi.mount();

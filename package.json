@@ -1,6 +1,6 @@
 {
   "name": "qq-hermes-onebot-bridge",
-  "version": "1.0.0-beta.25",
+  "version": "1.0.0-beta.26",
   "description": "Local desktop manager and OneBot bridge for Hermes-powered QQ bots",
   "main": "desktop/main.cjs",
   "private": true,
@@ -15,6 +15,7 @@
     "check": "node src/bridge.js --check",
     "test:social": "node src/bridge.js --social-self-test",
     "test:agent": "node scripts/agent-feature-self-test.js",
+    "test:digital-life": "node scripts/agent-prompt-self-test.js && node scripts/agent-life-self-test.js && node scripts/work-capabilities-self-test.js && node scripts/work-backends-self-test.js && node scripts/work-local-files-self-test.js && node scripts/work-plan-self-test.js && node scripts/task-delivery-self-test.js && node scripts/task-artifacts-async-self-test.js && node scripts/digital-life-ui-self-test.js && node scripts/digital-life-integration-self-test.js",
     "test:text-completion": "node scripts/text-completion-self-test.js",
     "test:reply": "node scripts/reply-coordinator-self-test.js",
     "test:social-experience": "node scripts/social-expression-self-test.js && node scripts/social-experience-policy-self-test.js && node scripts/sticker-service-self-test.js && node scripts/sticker-cache-self-test.js && node scripts/social-expression-library-self-test.js && node scripts/group-sticker-learning-self-test.js && node scripts/message-reactions-self-test.js && node scripts/group-language-learning-self-test.js && node scripts/vision-process-self-test.js && node scripts/social-experience-ui-self-test.js",

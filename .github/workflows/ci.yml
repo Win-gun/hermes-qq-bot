@@ -44,6 +44,7 @@ jobs:
       - run: npm run test:config-revision
       - run: npm run test:console
       - run: npm run test:agent
+      - run: npm run test:digital-life
       - run: npm run test:backup
       - run: npm run test:web-host
       - run: npm run web:release:check

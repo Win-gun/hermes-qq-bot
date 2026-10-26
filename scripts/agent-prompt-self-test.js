@@ -260,7 +260,7 @@ test("cycles, non-JSON values, sparse arrays and custom prototypes are rejected"
 });
 test("bounded contexts refuse excess depth, width and text without echoing values", () => {
   let nested = {}; for (let i = 0; i < 14; i++) nested = { next: nested };
-  for (const runtimeContext of [nested, { text: "x".repeat(12001) }, { list: Array(257).fill(1) },
+  for (const runtimeContext of [nested, { text: "x".repeat(64001) }, { list: Array(257).fill(1) },
     Object.fromEntries(Array.from({ length: 257 }, (_, i) => [`x${i}`, i])), { list: Array(6).fill("x".repeat(12000)) }])
     rejects(() => make({ runtimeContext }), "AGENT_PROMPT_CONTEXT_LIMIT");
 });
@@ -268,6 +268,12 @@ test("invalid persona and context types fail closed", () => {
   for (const persona of [null, 1, {}, "x".repeat(20001)]) rejects(() => make({ persona }), "AGENT_PROMPT_INVALID_PERSONA");
   for (const patch of [{ runtimeContext: null }, { runtimeContext: [] }, { socialContext: {} }, { workContext: null }])
     rejects(() => make(patch), "AGENT_PROMPT_INVALID_CONTEXT");
+});
+test("14k search and social bundles fit the same total context budget", () => {
+  const evidence = "可核对资料。".repeat(2400);
+  const task = make({ mode: "task", workContext: { research: evidence, brokerTools: [] } });
+  const social = make({ socialContext: evidence });
+  assert.ok(task.text.includes(evidence)); assert.ok(social.text.includes(evidence));
 });
 test("null-prototype data and shared acyclic references are supported", () => {
   const shared = Object.assign(Object.create(null), { topic: "合成资料" });

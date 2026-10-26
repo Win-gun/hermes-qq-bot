@@ -95,6 +95,11 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
   let backupProgress = { status: "idle" };
   const revision = () => `preview-${version}`;
   const centerRevision = () => `preview-api-${centerVersion}`;
+  const digitalLife = () => ({ enabled: false, socialPreset: "existing", work: { enabled: false, backendId: "local", capabilities: [], maxActions: 12 } });
+  const workBackends = () => [
+    { id: "local", verified: true, available: true, capabilities: ["public_web", "isolated_files"], reason: "虚构预览：仅公开网络与隔离文件；不接入真实执行器" },
+    ...["mac", "browser", "remote"].map(id => ({ id, verified: false, available: false, capabilities: [], reason: "未配置 / 未验证，不可执行" }))
+  ];
   const account = (id, qq, displayName) => ({
     id, qq, displayName, protocol: "snowluma", enabled: true, protocolEnabled: true, managed: true, archived: false,
     protocolContainer: `preview-${id}`, napcatContainer: `preview-${id}`, onebotPath: `/onebot/${id}`, onebotWsUrl: "", webuiPort: 0,
@@ -102,7 +107,7 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
     sendTypes: { text: true, image: true, record: true, video: false, file: true },
     scope: { groups: true, private: true, groupMode: "allowlist", groupIds: ["20001", "20002"] },
     modelBindings: { chat: "", task: "", vision: "", asr: "", tts: "", search: "" },
-    voice: { mode: "inherit", preset: "mimo_default" }, style: { systemPrompt: "" }, styleProfileId: "legacy", promptOverride: "", behaviorMode: "normal"
+    voice: { mode: "inherit", preset: "mimo_default" }, style: { systemPrompt: "" }, styleProfileId: "legacy", promptOverride: "", behaviorMode: "normal", digitalLife: digitalLife()
   });
   config.accounts = { version: 2, topology: "collaboration", items: [
     account("primary", "10001", "演示助手 A"), account("standby-a", "10002", "演示助手 B")
@@ -155,6 +160,19 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
     { id: "preview-task-002", status: "waiting_permission", summary: "检查设计稿说明", objective: "等待一次性授权；预览不会读取本地文件。", conversationId: "private:10002", userId: "10002", senderName: "演示成员 B", complexity: "standard", reasoningEffort: "medium", updatedAt: now(), artifacts: [] },
     { id: "preview-task-003", status: "interrupted", summary: "比较两个交互方案", objective: "演示中断后的恢复入口，不运行模型。", conversationId: "group:20002", userId: "10001", senderName: "演示成员 A", updatedAt: now(), artifacts: [] }
   ];
+  for (const task of tasks) Object.assign(task, { accountId: "primary", logicalBotId: "account:primary", revision: 1, permissionTier: "owner", currentStage: task.status === "completed" ? "completed" : "planning", grants: [] });
+  tasks.push({ id: "preview-task-004", accountId: "standby-a", logicalBotId: "account:standby-a", revision: 1, permissionTier: "isolated", status: "waiting_permission", currentStage: "waiting_permission", summary: "隔离任务：不可授权本机", updatedAt: now(), grants: [], artifacts: [] });
+  tasks[1].grants.push({ id: "preview-expired-grant", type: "read", scope: { path: "/preview/fictional-note.md", actions: ["read"], recursive: false }, expiresAt: "2026-01-01T00:00:00Z" });
+  const artifactBytes = new Map([
+    ["preview-note", [Buffer.from("# 演示讨论摘要\n\n所有内容均为虚构，未执行任何任务。\n"), "text/plain; charset=utf-8", "讨论摘要.md"]],
+    ["preview-image", [Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWQAAAABJRU5ErkJggg==", "base64"), "image/png", "虚构图片.png"]],
+    ["preview-pdf", [Buffer.from("%PDF-1.1\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Resources<<>>/Contents 4 0 R>>endobj\n4 0 obj<</Length 0>>stream\nendstream\nendobj\ntrailer<</Root 1 0 R>>\n%%EOF"), "application/pdf", "虚构报告.pdf"]]
+  ]);
+  tasks[0].artifacts = [...artifactBytes].map(([id, [bytes, type, name]]) => ({ id, name, type, size: bytes.length }));
+  const logicalFor = id => { const group = config.accounts.failoverGroups.find(g => g.memberIds.includes(id)); return group ? `group:${group.id}` : `account:${id}`; };
+  const lifeView = item => ({ ok: true, preview: true, revision: revision(), accountId: item.id, logicalBotId: logicalFor(item.id), policy: copy(item.digitalLife || digitalLife()),
+    activity: { state: "idle" }, episodes: tasks.filter(t => t.logicalBotId === logicalFor(item.id) && t.status === "completed").map(t => ({ taskId: t.id, logicalBotId: t.logicalBotId, status: t.status, sourceRevision: t.revision })),
+    backends: workBackends(), gui: { verified: false, available: false, reason: "虚构预览无桌面连接" } });
   const groups = ["20001", "20002"].map((groupId, index) => ({ groupId, users: 2, profiledUsers: 2, facts: 2, topics: 3, summaries: 1, botSelfUpdatedAt: now(), rollingSummary: index ? "正在比较深色主题的对比度与排版。" : "讨论本周开发计划与界面验收。", settings: {} }));
   let conversations = groups.map(({ groupId }, index) => ({ conversationId: `group:${groupId}`, kind: "group", messageCount: 28 + index * 12, bytes: 8192 + index * 4096, mtimeMs: startedAt, path: `/preview/chat-archive/groups/${groupId}/messages.jsonl` }));
   const backups = [{ name: "preview-safe-backup.hermesqqbackup", size: 32768, modifiedAt: now() }, { name: "preview-full-backup.hermesqqbackup", size: 131072, modifiedAt: now() }];
@@ -237,6 +255,7 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
     if (get && staticFiles.has(rawPath)) { const [body, type] = staticFiles.get(rawPath); return reply(body, 200, type); }
     if (get && rawPath === "/health") return reply(health());
     if (get && rawPath === "/api/admin/session") return reply({ ok: true, token: "preview-session-not-a-credential", preview: true });
+    if (/^\/api\/tasks(?:\/|$)/.test(rawPath) && req.headers["x-hermes-qq-admin"] !== "preview-session-not-a-credential") return reply({ ok: false, error: "admin_session_required" }, 403);
     if (get && rawPath === "/api/config") return reply(configView());
     if (get && rawPath === "/api/accounts") return reply(registry());
     const scopedAutomationMatch = rawPath.match(/^\/api\/automation\/accounts\/([A-Za-z0-9_-]+)$/);
@@ -255,7 +274,16 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
       })) });
     }
     if (get && rawPath === "/api/status") return reply({ ok: true, preview: true, serverTime: Date.now(), health: health(), config: configView(), showQrcode: false, qrcodeExists: false, qrcode: { exists: false }, primaryProtocol: "snowluma", logs: { tail: "[PREVIEW] 两个虚构账号 · 内存草稿 · 不执行模型或 QQ 操作\n[PREVIEW] 控制台 UI QA 就绪", errorTail: "" } });
-    if (get && rawPath === "/api/tasks") return reply({ ok: true, tasks, running: 0, queued: 0 });
+    if (get && rawPath === "/api/tasks") return reply({ ok: true, tasks: tasks.filter(task => !url.searchParams.has("account_id") || task.accountId === url.searchParams.get("account_id")), running: 0, queued: 0 });
+    if (get && rawPath === "/api/tasks/agent-life") {
+      const item = config.accounts.items.find(item => item.id === url.searchParams.get("account_id") && !item.archived);
+      return item ? reply(lifeView(item)) : reply({ ok: false, error: "unknown_preview_account" }, 404);
+    }
+    const taskEvents = rawPath.match(/^\/api\/tasks\/([^/]+)\/events$/);
+    if (get && taskEvents) {
+      const task = tasks.find(t => t.id === taskEvents[1]);
+      return task ? reply({ ok: true, events: [{ at: task.updatedAt, type: "stage", stage: task.currentStage }] }) : reply({ ok: false, error: "unknown_preview_task" }, 404);
+    }
     if (get && rawPath === "/api/reviewer/status") return reply({ ok: true, enabled: false, shadowMode: true, config: { enabled: false, shadowMode: true, runtimeDisabled: true }, metrics: { reviewed: 8, passed: 7, corrected: 1, rejected: 0, failed: 0, totalDurationMs: 2400, recent: [] } });
     if (get && rawPath === "/api/memory/integrity") return reply({ ok: true, generatedAt: Date.now(), totals: { groups: 2, users: 4, entries: 8, conflicts: 0, active: 8 } });
     if (get && rawPath === "/api/memory") {
@@ -271,7 +299,13 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
     const operationId = rawPath.match(/^\/api\/accounts\/operations\/([^/]+)$/)?.[1];
     if (get && operationId) return reply({ ok: true, operation: operations.get(operationId) || null, preview: true });
     const artifact = rawPath.match(/^\/api\/tasks\/([^/]+)\/artifacts(?:\/([^/]+))?$/);
-    if (get && artifact) return reply(artifact[2] ? "# 演示讨论摘要\n\n所有内容均为虚构，未执行任何任务。\n" : { ok: true, artifacts: tasks.find((task) => task.id === artifact[1])?.artifacts || [] }, 200, artifact[2] ? "text/plain; charset=utf-8" : undefined);
+    if (get && artifact) {
+      const task = tasks.find(task => task.id === artifact[1]);
+      if (!task) return reply({ ok: false, error: "unknown_preview_task" }, 404);
+      if (!artifact[2]) return reply({ ok: true, artifacts: task.artifacts });
+      const bytes = task.artifacts.some(a => a.id === artifact[2]) && artifactBytes.get(artifact[2]);
+      return bytes ? reply(bytes[0], 200, bytes[1]) : reply({ ok: false, error: "unknown_preview_artifact" }, 404);
+    }
     if (get && rawPath === "/api/archive/export") return reply(`${JSON.stringify({ preview: true, conversationId: url.searchParams.get("conversation_id"), senderId: "10001", text: "虚构聊天记录" })}\n`, 200, "application/x-ndjson; charset=utf-8");
     if (get && rawPath === "/api/memory/export") return reply({ preview: true, groups });
     // Credential dialogs must never accept or retain a real secret during QA.
@@ -280,7 +314,7 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
     if (get) return reply({ ok: false, preview: true, error: "not_found" }, 404);
     const knownMutation = Boolean(scopedAutomationMatch) || ["/api/preview/conflict", "/api/config", "/api/api-center", "/api/automation/routines", "/api/archive/clear", "/api/memory/integrity/rebuild", "/api/host/autostart", "/api/host/backup", "/api/host/backup/cancel", "/send"].includes(rawPath)
       || /^\/api\/(?:accounts|account-groups)(?:\/|$)/.test(rawPath)
-      || /^\/api\/tasks\/[^/]+\/(?:cancel|resume|supplement|grant)$/.test(rawPath)
+      || rawPath === "/api/tasks/prompt-preview" || /^\/api\/tasks\/[^/]+\/(?:cancel|resume|supplement|grant|revoke)$/.test(rawPath)
       || /^\/api\/host\/(?:bridge\/(?:start|stop|restart)|backups\/[^/]+)$/.test(rawPath)
       || /^\/api\/(?:ai|voice|api-center)\/test$/.test(rawPath);
     if (rawPath.startsWith("/api/") && !knownMutation) { req.resume(); return reply({ ok: false, preview: true, simulated: true, unsupported: true, empty: true, items: [], data: {} }); }
@@ -288,6 +322,11 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
     if (!/^application\/json(?:\s*;|$)/i.test(req.headers["content-type"] || "")) { req.resume(); return reply({ ok: false, preview: true, empty: true, error: "preview_json_only" }, 415); }
     const body = await jsonBody(req);
     const simulated = { ok: true, preview: true, simulated: true, sentToQq: false, message: "仅内存模拟，未调用真实服务" };
+    if (rawPath === "/api/tasks/prompt-preview" && req.method === "POST") {
+      const item = config.accounts.items.find(item => item.id === body.accountId && !item.archived);
+      if (!item || !["direct", "social", "search", "task"].includes(body.mode)) return reply({ ok: false, error: "invalid_preview_prompt_request" }, 400);
+      return reply({ ...simulated, composition: { text: `虚构 Prompt · ${item.id} · ${body.mode}\n${effectiveStyle(item).systemPrompt}\n权限来自主机，未保存草稿不参与组合。`, layers: [{ id: "identity" }, { id: "work_policy" }], diagnostics: [{ code: "GUI_UNAVAILABLE" }] } });
+    }
     if (scopedAutomationMatch && req.method === "PATCH") {
       if (req.headers["x-hermes-qq-admin"] !== "preview-session-not-a-credential") return reply({ ok: false, error: "admin_session_required" }, 403);
       if (body.expectedRevision !== revision()) return reply({ ok: false, error: "账号自动化配置已更新", revision: revision() }, 409);
@@ -362,7 +401,10 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
           config.accounts.items.push(created); version += 1; syncLegacy();
           return reply({ ...simulated, ...registry(), account: copy(created) });
         } else if (!item) return reply({ ok: false, error: "unknown_preview_account" }, 404);
-        else if (req.method === "PATCH" && object(body.patch)) Object.assign(item, merge(item, body.patch));
+        else if (req.method === "PATCH" && object(body.patch)) {
+          if (body.patch.digitalLife && req.headers["x-hermes-qq-admin"] !== "preview-session-not-a-credential") return reply({ ok: false, error: "admin_session_required" }, 403);
+          Object.assign(item, merge(item, body.patch));
+        }
         else if (req.method === "DELETE") item.archived = true;
         else if (action === "pause" || action === "resume") item.enabled = action === "resume";
         else if (action === "protocol/stop") item.protocolEnabled = false;
@@ -377,12 +419,24 @@ export function createPreviewServer({ stateRoot = process.env.HERMES_QQ_HOME || 
       const probedId = accountRoute?.[1]; const probed = config.accounts.items.find((entry) => entry.id === probedId);
       version += 1; syncLegacy(); return reply({ ...simulated, ...registry(), account: probed ? statuses().find((entry) => entry.id === probedId) : undefined, probe: { loginInfo: { user_id: probed?.qq || "10002", nickname: "虚构 QA 身份" } } });
     }
-    const taskAction = rawPath.match(/^\/api\/tasks\/([^/]+)\/(cancel|resume|supplement|grant)$/);
+    const taskAction = rawPath.match(/^\/api\/tasks\/([^/]+)\/(cancel|resume|supplement|grant|revoke)$/);
     if (taskAction) {
+      if (req.method !== "POST") return reply({ ok: false, error: "method_not_allowed" }, 405);
       const task = tasks.find((item) => item.id === taskAction[1]);
       if (!task) return reply({ ok: false, error: "unknown_preview_task" }, 404);
-      if (taskAction[2] === "cancel") task.status = "cancelled";
-      if (["resume", "grant"].includes(taskAction[2])) task.status = "completed";
+      const action = taskAction[2];
+      if (action !== "cancel" && body.expectedRevision !== task.revision) return reply({ ok: false, error: "task_revision_conflict" }, 409);
+      if (["grant", "revoke"].includes(action) && task.permissionTier !== "owner") return reply({ ok: false, error: "owner_required" }, 403);
+      if (action === "grant") return reply({ ok: false, error: "backend_capability_unavailable" }, 403); // No real file/browser/Mac adapter in this fixture.
+      if (action === "revoke") {
+        const grant = task.grants.find(g => g.id === body.grantId);
+        if (!grant) return reply({ ok: false, error: "unknown_preview_grant" }, 404);
+        grant.revokedAt = now();
+      }
+      if (action === "supplement" && (typeof body.text !== "string" || !body.text.trim())) return reply({ ok: false, error: "supplement_required" }, 400);
+      if (action === "cancel") task.status = "cancelled";
+      if (action === "resume") { task.status = "queued"; task.currentStage = "queued"; }
+      task.revision++;
       task.updatedAt = now(); return reply({ ...simulated, task });
     }
     if (rawPath === "/api/archive/clear") { conversations = conversations.filter((item) => item.conversationId !== body.conversationId && item.conversationId !== body.conversation_id); return reply(simulated); }
@@ -447,7 +501,7 @@ function verifyRenderShapes(source, fixtures, check) {
     desktopStatusData: fixtures.host, localBackups: fixtures.backups, backupProgress: null, legacyProjectPath: "",
     fmtAgo: () => "预览时间", formatBytes: (value) => `${value} B`, esc: (value) => String(value ?? "")
   });
-  const names = ["apiSelectOptions", "apiCurrentConnection", "apiCurrentProfile", "apiCurrentSearch", "apiBoundPlan", "apiDefaultEditorProfile", "registryGroup", "registryEffective", "renderApiConnection", "renderApiProfile", "renderApiSearch", "renderApiCapabilityCards", "renderApiAccountModels", "renderTasks", "renderReviewerAndIntegrity", "renderGroups", "renderMemoryDetail", "renderArchive", "renderBackupProgress", "renderDesktopBackup", "renderLogs", "renderSocialPlanner"];
+  const names = ["apiSelectOptions", "apiCurrentConnection", "apiCurrentProfile", "apiCurrentSearch", "apiBoundPlan", "apiDefaultEditorProfile", "registryGroup", "registryEffective", "renderApiConnection", "renderApiProfile", "renderApiSearch", "renderApiCapabilityCards", "renderApiAccountModels", "lifeNode", "taskStageLabel", "renderTasks", "renderReviewerAndIntegrity", "renderGroups", "renderMemoryDetail", "renderArchive", "renderBackupProgress", "renderDesktopBackup", "renderLogs", "renderSocialPlanner"];
   for (const name of names) {
     const start = source.indexOf(`    function ${name}(`);
     assert.ok(start >= 0, `actual admin renderer exists: ${name}`);
@@ -534,8 +588,9 @@ async function selfTest() {
     const res = await fetch(`${base}${route}`, { method, headers: { ...(body === undefined ? {} : { "content-type": "application/json" }), ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     return { status: res.status, data: await res.json() };
   };
+  const admin = { "x-hermes-qq-admin": "preview-session-not-a-credential" };
   try {
-    for (const route of ["/health", "/api/status", "/api/config", "/api/accounts", "/api/api-center", "/api/tasks", "/api/reviewer/status", "/api/memory/integrity", "/api/memory", "/api/memory?group_id=20001", "/api/archive/status", "/api/archive/conversations", "/api/host/status", "/api/host/backups", "/api/host/backup/status", "/api/admin/session", "/api/unknown-fixture"]) check((await request(route)).status === 200);
+    for (const route of ["/health", "/api/status", "/api/config", "/api/accounts", "/api/api-center", "/api/reviewer/status", "/api/memory/integrity", "/api/memory", "/api/memory?group_id=20001", "/api/archive/status", "/api/archive/conversations", "/api/host/status", "/api/host/backups", "/api/host/backup/status", "/api/admin/session", "/api/unknown-fixture"]) check((await request(route)).status === 200);
     for (const [route, type] of [["/admin", "text/html"], ["/console.css", "text/css"], ["/console-theme.js", "text/javascript"]]) {
       const response = await fetch(`${base}${route}`);
       check(response.status === 200 && response.headers.get("content-type").startsWith(type));
@@ -546,7 +601,7 @@ async function selfTest() {
       check(head.status === 200 && (await head.text()) === "" && head.headers.get("content-length") === String(body.length));
     }
     const original = (await request("/api/config")).data;
-    const load = async (route) => (await request(route)).data;
+    const load = async (route) => (await request(route, "GET", undefined, /^\/api\/tasks(?:[/?]|$)/.test(route) ? admin : {})).data;
     verifyRenderShapes(readResource("public/admin.html").toString("utf8"), {
       config: original, center: await load("/api/api-center"), tasks: await load("/api/tasks"),
       reviewer: await load("/api/reviewer/status"), integrity: await load("/api/memory/integrity"),
@@ -554,6 +609,32 @@ async function selfTest() {
       archiveStatus: await load("/api/archive/status"), archive: await load("/api/archive/conversations"),
       status: await load("/api/status"), host: await load("/api/host/status"), backups: await load("/api/host/backups"), accounts: await load("/api/accounts")
     }, check);
+    for (const route of ["/api/tasks", "/api/tasks/agent-life?account_id=primary", "/api/tasks/preview-task-001/events", "/api/tasks/preview-task-001/artifacts", "/api/tasks/preview-task-001/artifacts/preview-note"]) check((await request(route)).status === 403);
+    const primaryLife = await load("/api/tasks/agent-life?account_id=primary"), standbyLife = await load("/api/tasks/agent-life?account_id=standby-a");
+    check(primaryLife.accountId === "primary" && primaryLife.logicalBotId === "account:primary" && primaryLife.policy.work.enabled === false);
+    check(primaryLife.backends[0].verified === true && primaryLife.backends[0].available === true && primaryLife.backends[0].capabilities.join() === "public_web,isolated_files");
+    check(primaryLife.backends.slice(1).every(b => !b.verified && !b.available) && !primaryLife.gui.available);
+    check(primaryLife.episodes.length === 1 && primaryLife.episodes.every(e => e.logicalBotId === primaryLife.logicalBotId) && standbyLife.episodes.length === 0);
+    check((await load("/api/tasks?account_id=standby-a")).tasks.every(t => t.accountId === "standby-a"));
+    check((await load("/api/tasks/preview-task-001/events")).events[0].stage === "completed");
+    check((await request("/api/tasks/prompt-preview", "POST", { accountId: "primary", mode: "task" })).status === 403);
+    const prompt = await request("/api/tasks/prompt-preview", "POST", { accountId: "primary", mode: "task" }, admin);
+    check(prompt.status === 200 && prompt.data.composition.text.includes("primary") && prompt.data.sentToQq === false);
+    for (const action of ["resume", "supplement", "grant", "revoke"]) check((await request(`/api/tasks/preview-task-003/${action}`, "POST", { text: "虚构补充" }, admin)).status === 409);
+    const resumed = await request("/api/tasks/preview-task-003/resume", "POST", { expectedRevision: 1 }, admin);
+    check(resumed.status === 200 && resumed.data.task.revision === 2 && resumed.data.task.status === "queued" && resumed.data.sentToQq === false);
+    check((await request("/api/tasks/preview-task-003/supplement", "POST", { expectedRevision: 1, text: "旧修订" }, admin)).status === 409);
+    const supplemented = await request("/api/tasks/preview-task-003/supplement", "POST", { expectedRevision: 2, text: "虚构补充" }, admin);
+    check(supplemented.status === 200 && supplemented.data.task.revision === 3);
+    check((await request("/api/tasks/preview-task-004/grant", "POST", { expectedRevision: 1 }, admin)).status === 403);
+    check((await request("/api/tasks/preview-task-002/grant", "POST", { expectedRevision: 1, type: "read" }, admin)).status === 403);
+    const revoked = await request("/api/tasks/preview-task-002/revoke", "POST", { expectedRevision: 1, grantId: "preview-expired-grant" }, admin);
+    check(revoked.status === 200 && revoked.data.task.grants[0].revokedAt && revoked.data.task.status === "waiting_permission");
+    check((await request("/api/tasks/preview-task-003/cancel", "POST", {}, admin)).data.task.status === "cancelled");
+    for (const [id, type] of [["preview-note", "text/plain"], ["preview-image", "image/png"], ["preview-pdf", "application/pdf"]]) {
+      const bytes = await fetch(`${base}/api/tasks/preview-task-001/artifacts/${id}?preview=1`, { headers: admin });
+      check(bytes.status === 200 && bytes.headers.get("content-type").startsWith(type) && (await bytes.arrayBuffer()).byteLength > 0);
+    }
     check(original.accounts.items.length === 2 && original.accounts.items.map((item) => item.qq).join(",") === "10001,10002");
     check(original.privateChats.ownerUserIds.join() === "10001" && original.taskMode.ownerUserIds.join() === "10001");
     const example = JSON.parse(readResource("config.example.json"));
@@ -597,7 +678,6 @@ async function selfTest() {
     check(changedStyle.status === 200 && changedStyle.data.items.find((item) => item.id === copied.data.account.id).style.systemPrompt === copied.data.account.style.systemPrompt);
     const blankAgain = await request(`/api/accounts/${copied.data.account.id}`, "PATCH", { expectedRevision: changedStyle.data.revision, patch: { style: { systemPrompt: "" } } });
     check(blankAgain.status === 200 && blankAgain.data.items.find((item) => item.id === copied.data.account.id).style.systemPrompt === "");
-    const admin = { "x-hermes-qq-admin": "preview-session-not-a-credential" };
     check((await request("/api/automation/routines")).status === 403);
     const routines = (await request("/api/automation/routines", "GET", undefined, admin)).data;
     check(routines.ok && routines.routines.daily.schedules.length === 3 && routines.routines.hourly.enabled === false && routines.catalog.length === 4);
@@ -636,6 +716,11 @@ async function selfTest() {
       });
       check(code === status);
     }
+    const lifeBefore = await load("/api/tasks/agent-life?account_id=primary");
+    const savedLife = await request("/api/accounts/primary", "PATCH", { expectedRevision: lifeBefore.revision, patch: { digitalLife: { ...lifeBefore.policy, socialPreset: "observant" } } }, admin);
+    check(savedLife.status === 200 && (await load("/api/tasks/agent-life?account_id=primary")).policy.socialPreset === "observant");
+    check((await load("/api/tasks/agent-life?account_id=standby-a")).policy.socialPreset === "existing");
+    check((await request("/api/accounts/primary", "PATCH", { expectedRevision: lifeBefore.revision, patch: { digitalLife: lifeBefore.policy } }, admin)).status === 409);
     const fresh = createPreviewServer({ stateRoot: "/preview/fresh-isolated-app" });
     try {
       await new Promise((resolve, reject) => { fresh.once("error", reject); fresh.listen(0, "127.0.0.1", resolve); });

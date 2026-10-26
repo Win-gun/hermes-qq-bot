@@ -297,7 +297,8 @@ index build on the reply thread.
 - Task execution must stay separate from the chat reply queue so normal chat and status commands remain responsive.
 - Non-owner group tasks may only use isolated public-network and text tools. They must never get local files, terminal, computer control, or authenticated browser state.
 - Owner local-file, computer, and authenticated-browser permissions are per-task grants. Never infer a previous grant for a new task.
-- The task runner brokers explicitly granted file reads/writes and omits general file and terminal toolsets. Keep macOS sandbox execution enabled unless a computer-control grant explicitly requires broader access.
+- Formal WorkPlan uses the bound text-only compatible API, never raw Hermes CLI/default tools. Opt-in `digitalLife.enabled` chat uses the same no-native-tools boundary; legacy CLI-only chat is compatibility, not verified isolation. All actual work actions cross CapabilityBroker with host claims, scope, TTL, revision and receipts.
+- See `docs/DIGITAL-LIFE-3.0.md` for current backend gaps. Darwin supports only private task artifact directories; arbitrary host files, real Browser/Desktop Worker, code and remote hosts remain unavailable until their boundaries are implemented and verified. Never turn an unavailable manifest into authority or bypass the broker via computer grants.
 - On restart, active tasks become `interrupted`; do not automatically replay external actions.
 - Reviewer output is internal structured JSON. The admin page may show issue codes, timings, and counts, but never chain-of-thought or secret-bearing evidence.
 - Runtime reply review stays disabled. Do not reintroduce an extra model call.
