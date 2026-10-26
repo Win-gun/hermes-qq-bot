@@ -30,3 +30,10 @@ condition = "AND"
 regexTarget = "secret"
 paths = ['''(^|/)scripts/core-audit-regression-self-test\.js$''']
 regexes = ['''^fixture-secret-1234$''']
+
+[[rules.allowlists]]
+description = "Exact synthetic prompt redaction sentinels, never live credentials"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''(^|/)scripts/agent-prompt-self-test\.js$''']
+regexes = ['''^(SYNTHETIC_PRIVATE_MARKER|test-SYNTH_SECRET_123|ghp_synthetic_secret_12345)$''']
