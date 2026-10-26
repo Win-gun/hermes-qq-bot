@@ -160,7 +160,14 @@ try {
     check(noSession.status === 403, `session required for ${route} through host`);
   }
   const missingTask = await request(port, "/api/tasks/fixture-missing/cancel", "POST", {}, voiceHeaders);
-  check(missingTask.status === 400 && missingTask.data.reason === "任务不存在。", "same-origin task control reaches task lookup through host");
+  check(missingTask.status === 404 && missingTask.data.ok === false && missingTask.data.error === "task not found",
+    "same-origin task control reaches task lookup through host");
+  check((await request(port, "/api/tasks/fixture-missing/cancel", "POST", {},
+    { ...voiceHeaders, Origin: "http://example.com" })).status === 403,
+    "cross-origin task control is denied before lookup");
+  check((await request(port, "/api/tasks/fixture-missing/cancel", "POST", {},
+    { Origin: voiceHeaders.Origin })).status === 403,
+    "task control without admin session is denied before lookup");
   check((await requestWithHost(port, "example.com")) === 403, "non-loopback Host is rejected");
   const badOrigin = await request(port, "/api/host/bridge/stop", "POST", {}, { Origin: "http://example.com" });
   check(badOrigin.status === 403, "cross-origin host mutation is rejected");
