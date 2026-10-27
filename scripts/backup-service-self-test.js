@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { beginDiscoveryRound, recoverDiscoveryState } from "../src/social-discovery-state.js";
+import { recoverQzoneState } from "../src/qzone-runtime.js";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import vm from "node:vm";
@@ -58,13 +59,27 @@ const memoryFixture = { groups: { 123: { users: { 42: { nickname: "测试" } } }
   "group:fixture-failover": { plans: { second: { id: "second", status: "waiting", revision: 1 } },
     conversations: { "private:42": { readThroughSeq: 2, experiences: [], runtime: { status: "waiting", dueAt: 50 } } } },
 } } };
+memoryFixture.qzoneSocial = { version: 1, bots: { "account:fixture": { owners: { "10001": {
+  owner: { accountId: "fixture", qq: "10001" }, claims: { fingerprint: { id: "wire-claim", draftId: "pending", at: 12 } },
+  days: {}, lastReadAt: null, lastWriteAt: {},
+  capabilities: { send_qzone_msg: { state: "supported", at: 12, protocolVersion: "fixture", writeSettled: true } },
+  drafts: { pending: { id: "pending", kind: "publish", status: "publishing", revision: 2, content: "fixture pending", claimId: "wire-claim" },
+    approved: { id: "approved", kind: "publish", status: "approved", revision: 2, content: "fixture approved", approvedBy: "discard" },
+    terminal: { id: "terminal", kind: "publish", status: "confirmed", revision: 5, content: "fixture confirmed", clientVerified: true } }
+} } } } };
 
 assert.equal(beginDiscoveryRound(memoryFixture, { logicalId: "account:fixture", roundId: "backup-discovery",
   now: Date.parse("2026-10-24T04:00:00Z"), policy: { enabled: true, shadowMode: true, conversationIds: ["group:123"] } }).ok, true);
 
 function checkSocialRestore(target) {
   const actual = JSON.parse(fs.readFileSync(path.join(target, "data", "memory.json"), "utf8"));
-  const expected = structuredClone(memoryFixture);
+  let expected = structuredClone(memoryFixture);
+  const recoveredAt = actual.qzoneSocial.bots["account:fixture"].owners["10001"].drafts.pending.recoveredAt;
+  expected = recoverQzoneState(expected, { reason: "backup_restore", now: recoveredAt }).memory;
+  const space = actual.qzoneSocial.bots["account:fixture"].owners["10001"];
+  assert.equal(space.drafts.pending.status, "uncertain"); assert.equal(space.drafts.approved.status, "review");
+  assert.equal(space.drafts.terminal.status, "confirmed"); assert.equal(space.capabilities.send_qzone_msg.state, "unknown");
+  assert.deepEqual(space.claims, memoryFixture.qzoneSocial.bots["account:fixture"].owners["10001"].claims);
   const interruptedAt = actual.socialAgents.bots["account:fixture"].discovery.rounds[0].finishedAt;
   assert.equal(actual.socialAgents.bots["account:fixture"].discovery.rounds[0].status, "interrupted");
   assert.equal(recoverDiscoveryState(expected, { now: interruptedAt }).ok, true);
@@ -574,6 +589,19 @@ try {
     check(oldConfig.accounts.items.map((item) => item.id).join() === "legacy-main,legacy-extra", "pre-v2 backups must restore to dynamic items without changing IDs");
     check(oldConfig.accounts.items[0].protocolContainer === "legacy-existing", "pre-v2 backup transport names must remain unchanged");
   }
+
+  const qzoneOnlyState = path.join(root, "qzone-only-source"), qzoneOnlyTarget = path.join(root, "qzone-only-target");
+  fs.mkdirSync(path.join(qzoneOnlyState, "data"), { recursive: true });
+  fs.writeFileSync(path.join(qzoneOnlyState, "config.json"), JSON.stringify(config));
+  fs.writeFileSync(path.join(qzoneOnlyState, "data", "memory.json"), JSON.stringify({ groups: {}, qzoneSocial: memoryFixture.qzoneSocial }));
+  const qzoneOnlyBackup = await createBackup({ type: "safe", stateRoot: qzoneOnlyState, destinationDir: backups, appVersion: "test" });
+  await restoreBackup({ path: qzoneOnlyBackup.path, stateRoot: qzoneOnlyTarget });
+  const qzoneOnlyRestored = JSON.parse(fs.readFileSync(path.join(qzoneOnlyTarget, "data", "memory.json")));
+  const qzoneOnlyOwner = qzoneOnlyRestored.qzoneSocial.bots["account:fixture"].owners["10001"];
+  check(qzoneOnlyOwner.drafts.pending.status === "uncertain" && qzoneOnlyOwner.drafts.approved.status === "review",
+    "QZone recovery also applies when old socialAgents state is absent");
+  check(!Object.hasOwn(qzoneOnlyRestored, "socialAgents") && qzoneOnlyOwner.drafts.terminal.status === "confirmed",
+    "QZone-only restore does not invent social state or erase confirmed evidence");
 
   console.log(JSON.stringify({ ok: true, tests, safe: path.basename(safe.path), full: path.basename(full.path) }, null, 2));
 } finally {

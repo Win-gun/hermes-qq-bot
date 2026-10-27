@@ -8,13 +8,13 @@ let checks = 0;
 async function test(name, fn) { try { await fn(); checks++; } catch (e) { e.message = `${name}: ${e.message}`; throw e; } }
 const policy = () => ({ enabled: true, shadowMode: false, conversationIds: ["group:123", "group:124"],
   pokes: { enabled: true, cooldownMs: 300000, maxDaily: 5 }, mentions: { enabled: true }, forwardRead: { enabled: true } });
-function host({ p = policy(), capabilities = { poke: "supported", mention: "supported" }, logicalFor = id => `account:${id}` } = {}) {
+function host({ p = policy(), capabilities = { poke: "supported", mention: "supported" }, logicalFor = id => `account:${id}`, authorizeProbe } = {}) {
   let time = Date.UTC(2026, 9, 24), memory = {}, current = true, tail = Promise.resolve();
   let before, after, wire, mentionWire, commits = 0;
   const calls = [], targets = new Map();
   function next(group = "123", messageId = "12") {
     const eventRef = Object.freeze({});
-    const data = { event: { ref: eventRef, groupId: group, messageId, userId: "456", sentAt: time, isBot: false },
+    const data = { event: { ref: eventRef, groupId: group, messageId, userId: "456", sentAt: time, isBot: false, pokeAcceptanceVerified: true },
       members: [{ groupId: group, userId: "456", verifiedAt: time, isBot: false },
         { groupId: group, userId: "789", verifiedAt: time, isBot: false }] };
     targets.set(`group:${group}`, data);
@@ -22,6 +22,7 @@ function host({ p = policy(), capabilities = { poke: "supported", mention: "supp
   }
   next(); next("124");
   const deps = {
+    ...(authorizeProbe ? { authorizeProbe } : {}),
     clock: () => time, capture: (accountId, conversationId) => ({ accountId, conversationId,
       logicalId: logicalFor(accountId), revision: 1, policy: structuredClone(p), capabilities: structuredClone(capabilities) }),
     isCurrent: () => current, getTargets: ctx => targets.get(ctx.conversationId), readState: () => ({ memory }),
@@ -138,9 +139,10 @@ await test("explicit failover carriers share identity cooldown and target claim"
 await test("cooldown per group, daily reset at Shanghai midnight", async () => {
   const h = host(); await h.send(pokeId(h)); h.next("123", "14"); assert.equal(h.offer().pokes.length, 0);
   const ctx2 = h.service.open("a", "group:124");
+  h.targets.get("group:124").event.userId = "789";
   assert.equal((await h.service.sendPoke(ctx2, h.service.candidates(ctx2).pokes[0].id)).status, "accepted");
-  h.tick(300000); h.next("123", "15"); assert.ok(pokeId(h));
-  h.tick(16 * 3600000 - 300000); assert.equal(h.service.status(h.ctx).daily, 0);
+  h.tick(600000); h.next("123", "15"); assert.ok(pokeId(h));
+  h.tick(16 * 3600000 - 600000); assert.equal(h.service.status(h.ctx).daily, 0);
   h.next("123", "16"); assert.equal((await h.send(pokeId(h))).status, "accepted");
 });
 await test("quiet, abort, revision change inside claim all block wire and consume offer", async () => {
@@ -297,7 +299,7 @@ await test("claim ledger capacity rejects new targets, expired claims prune with
   await h.send(pokeId(h)); const b = ledger(h), row = structuredClone(b.claims["12"]);
   for (let i = 100; i < 1099; i++) b.claims[String(i)] = { ...row };
   h.next("123", "13"); assert.equal((await h.send(pokeId(h))).status, "rejected"); assert.equal(h.calls.length, 1);
-  h.tick(300001); h.next("123", "14"); assert.equal((await h.send(pokeId(h))).status, "accepted");
+  h.tick(600001); h.next("123", "14"); assert.equal((await h.send(pokeId(h))).status, "accepted");
   assert.equal(Object.keys(ledger(h).claims).length, 1); assert.equal(h.service.status(h.ctx).daily, 2);
 });
 await test("mention queued adapter rechecks target/quiet and cannot reoffer after uncertain timeout", async () => {
@@ -312,7 +314,7 @@ await test("mention queued adapter rechecks target/quiet and cannot reoffer afte
 });
 await test("native surface is poke/mention only; forwardRead remains config-only compatibility", () => {
   const h = host(), saved = structuredClone(h.ctx.policy);
-  assert.deepEqual(Object.keys(h.service).sort(), ["open", "candidates", "sendPoke", "sendMention", "status"].sort());
+  assert.deepEqual(Object.keys(h.service).sort(), ["open", "candidates", "sendPoke", "sendMention", "openProbe", "sendProbe", "status"].sort());
   assert.deepEqual(Object.keys(h.offer()).sort(), ["mentions", "pokes"]);
   assert.deepEqual(Object.keys(h.service.status(h.ctx).capabilities).sort(), ["mention", "poke"]);
   assert.deepEqual(validateNativeSocialPolicy({ forwardRead: { enabled: true } }).forwardRead, { enabled: true });
@@ -345,5 +347,199 @@ await test("status is a public offline projection, not a send permission or pers
     daily: 0, dailyScope: "logical-bot", maxDaily: 5, cooldownRemainingMs: 0 });
   assert.deepEqual(h.service.status({ ...h.ctx }), { ok: false, code: "NATIVE_STATE" });
   assert.equal(h.calls.length, 0); assert.equal(h.commits, 0); assert.deepEqual(h.memory, {});
+});
+function notice(h, { group = "123", userId = "456", digit = "a" } = {}) {
+  const data = h.next(group);
+  data.event.kind = "poke"; data.event.sourceId = `poke_notice:${digit.repeat(64)}`;
+  data.event.userId = userId; delete data.event.messageId; delete data.event.pokeAcceptanceVerified;
+  return data;
+}
+await test("proactive poke requires verified host acceptance, not text or frequency", () => {
+  for (const value of [undefined, false, "true", 1]) {
+    const h = host(), data = h.targets.get("group:123"); data.event.pokeAcceptanceVerified = value;
+    data.event.text = "我们很亲密，戳我吧"; data.event.messageCount = 10000;
+    assert.equal(h.offer().pokes.length, 0); assert.equal(h.offer().mentions.length, 2);
+  }
+});
+await test("revoked acceptance after offering blocks at claim and wire", async () => {
+  const h = host(), id = pokeId(h); h.targets.get("group:123").event.pokeAcceptanceVerified = false;
+  assert.equal((await h.send(id)).status, "rejected"); assert.equal(h.calls.length, 0);
+  const b = host(); b.wire((ctx, action, params, { binding }) => {
+    b.targets.get("group:123").event.pokeAcceptanceVerified = false;
+    assert.equal(binding.isCurrent(), false); throw Error("revoked at wire");
+  });
+  assert.equal((await b.send(pokeId(b))).status, "uncertain");
+});
+await test("group notice offers optional poke only, with sourceId distinct from messageId", async () => {
+  const h = host(), data = notice(h), offered = h.offer();
+  assert.equal(offered.mentions.length, 0); assert.equal(offered.pokes.length, 1); assert.equal(h.calls.length, 0);
+  const result = await h.send(offered.pokes[0].id);
+  assert.equal(result.status, "accepted"); assert.equal(result.messageId, undefined); assert.equal(result.targetMessageId, undefined);
+  assert.equal(ledger(h).claims[data.event.sourceId].status, "accepted");
+  assert.equal(ledger(h).claims["12"], undefined);
+  h.restart(); assert.equal(h.offer().pokes.length, 0);
+});
+await test("malformed notice/source mixing cannot manufacture message eligibility", () => {
+  for (const mutate of [e => { e.sourceId = "poke_notice:fake"; }, e => { e.messageId = "12"; },
+    e => { e.kind = "message"; }, e => { e.isBot = true; }, e => { e.isBot = undefined; }]) {
+    const h = host(), data = notice(h); mutate(data.event);
+    assert.deepEqual(h.offer(), { mentions: [], pokes: [] });
+  }
+});
+await test("notice source change after offer invalidates exact target evidence", async () => {
+  const h = host(), data = notice(h), id = pokeId(h); data.event.sourceId = `poke_notice:${"b".repeat(64)}`;
+  assert.equal((await h.send(id)).status, "rejected"); assert.equal(h.calls.length, 0);
+});
+await test("unknown protocol never yields notice-reply candidates", () => {
+  const h = host({ capabilities: { poke: "unknown", mention: "supported" } }); notice(h);
+  assert.deepEqual(h.offer(), { mentions: [], pokes: [] });
+});
+await test("stop serious negative feedback suppress both proactive and reply pokes", async () => {
+  for (const kind of ["message", "notice"]) for (const flag of ["stop", "serious", "negativeFeedback"]) {
+    const h = host(), data = kind === "notice" ? notice(h) : h.targets.get("group:123");
+    const id = pokeId(h); data.event[flag] = true;
+    assert.equal(h.offer().pokes.length, 0); assert.equal((await h.send(id)).status, "rejected");
+    assert.equal(h.calls.length, 0);
+  }
+});
+await test("same logical target cooldown crosses groups and persists after restart", async () => {
+  const h = host({ p: { ...policy(), pokes: { enabled: true, cooldownMs: 0, maxDaily: 200 } } });
+  await h.send(pokeId(h)); h.tick(300001); h.restart();
+  h.next("124", "99"); const other = h.service.open("a", "group:124");
+  assert.equal(h.service.candidates(other).pokes.length, 0);
+  h.tick(299999); h.next("124", "100"); assert.equal(h.service.candidates(other).pokes.length, 1);
+});
+await test("per-group cooldown still blocks a different accepted target", async () => {
+  const h = host(); await h.send(pokeId(h)); h.tick(1000);
+  h.next("123", "99").event.userId = "789"; assert.equal(h.offer().pokes.length, 0);
+  h.tick(299000); h.next("123", "100").event.userId = "789"; assert.equal(h.offer().pokes.length, 1);
+});
+await test("failed and uncertain poke attempts retain target cooldown", async () => {
+  for (const ack of [{ status: "failed", retcode: 100 }, {}]) {
+    const h = host(); h.wire(() => ack); await h.send(pokeId(h)); h.tick(300001);
+    const other = h.service.open("a", "group:124"); h.next("124", "99");
+    assert.equal(h.service.candidates(other).pokes.length, 0);
+  }
+});
+await test("legacy target-less claims read unchanged and conservatively cool down", async () => {
+  const h = host(); await h.send(pokeId(h));
+  delete h.memory.nativeSocialActions.bots["account:a"].targets; delete ledger(h).claims["12"].userId;
+  const saved = structuredClone(h.memory); h.restart(); h.tick(300001); h.next("124", "99").event.userId = "789";
+  const other = h.service.open("a", "group:124"); assert.equal(h.service.candidates(other).pokes.length, 0);
+  assert.deepEqual(h.memory, saved); h.tick(299999); h.next("124", "100").event.userId = "789";
+  assert.equal(h.service.candidates(other).pokes.length, 1);
+});
+await test("malformed target ledger refuses without read-time repair", async () => {
+  const h = host(); await h.send(pokeId(h)); h.memory.nativeSocialActions.bots["account:a"].targets["456"] = "bad";
+  const saved = structuredClone(h.memory); assert.equal(h.offer().pokes.length, 0);
+  assert.equal(h.service.status(h.ctx).ok, false); assert.deepEqual(h.memory, saved);
+});
+await test("probes unavailable without explicit host authorizer", async () => {
+  const h = host({ capabilities: { poke: "unknown" } });
+  for (const grant of [undefined, "admin", { authorized: true }, { actor: "local-admin" }])
+    assert.equal(h.service.openProbe(h.ctx, grant).ok, false);
+  assert.equal((await h.service.sendProbe(h.ctx, {})).status, "rejected"); assert.equal(h.calls.length, 0);
+});
+await test("opaque admin-only probe bootstraps unknown capability via real accepted ACK", async () => {
+  const grant = Object.freeze({}), h = host({ capabilities: { poke: "unknown", mention: "supported" },
+    authorizeProbe: (ctx, auth) => auth === grant });
+  delete h.targets.get("group:123").event.pokeAcceptanceVerified;
+  const probe = h.service.openProbe(h.ctx, grant);
+  assert.equal(probe.ok, true); assert(Object.isFrozen(probe.ticket)); assert.deepEqual(Object.keys(probe.ticket), []);
+  assert.equal(h.offer().pokes.length, 0); assert.equal((await h.send(probe.ticket)).status, "rejected");
+  const r = await h.service.sendProbe(h.ctx, probe.ticket);
+  assert.equal(r.status, "accepted"); assert.equal(r.messageId, undefined); assert.equal(ledger(h).capability, "supported");
+  assert.equal(h.calls.length, 1); assert.equal(h.calls[0].action, "group_poke");
+  assert.equal((await h.service.sendProbe(h.ctx, probe.ticket)).status, "rejected");
+  assert.equal(h.service.status(h.ctx).capabilities.poke, "unknown"); // reopen via host capture after accepted
+});
+await test("probes are exact context-bound capabilities not serializable model data", async () => {
+  const grant = {}, h = host({ capabilities: { poke: "unknown" }, authorizeProbe: (ctx, value) => value === grant });
+  const probe = h.service.openProbe(h.ctx, grant), other = h.service.open("b", "group:123");
+  assert.equal(h.service.openProbe(h.ctx, { ...grant }).ok, false);
+  assert.equal((await h.service.sendProbe(h.ctx, { ...probe.ticket })).status, "rejected");
+  assert.equal((await h.service.sendProbe(other, probe.ticket)).status, "rejected");
+  assert.equal((await h.service.sendProbe(h.ctx, probe.ticket)).status, "accepted");
+});
+await test("probe grant revocation after durable claim blocks wire without refund", async () => {
+  const grant = {}; let allowed = true;
+  const h = host({ capabilities: { poke: "unknown" }, authorizeProbe: (ctx, value) => allowed && value === grant });
+  const probe = h.service.openProbe(h.ctx, grant); h.after(n => { if (n === 1) allowed = false; });
+  assert.equal((await h.service.sendProbe(h.ctx, probe.ticket)).status, "rejected");
+  assert.equal(h.calls.length, 0); assert.equal(h.service.status(h.ctx).daily, 1);
+  assert.equal(ledger(h).capability, "unknown");
+});
+await test("probe actual wire binding rechecks grant after queue waits", async () => {
+  const grant = {}; let allowed = true;
+  const h = host({ capabilities: { poke: "unknown" }, authorizeProbe: (ctx, value) => allowed && value === grant });
+  const probe = h.service.openProbe(h.ctx, grant);
+  h.wire((ctx, action, params, { binding }) => { allowed = false; assert.equal(binding.isCurrent(), false); throw Error("revoked"); });
+  assert.equal((await h.service.sendProbe(h.ctx, probe.ticket)).status, "uncertain");
+  assert.equal(ledger(h).capability, "unknown");
+});
+await test("probe cannot override shadow disabled private or known unsupported", async () => {
+  const grant = {};
+  for (const extra of [{ capabilities: { poke: "unsupported" } }, { capabilities: { poke: "supported" } },
+    { p: { ...policy(), shadowMode: true }, capabilities: {} }, { p: { ...policy(), pokes: {} }, capabilities: {} }]) {
+    const h = host({ ...extra, authorizeProbe: () => true }); assert.equal(h.service.openProbe(h.ctx, grant).ok, false);
+    assert.throws(() => h.service.open("a", "private:456")); assert.equal(h.calls.length, 0);
+  }
+});
+await test("probe results distinguish accepted API from visible delivery; bad ACK cannot promote", async () => {
+  for (const [ack, expected] of [[{}, "uncertain"], [{ status: "ok" }, "uncertain"],
+    [{ status: "ok", retcode: 100 }, "uncertain"], [{ status: "failed", retcode: 0 }, "uncertain"],
+    [{ status: "failed", retcode: 1404 }, "unsupported"]]) {
+    const grant = {}, h = host({ capabilities: { poke: "unknown" }, authorizeProbe: (ctx, value) => value === grant });
+    h.wire(() => ack); const probe = h.service.openProbe(h.ctx, grant);
+    const r = await h.service.sendProbe(h.ctx, probe.ticket);
+    assert.equal(r.status, expected); assert.notEqual(ledger(h).capability, "supported");
+    assert.equal(r.messageId, undefined); assert.equal(r.visible, undefined); assert.equal(r.content, undefined);
+    assert.equal((await h.service.sendProbe(h.ctx, probe.ticket)).status, "rejected");
+  }
+});
+await test("notice replies still respect target cooldown and latest repository claim", async () => {
+  const h = host(), data = notice(h), c2 = h.service.open("a", "group:123");
+  const a = pokeId(h), b = h.service.candidates(c2).pokes[0].id;
+  const r = await Promise.all([h.send(a), h.service.sendPoke(c2, b)]);
+  assert.equal(r.filter(x => x.status === "accepted").length, 1);
+  assert.equal(ledger(h).claims[data.event.sourceId].status, "accepted");
+  h.tick(300001); notice(h, { digit: "b" }); assert.equal(h.offer().pokes.length, 0);
+});
+await test("probe authorizer sees exact frozen group/human/source binding", async () => {
+  const grant = {}, h = host({ capabilities: { poke: "unknown" }, authorizeProbe: (ctx, value, target) => {
+    assert(Object.isFrozen(target));
+    return value === grant && target.groupId === "123" && target.userId === "456" && target.sourceKey === "12"
+      && target.eventRef === h.targets.get("group:123").event.ref;
+  } });
+  const probe = h.service.openProbe(h.ctx, grant); assert.equal(probe.ok, true);
+  assert.equal((await h.service.sendProbe(h.ctx, probe.ticket)).status, "accepted");
+  const other = h.service.open("a", "group:124"); assert.equal(h.service.openProbe(other, grant).ok, false);
+});
+await test("one admin grant cannot issue repeated tests even across contexts and failed claims", async () => {
+  const grant = {}, h = host({ capabilities: { poke: "unknown" }, authorizeProbe: (ctx, value) => value === grant });
+  const other = h.service.open("a", "group:124"), a = h.service.openProbe(h.ctx, grant), b = h.service.openProbe(other, grant);
+  assert.equal(a.ok, true); assert.equal(b.ok, true); h.before(() => { throw Error("storage failed"); });
+  assert.equal((await h.service.sendProbe(h.ctx, a.ticket)).status, "rejected"); h.before();
+  assert.equal((await h.service.sendProbe(other, b.ticket)).status, "rejected");
+  assert.equal(h.service.openProbe(other, grant).ok, false); assert.equal(h.calls.length, 0);
+});
+await test("probe supported receipt cannot be re-probed via an old unknown context", async () => {
+  const first = {}, second = {}, h = host({ capabilities: { poke: "unknown" }, authorizeProbe: () => true });
+  const a = h.service.openProbe(h.ctx, first); await h.service.sendProbe(h.ctx, a.ticket);
+  h.tick(600001); h.next("123", "99"); assert.equal(h.service.openProbe(h.ctx, second).ok, false);
+});
+await test("string/model admin assertions cannot act as probe capabilities", () => {
+  const h = host({ capabilities: { poke: "unknown" }, authorizeProbe: () => true });
+  assert.equal(h.service.openProbe(h.ctx, "local-admin").ok, false); assert.equal(h.calls.length, 0);
+});
+await test("native capability evidence belongs to its physical carrier, not merely failover persona", async () => {
+  const h = host({ authorizeProbe: () => true }), base = h.deps.capture;
+  h.deps.capture = (...args) => ({ ...base(...args), carrierKey: "a".repeat(64) }); h.restart();
+  const sent = await h.send(pokeId(h)); assert.equal(sent.status, "accepted");
+  assert.equal(ledger(h).capabilityCarrier, "a".repeat(64));
+  h.deps.capture = (...args) => ({ ...base(...args), carrierKey: "b".repeat(64), capabilities: { poke: "unknown", mention: "supported" } }); h.restart();
+  assert.equal(h.service.status(h.ctx).capabilities.poke, "unknown"); assert.equal(h.offer().pokes.length, 0);
+  h.tick(600001); h.next("123", "14");
+  assert.equal(h.service.openProbe(h.ctx, Object.freeze({})).ok, true, "new carrier requires new explicit proof despite old settled ACK");
 });
 console.log(`PASS native-social-actions: ${checks} synthetic checks; no IO, real QQ, production memory or model calls`);

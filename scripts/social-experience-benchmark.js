@@ -5,6 +5,8 @@ import { parseReplyPlan } from "../src/reply-plan.js";
 import { socialExperienceFor } from "../src/social-experience-policy.js";
 import { observeGroupLanguage, groupLanguagePrompt } from "../src/group-language-learning.js";
 import { createExpressionLibrary } from "../src/social-expression-library.js";
+import { recordSocialEpisode, socialEpisodesPrompt } from "../src/social-episodes.js";
+import { composeAgentPrompt } from "../src/agent-prompt.js";
 
 const config = { socialExperience: { enabled: true, shadowMode: false, conversationIds: ["group:10001"] } };
 const samples = [];
@@ -47,8 +49,22 @@ for (let n = 0; n < 350; n++) {
 projection.sort((a, b) => a - b);
 const projectionP95 = projection[Math.floor(projection.length * .95)];
 assert(projectionP95 < 100, "local expression library/context projection P95 must stay below 100ms");
+for (let n = 0; n < 512; n++) recordSocialEpisode(memory, { logicalId, conversationId, kind: "sticker_interaction",
+  eventId: `benchmark:${n}`, status: "confirmed", at: at + n, text: "合成的真实回执投影，仅性能夹具" });
+const continuity = [];
+for (let n = 0; n < 600; n++) {
+  const start = performance.now();
+  const context = socialEpisodesPrompt(memory, { logicalId, conversationId });
+  composeAgentPrompt({ mode: "direct", identity: { accountId: "fixture", logicalBotId: logicalId },
+    persona: "保持合成账号文风", socialContext: context });
+  if (n >= 100) continuity.push(performance.now() - start);
+}
+continuity.sort((a, b) => a - b);
+const continuityP95 = continuity[Math.floor(continuity.length * .95)];
+assert(continuityP95 < 100, "Social Life episode/context projection must stay below 100ms locally");
 console.log(JSON.stringify({ ok: true, fixtureOnly: true, samples: samples.length,
   localProcessingP50Ms: +samples[Math.floor(samples.length * .5)].toFixed(3), localProcessingP95Ms: +p95.toFixed(3),
   projectionSamples: projection.length, projectionFixture: { groupMessages: 500, stickers: 100 }, localProjectionP95Ms: +projectionP95.toFixed(3),
+  continuitySamples: continuity.length, episodeFixtureCount: 512, episodePromptP95Ms: +continuityP95.toFixed(3),
   modelCalls: 0, directSerialCallsAdded: 0, tokenUsage: "unknown: no live model used",
   productionLatency: "unmeasured", humanExperienceScore: "unrated", productionThroughput: "unmeasured" }));

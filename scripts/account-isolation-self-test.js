@@ -22,6 +22,8 @@ import { evaluateConversationTurn } from "../src/conversation-turn-manager.js";
 import { parseReplyPlan, replyPlanPrompt } from "../src/reply-plan.js";
 import { executeReplyPlan } from "../src/expression-renderer.js";
 import { ExpressionDiagnostics } from "../src/social-expression-diagnostics.js";
+import { isQzoneAction, qzoneActionKind, isUnmanagedFavoriteWrite } from "../src/qzone-delivery.js";
+import { recordSocialEpisode } from "../src/social-episodes.js";
 
 // Read source only. Never import/start main(), open sockets, spawn a service,
 // read live config/state, or persist anything. The complete real message callback
@@ -122,6 +124,8 @@ function harness(config = fixtureConfig(), mutation = {}) {
     expressionReactionsFor: () => null,
     expressionNativeFor: () => null,
     nativePokeBindings: new WeakMap(),
+    isQzoneAction, qzoneActionKind, isUnmanagedFavoriteWrite,
+    recordSocialEpisode, socialEpisodeDeliveredProvider: async () => {},
     expressionDiagnostics: new ExpressionDiagnostics(),
     logicalBotId, botConversationKey, botControlRevision, replyDeliveryConfig,
     accountKernel: new AccountRuntime(config), kernelConfigRevision: 1, pendingReplyHandoffs: [],

@@ -11,6 +11,7 @@ import { isValidApiSecretRef } from "./api-secret-store.js";
 import { accountItems, registryConfig } from "./account-registry.js";
 import { readMemorySnapshot } from "./memory-repository.js";
 import { recoverDiscoveryState } from "./social-discovery-state.js";
+import { recoverQzoneState } from "./qzone-runtime.js";
 
 export const BACKUP_MAGIC = Buffer.from("HERMESQQBACKUP1\n", "utf8");
 export const BACKUP_FORMAT_VERSION = 1;
@@ -1088,14 +1089,19 @@ function pauseStagedSocialWork(payloadDir) {
   const file = path.join(payloadDir, "state", "data", "memory.json");
   if (!fs.existsSync(file)) return;
   const memory = JSON.parse(fs.readFileSync(file, "utf8"));
-  if (memory?.socialAgents === undefined) return; // pre-social backups unchanged
+  const qzone = recoverQzoneState(memory, { reason: "backup_restore", now: Date.now() });
+  if (qzone.changed) memory.qzoneSocial = qzone.memory.qzoneSocial;
+  if (memory?.socialAgents === undefined) {
+    if (qzone.changed) writeJson(file, memory);
+    return; // pre-social backups unchanged
+  }
   const record = value => value !== null && typeof value === "object" && !Array.isArray(value);
   const invalid = () => { throw new Error("备份中的社交状态格式无效，恢复已停止"); };
   const social = memory.socialAgents;
   if (!record(social) || social.version !== 1 || !record(social.bots)) invalid();
   const planTerminal = new Set(["completed", "failed", "cancelled", "expired", "superseded"]);
   const runtimeTerminal = new Set([...planTerminal, "idle", "shadow"]);
-  let changed = false;
+  let changed = qzone.changed;
   const pause = (item, terminal, plan = false) => {
     if (!record(item)) invalid();
     if (item.status === "paused" || terminal.has(item.status)) return;

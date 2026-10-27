@@ -245,29 +245,30 @@
       },
       "restrained": {
         "trigger": {
-          "activeProbability": 0.04,
-          "activeCooldownMs": 240000
+          "activeProbability": 0.08,
+          "activeCooldownMs": 180000
         },
         "discussionParticipation": {
-          "activeProbabilityBoost": 0.04,
-          "maxActiveProbability": 0.16,
-          "activeCooldownMs": 180000,
-          "proactiveProbabilityBoost": 0.03,
-          "maxProactiveProbability": 0.18,
-          "proactiveCooldownMs": 1800000
+          "activeProbabilityBoost": 0.08,
+          "maxActiveProbability": 0.26,
+          "activeCooldownMs": 135000,
+          "proactiveProbabilityBoost": 0.05,
+          "maxProactiveProbability": 0.30,
+          "proactiveCooldownMs": 1200000
         },
         "proactive": {
-          "probability": 0.08,
-          "cooldownMs": 2400000
+          "probability": 0.16,
+          "intervalMs": 600000,
+          "cooldownMs": 1500000
         },
         "reply": {
-          "proactiveMinRecentMessages": 5
+          "proactiveMinRecentMessages": 4
         },
         "implicitReply": {
-          "confidenceThreshold": 0.68
+          "confidenceThreshold": 0.62
         },
         "socialPlanner": {
-          "minConfidence": 0.72
+          "minConfidence": 0.65
         }
       },
       "lively": {

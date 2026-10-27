@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { socialExperienceFor } from "./social-experience-policy.js";
 import { QQ_REACTION_LABELS } from "./message-reactions.js";
+import { isQzoneAction, qzoneActionKind, isUnmanagedFavoriteWrite } from "./qzone-delivery.js";
 
 function localMediaKind(value) {
   let filename = String(value || "");
@@ -68,7 +69,18 @@ export function messageContentTypes(message) {
   return [...types];
 }
 
-export function accountDeliveryDecision(config, accountId, action, params = {}, { quiet = false, activeGroupAccountId = "", nativePokeVerified = false } = {}) {
+export function accountDeliveryDecision(config, accountId, action, params = {}, { quiet = false, activeGroupAccountId = "", nativePokeVerified = false, qzoneVerified = false } = {}) {
+  if (isQzoneAction(action)) {
+    const account = effectiveAccount(config, accountId);
+    const allowed = qzoneActionKind(action) !== "unknown" && qzoneVerified === true
+      && !!account && account.enabled === true && !account.archived && account.protocolEnabled === true
+      && account.qzone?.enabled === true && (!account.groupId || activeGroupAccountId === accountId);
+    return allowed ? { allowed: true, types: [], surface: "qzone" }
+      : { allowed: false, reason: "空间操作须经独立授权、身份和回执校验", code: "ACCOUNT_QZONE_BLOCKED", types: [] };
+  }
+  if (isUnmanagedFavoriteWrite(action)) return {
+    allowed: false, reason: "QQ 收藏写入尚未授权；群表情学习不受影响", code: "ACCOUNT_SEND_BLOCKED", types: []
+  };
   // Native poke is not a read action. Until a verified protocol capability,
   // target evidence and dedicated policy exist, fail closed even for group_poke
   // (whose name does not match the legacy send_* guard). The alternate reaction

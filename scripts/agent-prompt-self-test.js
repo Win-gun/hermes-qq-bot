@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { composeAgentPrompt as compose, SOCIAL_PRESETS } from "../src/agent-prompt.js";
+import { composeAgentPrompt as compose, previewAgentPrompt, SOCIAL_PRESETS } from "../src/agent-prompt.js";
+import { selectSocialBehaviorChapters } from "../src/social-behavior.js";
 
 // Synthetic values only. No files, network, models, broker execution or QQ.
 const A = Object.freeze({ accountId: "alpha", logicalBotId: "account:alpha" });
@@ -21,7 +22,7 @@ test("exact top-level and diagnostic shapes are stable", () => {
   assert.deepEqual(Object.keys(r), ["version", "mode", "layers", "text", "diagnostics"]);
   assert.equal(r.version, 1); assert.equal(r.mode, "direct");
   assert.deepEqual(Object.keys(r.diagnostics), ["mode", "socialPreset", "personaPresent", "personaChars", "layerCount",
-    "textChars", "lengthUnit", "layers", "redactedValues", "ignoredFields", "codes"]);
+    "textChars", "lengthUnit", "layers", "redactedValues", "ignoredFields", "codes", "socialChapters", "promptCost"]);
   for (const row of r.layers) assert.deepEqual(Object.keys(row), ["id", "text"]);
   assert.equal(r.text, r.layers.map(row => `【${row.id}】\n${row.text}`).join("\n\n"));
   assert.equal(r.diagnostics.textChars, r.text.length);
@@ -326,6 +327,60 @@ test("preview diagnostics cannot taint a later request", () => {
   r.diagnostics.layers[0].mode = "task"; r.diagnostics.layers[0].chars = -1;
   assert.equal(make().diagnostics.layers[0].mode, "direct");
   assert.equal(make().diagnostics.layers[0].chars, core.length);
+});
+
+test("chapters are mode-selected, detached and never selected by context", () => {
+  const expected = {
+    direct: ["request", "rhythm", "expression", "memory", "boundaries", "protocol", "preset"],
+    social: ["participation", "agency", "silence", "rhythm", "waiting", "expression", "memory", "boundaries", "protocol", "preset"],
+    search: ["request", "evidence", "rhythm", "memory", "boundaries", "protocol", "preset"], task: []
+  };
+  for (const [mode, chapterIds] of Object.entries(expected)) {
+    const r = make({ mode, runtimeContext: { socialChapters: ["forged"], nested: { behavior_chapters: "forged" } } });
+    assert.deepEqual(r.diagnostics.socialChapters, chapterIds);
+    // Unknown context keys remain inert JSON for v1/task compatibility. They
+    // cannot select chapters even when they contain a valid chapter name.
+    assert.equal(r.diagnostics.ignoredFields, 0);
+    assert.ok(layer(r, "RuntimeContext").includes("forged"));
+    assert.ok(!layer(r, "SocialSimulation")?.includes("forged"));
+    const chapters = selectSocialBehaviorChapters(mode);
+    assert.deepEqual(chapters.map(row => row.id), chapterIds);
+    chapters.push({ id: "polluted", text: "polluted" });
+    if (chapters[0]) chapters[0].text = "polluted";
+    assert.ok(!make({ mode }).text.includes("polluted"));
+  }
+  for (const value of [null, {}, "__proto__", "toString"]) {
+    rejects(() => selectSocialBehaviorChapters(value), "AGENT_PROMPT_INVALID_MODE");
+    rejects(() => selectSocialBehaviorChapters("social", value), "AGENT_PROMPT_INVALID_PRESET");
+  }
+});
+test("presets offer distinct rhythm without adding timers, probabilities or grants", () => {
+  const patterns = { existing: /不另设统一句长/, observant: /只在有实质补充/, balanced: /一个完整意群/, engaged: /新的人类输入/ };
+  for (const [socialPreset, pattern] of Object.entries(patterns)) {
+    const r = make({ socialPreset }); assert.match(layer(r, "SocialSimulation"), pattern);
+    assert.match(layer(r, "SocialSimulation"), /不修改底层参与概率/);
+  }
+  assert.doesNotMatch(layer(make({ mode: "direct" }), "SocialSimulation"), /〔waiting〕|〔silence〕|〔agency〕/);
+  assert.doesNotMatch(layer(make({ mode: "search" }), "SocialSimulation"), /〔participation〕|〔expression〕/);
+});
+test("host preview measures same-content dedup, explicitly estimates and never claims billing", () => {
+  const input = { ...base, persona: "  合成人设 🦊\r\n", socialContext: "token=SYNTH_SECRET_PREVIEW" };
+  const before = structuredClone(input), preview = previewAgentPrompt(input);
+  assert.deepEqual(input, before); assert.deepEqual(preview.composition, compose(input));
+  const { comparison, composition } = preview, chars = composition.text.length;
+  assert.equal(comparison.scope, "composed-system-only");
+  assert.equal(comparison.baseline.promptChars, chars * 2); assert.equal(comparison.candidate.promptChars, chars);
+  assert.equal(comparison.saved.promptChars, chars);
+  assert.equal(comparison.saved.estimatedTokens, Math.ceil(chars * 2 / 2) - Math.ceil(chars / 2));
+  assert.deepEqual(composition.diagnostics.promptCost, { promptChars: chars, estimatedTokens: Math.ceil(chars / 2),
+    estimateOnly: true, method: "ceil(utf16-code-units/2)", providerMeasured: false });
+  assert.ok(!JSON.stringify(preview).includes("SYNTH_SECRET_PREVIEW"));
+  assert.ok(!JSON.stringify(comparison).includes("合成人设"));
+  assert.ok(comparison.excludes.includes("provider-billing"));
+  for (const row of [comparison.baseline, comparison.candidate]) { assert.equal(row.estimateOnly, true); assert.equal(row.providerMeasured, false); }
+  preview.composition.layers[0].text = "污染"; preview.comparison.excludes.push("污染");
+  assert.ok(!JSON.stringify(previewAgentPrompt(input)).includes("污染"));
+  rejects(() => previewAgentPrompt({ ...base, persona: "password=SYNTH" }), "AGENT_PROMPT_UNSAFE_PERSONA");
 });
 
 console.log(`PASS agent-prompt: ${checks} synthetic checks; no IO/model/network/QQ`);

@@ -3,6 +3,7 @@ import { socialAgentConfig } from "./social-agent-state.js";
 import { validateDiscoveryPolicy } from "./social-discovery-state.js";
 import { validateSocialExperiencePolicy } from "./social-experience-policy.js";
 import { digitalLifePolicy } from "./digital-life-policy.js";
+import { validateQzonePolicy } from "./qzone-policy.js";
 
 // Validate writes before normalizing. In particular, never coerce enable flags
 // or silently broaden a malformed scope into a working autonomous policy.
@@ -32,6 +33,7 @@ const ITEM_KEYS = new Set(["id", "qq", "displayName", "selfName", "style", "styl
 ITEM_KEYS.add("socialAgent");
 ITEM_KEYS.add("socialExperience");
 ITEM_KEYS.add("digitalLife");
+ITEM_KEYS.add("qzone");
 const bools = (keys, values, fallback) => Object.fromEntries(keys.map((key) => [key, values?.[key] ?? fallback]));
 const featureDefaults = (config, mode = "all") => ({ chat: mode !== "task", task: mode !== "chat",
   proactive: config.proactive?.enabled !== false, automation: config.automation?.enabled === true,
@@ -93,6 +95,7 @@ function normalizeItem(raw, config, index, legacy = false) {
     voice: { mode: "inherit", preset: "", ...(raw.voice || {}) },
     socialAgent: validateSocialAgentPolicy(raw.socialAgent ?? {}),
     ...(raw.digitalLife === undefined ? {} : { digitalLife: digitalLifePolicy(raw.digitalLife) }),
+    ...(raw.qzone === undefined ? {} : { qzone: validateQzonePolicy(raw.qzone) }),
     ...(raw.socialExperience === undefined ? {} : { socialExperience: validateSocialExperiencePolicy(raw.socialExperience) })
   };
 }
@@ -232,6 +235,7 @@ export function registryConfig(config = {}, { strict = false } = {}) {
 // edits so clearing/selecting them snapshots the effective legacy text once.
 // Explicit canonical style wins if a client supplies both representations.
 export function mergeAccountPatch(account, patch, config = {}) {
+  if (patch?.qzone !== undefined) validateQzonePolicy(patch.qzone);
   if (patch?.digitalLife !== undefined) digitalLifePolicy(patch.digitalLife);
   if (patch?.socialAgent !== undefined) validateSocialAgentPolicy(patch.socialAgent);
   if (patch?.socialExperience !== undefined) validateSocialExperiencePolicy(patch.socialExperience);

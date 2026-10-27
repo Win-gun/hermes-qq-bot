@@ -1406,6 +1406,20 @@ await group("activity-preset-selected-state", () => {
   };
   const context = vm.createContext(state);
   new vm.Script(["setVal", "getVal", "activityPresetValues", "renderActivityPresetState", "applyPreset"].map(adminFunction).join("\n")).runInContext(context);
+  check("restrained activity is moderately below normal and agrees with runtime defaults", () => {
+    const defaults = JSON.parse(fs.readFileSync(path.join(root, "config.example.json"), "utf8"));
+    const preset = defaults.behaviorModes.presets.restrained;
+    const values = state.activityPresetValues("restrained"), normal = state.activityPresetValues("normal");
+    assert.equal(values["trigger.activeProbability"], 0.08);
+    assert.equal(values["proactive.probability"], 0.16);
+    for (const key of ["trigger.activeProbability", "trigger.activeCooldownMs", "proactive.probability", "proactive.intervalMs", "proactive.cooldownMs"])
+      assert.equal(values[key], key.split(".").reduce((value, part) => value[part], preset));
+    assert(values["trigger.activeProbability"] < normal["trigger.activeProbability"]);
+    assert(values["proactive.probability"] < normal["proactive.probability"]);
+    assert(values["trigger.activeCooldownMs"] > normal["trigger.activeCooldownMs"]);
+    assert(values["proactive.cooldownMs"] > normal["proactive.cooldownMs"]);
+    assert(preset.socialPlanner.minConfidence > defaults.behaviorModes.presets.normal.socialPlanner.minConfidence);
+  });
   for (const [kind, button] of [["normal", "presetNormal"], ["restrained", "presetRestrained"], ["lively", "presetLively"], ["normal", "presetNormal"]]) {
     state.applyPreset(kind);
     check(`${kind} button, mode, values, sliders and dirty scope agree`, () => {

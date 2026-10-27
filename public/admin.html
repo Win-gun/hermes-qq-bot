@@ -658,7 +658,7 @@
               <input id="proactive.probability.slider" type="range" min="0" max="1" step="0.01" />
               <input id="proactive.probability" type="number" step="0.01" min="0" max="1" />
             </div>
-            <div class="hint">建议：克制版普通接话 0.02–0.06；正常版 0.10–0.15；活跃版 0.20–0.35。与 bot 相关、@、私聊仍会优先回复。</div>
+            <div class="hint">建议：克制版普通接话 0.06–0.09；正常版 0.10–0.15；活跃版 0.20–0.35。与 bot 相关、@、私聊仍会优先回复。</div>
           </div>
 
           <div class="card">
@@ -4972,7 +4972,7 @@
     }
 
     function activityPresetValues(kind) {
-      const values = { restrained: [0.04, 240000, 0.08, 900000, 2400000], normal: [0.12, 120000, 0.25, 300000, 900000], lively: [0.25, 60000, 0.45, 300000, 900000] }[kind];
+      const values = { restrained: [0.08, 180000, 0.16, 600000, 1500000], normal: [0.12, 120000, 0.25, 300000, 900000], lively: [0.25, 60000, 0.45, 300000, 900000] }[kind];
       if (!values) return null;
       return { "behaviorModes.default": kind, "trigger.activeProbability": values[0], "trigger.activeCooldownMs": values[1], "proactive.enabled": true, "proactive.probability": values[2], "proactive.intervalMs": values[3], "proactive.cooldownMs": values[4] };
     }
@@ -5823,7 +5823,7 @@
       drafts: new Map(), contexts: { qa: "", vision: "", voice: "" },
       error: "", busy: false, refreshing: null, wizard: null, wizards: new Map(), operations: new Map(), groupDraft: null, modelCenter: null, modelLoadedAt: 0, modelError: ""
     };
-    const registryTabs = { identity: "基本", style: "风格", experience: "社交表达", features: "功能", sendTypes: "发送", scope: "范围", models: "模型", connection: "连接高级" };
+    const registryTabs = { identity: "基本", style: "风格", experience: "社交表达", qzone: "空间", features: "功能", sendTypes: "发送", scope: "范围", models: "模型", connection: "连接高级" };
     const registryFeatures = { chat: "聊天问答", task: "正式任务", proactive: "主动参与", automation: "自动化", webSearch: "联网搜索", vision: "识图", asr: "语音识别", learning: "学习模式" };
     const registrySendTypes = { text: "文字", image: "图片", record: "语音", video: "视频", file: "文件" };
     const registryIdentityKeys = ["displayName", "selfName", "qq", "protocol", "managed", "onebotWsUrl", "onebotPath", "protocolContainer", "napcatContainer", "webuiPort", "noVncPort", "vncPort", "snowlumaImage", "behaviorMode"];
@@ -5871,7 +5871,7 @@
     }
     function registryEditable(item) {
       const result = {};
-      for (const key of [...registryIdentityKeys, "features", "sendTypes", "scope", "modelBindings", "voice", "socialExperience"]) {
+      for (const key of [...registryIdentityKeys, "features", "sendTypes", "scope", "modelBindings", "voice", "socialExperience", "qzone"]) {
         if (item[key] !== undefined) result[key] = structuredClone(item[key]);
       }
       result.features = { ...Object.fromEntries(Object.keys(registryFeatures).map((key) => [key, false])), ...result.features };
@@ -5881,13 +5881,18 @@
       result.selfName = typeof item.selfName === "string" ? item.selfName : String(item.displayName || "");
       result.voice = { mode: "inherit", preset: "", ...result.voice };
       result.style = registryStyle(item);
+      // Only these documented safety defaults are local. Preserve every other
+      // server-normalized policy field; a render never persists this root.
+      result.qzone = { enabled: false, mode: "draft_only", ugcRight: 64, allowedAudiences: [64], ...result.qzone,
+        reads: { feeds: false, own: false, ...result.qzone?.reads }, publish: { enabled: false, ...result.qzone?.publish },
+        likes: { enabled: false, ...result.qzone?.likes }, comments: { enabled: false, ...result.qzone?.comments } };
       // Compatibility defaults are draft-only. Only the experience tab submits
       // this root; reading old accounts must never write configuration.
       result.socialExperience = {
         enabled: false, shadowMode: true, conversationIds: [], ...result.socialExperience,
         turn: { enabled: true, minWaitMs: 150, maxWaitMs: 4500, ordinaryWaitMs: 700, incompleteWaitMs: 2500, maxTurnMs: 8000, ...result.socialExperience?.turn },
         expression: { enabled: true, maxMessages: 2, minIntervalMs: 200, maxIntervalMs: 800, allowQuotes: true, ...result.socialExperience?.expression },
-        stickers: { enabled: false, autoSend: false, visionLearning: false, groupLearning: false, autonomousEligibility: false,
+        stickers: { enabled: false, autoSend: false, interactionEnabled: false, visionLearning: false, groupLearning: false, autonomousEligibility: false,
           maxDailyVisionCalls: 8, maxDailyDownloads: 16, cooldownMs: 60000, ...result.socialExperience?.stickers },
         reactions: { enabled: false, cooldownMs: 60000, maxDaily: 30, emojiIds: ["76"], ...result.socialExperience?.reactions },
         language: { enabled: false, autoCandidates: true, implicitLearning: false, ...result.socialExperience?.language },
@@ -6195,7 +6200,10 @@
       const capability = value => ["unknown", "supported", "unsupported"].includes(value) ? value : "unknown";
       const native = scope.startsWith("group:") && result.native?.ok === true ? {
         capabilities: { poke: capability(result.native.capabilities?.poke), mention: capability(result.native.capabilities?.mention) },
-        daily: uint(result.native.daily), maxDaily: uint(result.native.maxDaily), cooldownRemainingMs: uint(result.native.cooldownRemainingMs) } : null;
+        daily: uint(result.native.daily), maxDaily: uint(result.native.maxDaily), cooldownRemainingMs: uint(result.native.cooldownRemainingMs),
+        probeSources: (Array.isArray(result.native.probeSources) ? result.native.probeSources : []).slice(0, 8)
+          .filter(row => /^poke_notice:[a-f0-9]{64}$/.test(row?.sourceId || "") && /^[1-9]\d{0,19}$/.test(row?.userId || "") && uint(row.sentAt) !== null)
+          .map(row => ({ sourceId: row.sourceId, userId: row.userId, sentAt: row.sentAt })) } : null;
       const forwards = scope.startsWith("group:") && result.forwards?.readOnly === true ? {
         readOnly: true, capability: ["unknown", "unsupported", "read-confirmed"].includes(result.forwards.capability) ? result.forwards.capability : "unknown" } : null;
       return { revision: result.revision, stickers, language, dailyVisionCalls, learning, reactions, cache, interest, native, forwards,
@@ -6302,6 +6310,21 @@
         state.error = error.status === 409 ? "修订冲突；未重试，草稿保留，请刷新后核对。" : "取消结果未核实；不会自动重试，草稿保留，请刷新核对。";
       } finally { state.busy = false; renderExperienceLibrary(); }
     }
+    async function probeExperiencePoke(id, scope, source) {
+      const state = experienceLibraryState(id, scope);
+      if (state.busy || state.loading || state.blocked || !/^poke_notice:[a-f0-9]{64}$/.test(source?.sourceId || "")) return;
+      const attempt = `poke-probe:${source.sourceId}`;
+      if (state.attempts.has(attempt)) { state.error = "这一来源已经尝试过回拍，不会重复执行。"; renderExperienceLibrary(); return; }
+      if (!confirm(`向群 ${scope.slice(6)} 中刚刚拍过此账号的成员 ${source.userId} 回拍一次？这是实际 QQ 动作，不是只读检测；接口受理不保证客户端显示，不确定时不会重试。`)) return;
+      state.busy = true; state.error = ""; state.notice = ""; state.attempts.add(attempt); renderExperienceLibrary();
+      try {
+        const result = await socialLifeRequest(`/api/social-agent/accounts/${encodeURIComponent(id)}/native-pokes/probe`, "POST",
+          { expectedRevision: registryState.revision, conversationId: scope, sourceId: source.sourceId });
+        state.notice = result.result?.status === "accepted" ? "回拍接口已受理；尚未验证对端显示。刷新可查看当前载体的能力证据。"
+          : "回拍未确认或已被拒绝，不会自动重试。请查看实际 QQ 客户端。";
+      } catch { state.error = "测试未完成或结果不确定；不会自动重试，请核对实际客户端与本地回执。"; }
+      finally { state.busy = false; renderExperienceLibrary(); }
+    }
     function renderExperienceLibrary(host = $("dynamicAccountEditor")?.querySelector("[data-experience-library]")) {
       if (!host) return;
       host.replaceChildren();
@@ -6344,6 +6367,11 @@
         }
         const states = { unknown: "未验证", supported: "接口可受理（非实发验收）", unsupported: "协议不支持" };
         host.append(node("p", data.native ? `原生动作：拍一拍 ${states[data.native.capabilities.poke]} · 定向提及 ${states[data.native.capabilities.mention]}。拍一拍今日 ${counter(data.native.daily)} / ${counter(data.native.maxDaily)} · 冷却剩余 ${counter(data.native.cooldownRemainingMs)} ms。` : "原生动作：服务端尚未提供有效诊断；配置开关与实际协议能力分开，不做自动探测或测试发送。", "hint"));
+        if (data.native?.capabilities.poke === "unknown") for (const source of data.native.probeSources || []) {
+          const probe = registryButton(`测试一次回拍 · ${source.userId}（真实动作）`, () => probeExperiencePoke(id, scope, source));
+          probe.disabled = state.busy || !!state.loading || state.blocked || state.attempts.has(`poke-probe:${source.sourceId}`)
+            || Date.now() - source.sentAt >= 300000; host.append(probe);
+        }
         if (data.forwards) host.append(node("p", `合并转发只读能力：${{ unknown: "未验证", unsupported: "协议不支持", "read-confirmed": "已确认读取（不代表内容可信）" }[data.forwards.capability]}。不展示转发正文、来源身份或私聊证据。`, "hint"));
       } else host.append(node("p", "短期关注与群内原生动作：不展示私聊内容或目标；群内状态请切换到对应群范围。", "hint"));
       const disabled = state.busy || !!state.loading || state.blocked;
@@ -6392,6 +6420,215 @@
         row.append(actions); host.append(row);
       }
     }
+    function socialLifeState(id) {
+      registryState.socialLife ||= new Map();
+      if (!registryState.socialLife.has(id)) registryState.socialLife.set(id, {
+        data: null, loading: false, busy: false, error: "", uncertain: false,
+        editor: { source: "admin_topic", sourceRef: "admin_ui", topic: "", text: "", audience: 64 }, preview: null, previewError: "", previewLoading: false
+      });
+      return registryState.socialLife.get(id);
+    }
+    function socialLifeNode(tag, text, className = "") {
+      const node = document.createElement(tag); node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+    function socialLifeText(value, max = 4000) { return typeof value === "string" ? value.slice(0, max) : ""; }
+    async function socialLifeRequest(path, method = "GET", body) {
+      const controller = new AbortController();
+      let timer;
+      // Bound the whole authenticated helper, including a stalled session
+      // bootstrap. The aborted signal also forbids a late POST after auth.
+      const timeout = new Promise((_resolve, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error("request_timeout")); }, 20000); });
+      try {
+        const result = await Promise.race([api(path, { method, signal: controller.signal, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }), timeout]);
+        if (result.ok !== true) throw new Error("incomplete_response");
+        return result;
+      } finally { clearTimeout(timer); }
+    }
+    function socialLifeRender(id) {
+      if (registryState.selected !== id) return;
+      const root = $("dynamicAccountEditor");
+      const space = root?.querySelector("[data-qzone-runtime]");
+      if (space?.dataset.accountId === id) renderQzoneRuntime(space, id);
+      const preview = root?.querySelector("[data-behavior-preview]");
+      if (preview?.dataset.accountId === id) renderBehaviorPreview(preview, id);
+    }
+    async function loadQzoneSnapshot(id) {
+      if (!registryItem(id)) return;
+      const state = socialLifeState(id); if (state.loading || state.busy) return;
+      state.loading = true; state.error = ""; socialLifeRender(id);
+      try {
+        const result = await socialLifeRequest(`/api/social-agent/accounts/${encodeURIComponent(id)}/qzone`);
+        if (result.accountId !== id || result.revision == null || !result.policy || !Array.isArray(result.drafts) || !Array.isArray(result.feeds)) throw new Error("snapshot_mismatch");
+        state.data = result; state.uncertain = false;
+        if (!state.editorEdited?.has("audience") && [1, 4, 64].includes(result.policy.ugcRight)) state.editor.audience = result.policy.ugcRight;
+        // Registry is the config authority. Never silently rebase a policy
+        // from this separate runtime snapshot or overwrite a local editor.
+        if (result.revision !== registryState.revision) state.error = "配置版本已变化，请先刷新账号配置；所有空间草稿保留。";
+      } catch (error) {
+        state.error = error.status === 409 ? "版本冲突；请刷新账号配置及空间状态，草稿保留。"
+          : error.status === 403 ? "管理员会话不可用；请重新加载状态。草稿保留，不会自动重试。"
+            : "空间状态不可用（服务停止、离线或接口未就绪）。草稿保留，请手动重试。";
+      } finally { state.loading = false; socialLifeRender(id); }
+    }
+    async function qzoneOperation(id, op, item = null, extra = {}) {
+      const state = socialLifeState(id), data = state.data;
+      if (!registryItem(id) || state.loading || state.busy) return;
+      try {
+        if (!data || data.accountId !== id || data.revision !== registryState.revision || data.current === false || state.uncertain) throw new Error("stale_state");
+        if (!["read-feeds", "read-own", "create-draft", "generate-draft", "submit-review", "approve", "publish", "verify", "cancel", "propose-interaction"].includes(op)) throw new Error("invalid_operation");
+        if (registryDraft(id)?.conflict || [...(registryDraft(id)?.dirty || [])].some(path => path === "qzone" || path.startsWith("qzone."))) throw new Error("unsaved_policy");
+        const body = { expectedRevision: data.revision };
+        if (["submit-review", "approve", "publish", "verify", "cancel"].includes(op)) {
+          const current = data.drafts.find(row => row.id === item?.id);
+          if (typeof current?.id !== "string" || !Number.isSafeInteger(current.revision) || current.revision < 1 || current.revision !== item.revision) throw new Error("draft_revision_missing");
+          item = current;
+          body.id = current.id; body.draftRevision = current.revision;
+          // This first editor is text-only. Unknown media must never gain
+          // publishing authority from a path, URL or an opaque attachment.
+          if (["submit-review", "approve", "publish"].includes(op) && (["media", "images"].some(key => current[key] !== undefined && (!Array.isArray(current[key]) || current[key].length)) || !["publish", "like", "comment"].includes(current.kind))) throw new Error("unknown_media");
+        }
+        if (op === "create-draft") {
+          const editor = state.editor;
+          if (!["admin_topic", "public_information"].includes(editor.source) || !/^[a-zA-Z0-9:_-]{1,96}$/.test(editor.sourceRef) || ["__proto__", "constructor", "prototype"].includes(editor.sourceRef) || !editor.text.trim() || editor.text.length > 1000 || !data.policy.allowedAudiences?.includes(editor.audience)) throw new Error("invalid_editor");
+          Object.assign(body, { source: { kind: editor.source, ref: editor.sourceRef }, content: editor.text, audience: editor.audience, images: [] });
+        }
+        if (op === "generate-draft") {
+          if (!state.editor.topic?.trim() || state.editor.topic.length > 1000 || !data.policy.allowedAudiences?.includes(state.editor.audience)) throw new Error("invalid_topic");
+          Object.assign(body, { topic: state.editor.topic, audience: state.editor.audience });
+        }
+        if (op === "propose-interaction") {
+          if (!data.feeds.some(feed => typeof feed.id === "string" && feed.id === item?.id) || !["like", "comment"].includes(extra.kind)) throw new Error("feed_reference_missing");
+          if (extra.kind === "comment" && (!extra.text?.trim() || extra.text.length > 1000)) throw new Error("invalid_comment");
+          Object.assign(body, { feedId: item.id, kind: extra.kind, ...(extra.kind === "comment" ? { content: extra.text } : {}) });
+        }
+        const prompt = { "read-feeds": "读取此账号可见的远端私人动态？仅本地显示，不转发到群。", "read-own": "读取此账号自己的远端空间内容？", verify: "核验会显式读取自己的远端空间并核对这条回执，确认？", approve: "批准此草稿的当前版本？批准不等于发布。", publish: `确认执行此账号的真实${{ publish: "空间发表", like: "点赞", comment: "评论" }[item?.kind] || "空间写入"}？仅执行已批准的精确版本。${item?.kind === "publish" ? `受众：${item.audience}（${item.audience === 64 ? "仅自己" : item.audience === 4 ? "好友可见" : "公开"}）。` : "目标仅来自主机动态引用。"}`, cancel: "取消此草稿的当前版本？不会撤回已发生的远端动作。" }[op];
+        if (op === "generate-draft" && !confirm("使用当前账号的问答模型和风格生成一份本地草稿？将占用一次自主调用预算，不读取聊天或记忆，也不会发表。")) return;
+        if (prompt && !confirm(prompt)) return;
+        state.busy = true; state.error = ""; socialLifeRender(id);
+        try {
+          await socialLifeRequest(`/api/social-agent/accounts/${encodeURIComponent(id)}/qzone/${op}`, "POST", body);
+        } catch (error) {
+          state.uncertain = true;
+          state.error = error.status === 409 ? "版本冲突；草稿保留。请手动重新加载核对，不会自动重试。"
+            : "操作未能确认，可能被拒绝或结果未知。不会自动重试；请重新加载核对，勿重复发布。";
+          return;
+        } finally { state.busy = false; }
+        // GET only reloads the local projection. It must not imply a second
+        // remote read, an approval, a publish or a receipt verification.
+        await loadQzoneSnapshot(id);
+      } catch (error) {
+        const messages = { invalid_topic: "请填写 1–1000 字管理员主题，并选择策略允许的受众。", unsaved_policy: "空间策略有未保存修改或冲突；请先处理配置。", unknown_media: "此草稿含未知媒体或媒体结构；当前仅支持明确的纯文本草稿，禁止送审、批准或发布。", invalid_editor: "请填写有效来源引用、1–1000 字正文，并选择策略允许的明确受众。", invalid_comment: "评论须为 1–1000 字。", feed_reference_missing: "缺少此账号的主机动态引用，请先显式读取；不接受手填 QQ 或 tid。", draft_revision_missing: "草稿版本不完整或已变化，请重新加载核对。" };
+        state.error = messages[error.message] || "状态或配置版本不可用；请重新加载核对。草稿保留。";
+      } finally { socialLifeRender(id); }
+    }
+    function renderQzoneRuntime(host, id) {
+      const state = socialLifeState(id), stale = state.data && state.data.revision !== registryState.revision;
+      const data = !stale && state.data?.accountId === id ? state.data : null;
+      host.replaceChildren(); host.style.overflowWrap = "anywhere";
+      host.append(socialLifeNode("h4", "空间工作台 · 当前账号"), socialLifeNode("p", "打开、刷新本地状态和保存配置均不会读取远端动态、批准或发布。仅文本草稿；媒体路径与 URL 不受理。", "hint"));
+      const reload = registryButton(state.loading ? "加载本地状态中…" : "刷新本地状态（不访问 QQ）", () => loadQzoneSnapshot(id));
+      reload.disabled = state.loading || state.busy; host.append(reload);
+      const message = socialLifeNode("p", state.busy ? "操作处理中，请勿重复提交…" : state.error || (stale ? "配置版本已变化；旧动态已隐藏，编辑草稿保留。请显式刷新本地状态。" : !data ? "尚未加载本地状态；协议能力未知。" : data.current === false ? "此账号当前不可执行（停止、离线或载体已变化）；草稿保留，不自动重试。" : "本地状态已加载；不代表远端动作已执行。"), state.error || stale || data?.current === false ? "alert" : "hint"); message.setAttribute("role", "status"); host.append(message);
+      const states = socialLifeNode("div", undefined, "form-grid");
+      const enabled = registryItem(id)?.qzone?.enabled === true;
+      states.append(socialLifeNode("p", `配置：${enabled ? "已启用" : "未启用"}（已保存配置，非协议验证）`, "hint"));
+      const caps = data?.capabilities;
+      const names = { get_qzone_feeds: "动态读取", get_qzone_msg_list: "自己空间", send_qzone_msg: "发表", like_qzone: "点赞", comment_qzone: "评论" };
+      for (const [key, label] of Object.entries(names)) {
+        const raw = caps?.[key], status = typeof raw === "string" ? raw : raw?.status;
+        states.append(socialLifeNode("p", `协议验证 · ${label}：${{ unknown: "未知 / 未验证", unsupported: "不支持", supported: "已提供支持证据", temporarily_unavailable: "暂不可用" }[status] || "未知 / 未验证"}`, "hint"));
+      }
+      states.append(socialLifeNode("p", "审核：逐条、逐版本批准；配置启用不是批准。", "hint"), socialLifeNode("p", "实际回执：仅以下单条记录为证；受理不等于客户端可见。", "hint")); host.append(states);
+      const locked = !data || data.current === false || state.loading || state.busy || state.uncertain || !!state.error || data.revision !== registryState.revision;
+      const read = socialLifeNode("div", undefined, "row");
+      for (const [op, label] of [["read-feeds", "读取远端私人动态"], ["read-own", "读取自己的空间"]]) {
+        const button = registryButton(label, () => qzoneOperation(id, op)); button.disabled = locked || data?.policy?.enabled !== true || data?.policy?.reads?.[op === "read-feeds" ? "feeds" : "own"] !== true; read.append(button);
+      }
+      host.append(read);
+      const editor = socialLifeNode("section", undefined, "settings-block"); editor.append(socialLifeNode("h4", "新建文本草稿 · 只保存在本地"));
+      editor.append(socialLifeNode("p", "未创建的编辑内容仅保存在此页面内存；状态刷新、切换账号会保留，刷新浏览器或关闭应用会丢失。下方保存策略不会提交正文。", "hint"));
+      const fields = socialLifeNode("div", undefined, "form-grid");
+      const set = (key, value) => { state.editor[key] = value; (state.editorEdited ||= new Set()).add(key); };
+      // These are not registry fields: polling must not synchronize runtime
+      // compose inputs from config or mark the policy tab as dirty.
+      const input = (label, key, options = {}) => {
+        const control = registryField(fields, label, `qzoneEditor.${key}`, state.editor[key], (_path, value) => set(key, value), options);
+        delete control.dataset.registryField; control.dataset.qzoneEditor = key; return control;
+      };
+      input("内容来源", "source", { options: [["admin_topic", "管理员话题"], ["public_information", "公开信息"]] });
+      input("来源引用（本地标识，不填 URL / 路径）", "sourceRef");
+      const topic = input("生成主题（仅管理员提供，不读取聊天或记忆）", "topic", { type: "textarea" }); topic.maxLength = 1000;
+      const text = input("正文（最多 1000 字）", "text", { type: "textarea" }); text.maxLength = 1000;
+      input("明确受众编号（64 = 仅自己）", "audience", { type: "number", hint: `默认仅自己。策略允许：${(data?.policy?.allowedAudiences || [64]).filter(n => [1, 4, 64].includes(n)).map(n => `${n}（${{ 1: "公开", 4: "好友", 64: "仅自己" }[n]}）`).join("、")}；不会依赖协议的公开默认值。` });
+      editor.append(fields);
+      const generate = registryButton("按账号风格生成草稿（不发布）", () => qzoneOperation(id, "generate-draft")); generate.disabled = locked || data?.policy?.enabled !== true;
+      const create = registryButton("创建本地草稿（不发布）", () => qzoneOperation(id, "create-draft")); create.disabled = locked || data?.policy?.enabled !== true;
+      const composeActions = socialLifeNode("div", undefined, "row"); composeActions.append(generate, create); editor.append(composeActions); host.append(editor);
+      const drafts = socialLifeNode("section", undefined, "settings-block"); drafts.append(socialLifeNode("h4", "草稿与逐版本审核"));
+      if (!data?.drafts?.length) drafts.append(socialLifeNode("p", "暂无本地草稿；编辑内容跨刷新和账号切换保留。", "hint"));
+      for (const item of data?.drafts || []) {
+        const row = socialLifeNode("section", undefined, "settings-block");
+        const known = { draft: "草稿", review: "待审核", approved: "已批准", publishing: "发送流程中（看实际回执）", confirmed: "已核验", failed: "失败", uncertain: "不确定 / 禁止重放" };
+        row.append(socialLifeNode("h4", `草稿 ${socialLifeText(item.id, 100)} · ${known[item.status] || "状态待核实"}`));
+        row.append(socialLifeNode("p", socialLifeText(item.content)), socialLifeNode("p", `${item.kind === "publish" ? `受众：${[1, 4, 64].includes(item.audience) ? `${item.audience}（${{ 1: "公开", 4: "好友可见", 64: "仅自己" }[item.audience]}）` : "未明确，禁止发布"}` : "互动目标：此账号主机动态引用（非手填 QQ / tid）"} · 草稿版本：${Number.isSafeInteger(item.revision) ? item.revision : "缺失"}`, "hint"));
+        row.append(socialLifeNode("p", `创作依据：${socialLifeText(item.creationReason || "管理员提交", 120)} · 来源：${socialLifeText(item.source?.kind || "待核对", 50)} · ${item.containsPrivateContent === true ? "含私人空间内容，仅限本地审核" : "不以此字段代替人工隐私核对"}`, "hint"));
+        row.append(socialLifeNode("p", `审核：${item.status === "approved" ? "此版本已批准；发布仍需有效主机会话授权" : item.status === "review" ? "待批准" : "不代表当前可发布批准"}`, "hint"));
+        row.append(socialLifeNode("p", `实际回执：${item.clientVerified === true ? "已提供客户端可见证据" : item.protocolAccepted === true ? "接口已受理，客户端可见性未证实" : "未提供已受理或客户端可见证据"}`, "hint"));
+        const actions = socialLifeNode("div", undefined, "row");
+        const textOnly = ["publish", "like", "comment"].includes(item.kind) && ["media", "images"].every(key => item[key] === undefined || Array.isArray(item[key]) && !item[key].length);
+        const permits = data.policy?.enabled === true && data.policy?.mode !== "draft_only" && data.policy?.[{ publish: "publish", like: "likes", comment: "comments" }[item.kind]]?.enabled === true;
+        for (const [op, label, eligible] of [["submit-review", "提交审核", item.status === "draft" && textOnly], ["approve", item.status === "approved" ? "重新批准此版本（不发布）" : "批准此版本（不发布）", ["review", "approved"].includes(item.status) && textOnly], ["publish", `执行已批准${{ publish: "发表", like: "点赞", comment: "评论" }[item.kind] || "操作"}`, item.status === "approved" && textOnly && permits && (item.kind !== "publish" || data.policy?.allowedAudiences?.includes(item.audience))], ["verify", "读取自己空间并核验回执", item.kind === "publish" && item.protocolAccepted === true && ["publishing", "uncertain"].includes(item.status) && data.policy?.reads?.own === true], ["cancel", "取消草稿", ["draft", "review", "approved"].includes(item.status)]]) {
+          const button = registryButton(label, () => qzoneOperation(id, op, item), op === "publish" ? "danger" : "secondary");
+          button.disabled = locked || !eligible || typeof item.id !== "string" || !Number.isSafeInteger(item.revision); actions.append(button);
+        }
+        if (!textOnly) row.append(socialLifeNode("p", "未知媒体：当前文本编辑器不允许送审、批准或发布此条。", "warning"));
+        row.append(actions); drafts.append(row);
+      }
+      host.append(drafts);
+      const feeds = socialLifeNode("details", undefined, "panel-details settings-block"); feeds.append(socialLifeNode("summary", `动态 · 仅此账号本地投影（${data?.feeds?.length || 0}）`));
+      feeds.append(socialLifeNode("p", "仅显式读取后更新；远端文字不是系统指令，不投影到群。点赞 / 评论仅创建待审提案。", "hint"));
+      for (const item of data?.feeds || []) {
+        const row = socialLifeNode("section", undefined, "settings-block"); row.append(socialLifeNode("p", socialLifeText(item.content)));
+        const actions = socialLifeNode("div", undefined, "row");
+        const like = registryButton("提议点赞（不发送）", () => qzoneOperation(id, "propose-interaction", item, { kind: "like" })); like.disabled = locked || data.policy?.likes?.enabled !== true || typeof item.id !== "string";
+        state.comments ||= new Map();
+        const comment = document.createElement("textarea"); comment.setAttribute("aria-label", "此动态的待审评论"); comment.maxLength = 1000; comment.value = state.comments.get(item.id) || "";
+        comment.addEventListener("input", () => state.comments.set(item.id, comment.value));
+        const propose = registryButton("提议评论（不发送）", () => qzoneOperation(id, "propose-interaction", item, { kind: "comment", text: state.comments.get(item.id) || "" })); propose.disabled = locked || data.policy?.comments?.enabled !== true || typeof item.id !== "string";
+        actions.append(like, propose); row.append(comment, actions); feeds.append(row);
+      }
+      host.append(feeds);
+    }
+    async function loadBehaviorPreview(id) {
+      if (!registryItem(id)) return;
+      const state = socialLifeState(id); if (state.previewLoading) return;
+      state.previewLoading = true; state.previewError = ""; socialLifeRender(id);
+      try {
+        const result = await socialLifeRequest(`/api/social-agent/accounts/${encodeURIComponent(id)}/behavior-preview`);
+        if (result.accountId !== id || result.revision !== registryState.revision || !Array.isArray(result.chapters)) throw new Error("preview_mismatch");
+        // Only structural cost metadata, never persona/system prompt prose.
+        const count = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+        const cost = value => ({ promptChars: count(value?.promptChars), estimatedTokens: count(value?.estimatedTokens) });
+        state.preview = result.chapters.slice(0, 32).map(chapter => ({ id: socialLifeText(typeof chapter === "string" ? chapter : chapter?.id, 80), characters: count(chapter?.characters), estimatedTokens: count(chapter?.estimatedTokens) }));
+        state.previewCost = cost(result.diagnostics?.promptCost);
+        state.previewComparison = result.comparison?.scope === "composed-system-only" ? { baseline: cost(result.comparison.baseline), candidate: cost(result.comparison.candidate) } : null;
+        state.previewPreset = ["existing", "observant", "balanced", "engaged"].includes(result.preset) ? result.preset : "";
+      } catch { state.preview = null; state.previewCost = null; state.previewComparison = null; state.previewPreset = ""; state.previewError = "行为预览不可用、版本已变化或账号不匹配；未调用模型，未执行 QQ 动作。请手动重试。"; }
+      finally { state.previewLoading = false; socialLifeRender(id); }
+    }
+    function renderBehaviorPreview(host, id) {
+      const state = socialLifeState(id); host.replaceChildren();
+      host.append(socialLifeNode("p", "行为章节预览 · 仅主机元数据，不调用模型、不展示人格正文，不保存或改变发言档位。", "hint"));
+      const button = registryButton(state.previewLoading ? "预览加载中…" : "预览此账号行为章节与估算成本", () => loadBehaviorPreview(id)); button.disabled = state.previewLoading; host.append(button);
+      if (state.previewError) host.append(socialLifeNode("p", state.previewError, "alert"));
+      const labels = { identity: "身份", persona: "人格", behavior: "行为", social: "社交", safety: "安全", context: "上下文", memory: "记忆", expression: "表达", request: "明确请求", participation: "参与判断", agency: "主体性", silence: "沉默与离场", rhythm: "表达节奏", waiting: "等待与唤醒", boundaries: "权限与关系边界", evidence: "搜索证据", protocol: "宿主协议", preset: "行为预设" };
+      if (state.previewPreset) host.append(socialLifeNode("p", `已保存行为预设：${{ existing: "沿用现有习惯", observant: "先观察", balanced: "均衡参与", engaged: "积极接话" }[state.previewPreset]}（不是人格绑定或工具授权）`, "hint"));
+      if (state.previewCost) host.append(socialLifeNode("p", `组合 system：${state.previewCost.promptChars ?? "未知"} 字符 · 估算 token ${state.previewCost.estimatedTokens ?? "未知"}；仅结构元数据，非供应商实测或账单。`, "hint"));
+      if (state.previewComparison) host.append(socialLifeNode("p", `同内容去重对照（仅组合 system）：双份估算 ${state.previewComparison.baseline.estimatedTokens ?? "未知"} → 单份估算 ${state.previewComparison.candidate.estimatedTokens ?? "未知"} token；不包含历史、记忆和其他包装。`, "hint"));
+      for (const chapter of state.preview || []) host.append(socialLifeNode("p", `${labels[chapter.id] || "行为章节"}${chapter.characters === null && chapter.estimatedTokens === null ? "" : ` · 字符 ${chapter.characters ?? "未知"} · 估算 token ${chapter.estimatedTokens ?? "未知"}（非供应商实测）`}`, "hint"));
+    }
     function registryFields(host, value, tab, change, { policy = false, disabled = false } = {}) {
       const field = (label, path, options = {}) => registryField(host, label, path, registryGet(value, path), change, { disabled, ...options });
       if (tab === "identity") {
@@ -6430,6 +6667,7 @@
         };
         add(main, "启用社交表达", "enabled", { type: "checkbox", hint: "默认关闭；修改模式或参数不会代替你打开此开关。" });
         add(main, "运行模式", "shadowMode", { options: [["true", "观察 · 不发送"], ["false", "实际 · 仍受原有权限约束"]] });
+        registryField(main, "此账号社交行为预设", "socialExperience.behaviorPreset", settings.behaviorPreset ?? "existing", edit, { disabled, options: [["existing", "沿用现有习惯"], ["observant", "先观察 · 有价值再接话"], ["balanced", "均衡参与"], ["engaged", "积极接话 · 尊重停下"]], hint: "只提供行为章节建议，不替换人格、发言档位、模型或工具权限；不影响 Digital Life / Work。旧配置未选择时不新增此字段。预览使用服务器已保存的有效预设，不读取未保存草稿。" });
         add(main, "会话范围（一行一个）", "conversationIds", { type: "textarea", hint: "例如 group:123456 或 private:123456。空范围不参与任何会话；启用前须明确指定。" });
         add(main, "等待上限（毫秒）", "turn.maxWaitMs", { type: "number" });
         add(main, "未完消息等待（毫秒）", "turn.incompleteWaitMs", { type: "number" });
@@ -6440,6 +6678,7 @@
         const media = document.createElement("div"); media.className = "form-grid";
         add(media, "启用表情库", "stickers.enabled", { type: "checkbox" });
         add(media, "允许自动发表情", "stickers.autoSend", { type: "checkbox", hint: "默认关闭；确认标注不等于授权自动发送，仍受观察模式、范围及发送权限约束。" });
+        add(media, "允许有界回图/斗图", "stickers.interactionEnabled", { type: "checkbox", hint: "默认关闭；仅响应当前人类输入，受宿主轮次、冷却和停止规则约束。不打开自动发表情，不授予素材、范围或发送权限。" });
         add(media, "允许视觉学习（可能收费）", "stickers.visionLearning", { type: "checkbox", hint: "手动标注逐项确认；开启群表情学习后，后台分析计入下方每日预算，不阻塞聊天。" });
         add(media, "学习群友发送的表情", "stickers.groupLearning", { type: "checkbox", hint: "仅群聊范围；结合近期对话判断用途，不自动收藏，不复用照片、证件或聊天截图。" });
         add(media, "自动判定表情可用", "stickers.autonomousEligibility", { type: "checkbox", hint: "无需逐张审批；有可靠用途和安全判断才供模型选用，管理员禁用优先。发送仍需允许自动发表情。" });
@@ -6483,7 +6722,50 @@
         const library = document.createElement("section"); library.className = "settings-block";
         library.style.overflowWrap = "anywhere";
         library.dataset.experienceLibrary = ""; library.dataset.accountId = policy ? "" : registryState.selected;
-        section.append(library); host.append(section); renderExperienceLibrary(library);
+        section.append(library);
+        if (!policy) {
+          const preview = document.createElement("section"); preview.className = "settings-block";
+          preview.dataset.behaviorPreview = ""; preview.dataset.accountId = registryState.selected;
+          const accountId = registryState.selected;
+          const hint = document.createElement("p"); hint.className = "hint"; hint.textContent = "行为章节与估算成本 · 仅此账号主机预览，不调用模型、不展示人格正文。";
+          preview.append(hint, registryButton("预览此账号行为章节与估算成本", () => loadBehaviorPreview(accountId))); section.append(preview);
+        }
+        host.append(section); renderExperienceLibrary(library);
+      } else if (tab === "qzone" && !policy) {
+        const settings = registryEditable(value).qzone;
+        const section = document.createElement("section"); section.style.gridColumn = "1 / -1";
+        const title = document.createElement("h4"); title.textContent = "QQ 空间 · 此账号独立策略";
+        const note = document.createElement("p"); note.className = "hint"; note.textContent = "默认关闭、仅草稿、仅自己可见。保存仅修改策略，不读取 QQ、不批准、不发布。其他标签与账号草稿保持不变。"; section.append(title, note);
+        const fields = document.createElement("div"); fields.className = "form-grid";
+        const edit = (path, next) => { value.qzone = registryEditable(value).qzone; change(path, next); };
+        for (const [key, label] of [["enabled", "启用空间策略"], ["reads.feeds", "允许显式读取远端私人动态"], ["reads.own", "允许读取自己的空间（含回执核验）"], ["publish.enabled", "允许发布已批准版本"], ["likes.enabled", "允许点赞提案及已批准点赞"], ["comments.enabled", "允许评论提案及已批准评论"]]) registryField(fields, label, `qzone.${key}`, registryGet(settings, key), edit, { type: "checkbox" });
+        registryField(fields, "运行模式", "qzone.mode", settings.mode, edit, { options: [["draft_only", "仅草稿（不执行写入）"], ["reviewed", "逐条审核后执行"]], hint: "已有其他模式原样保留；此页不配置或授予自主发帖权限。" });
+        const audienceControl = registryField(fields, "默认受众", "qzone.ugcRight", String(settings.ugcRight), (path, next) => edit(path, Number(next)), { options: (settings.allowedAudiences || [64]).filter(n => [1, 4, 64].includes(n)).map(n => [String(n), `${n} · ${{ 1: "公开", 4: "好友可见", 64: "仅自己" }[n]}`]), hint: "只提供服务器策略允许的受众；保存默认值不会修改已有草稿的受众。" });
+        section.append(fields);
+        const advanced = document.createElement("details"); advanced.className = "panel-details settings-block";
+        const summary = document.createElement("summary"); summary.textContent = "高级 · 受众权限与频率限制"; advanced.append(summary);
+        const limits = document.createElement("div"); limits.className = "form-grid"; advanced.append(limits);
+        const audiences = settings.allowedAudiences || [64];
+        for (const [number, label] of [[1, "允许逐条批准公开发表（高影响）"], [4, "允许逐条批准好友可见发表"]]) {
+          registryField(limits, label, `qzoneAudience.${number}`, audiences.includes(number), (_path, checked) => {
+            const current = registryEditable(value).qzone, allowed = new Set(current.allowedAudiences);
+            if (checked) allowed.add(number); else allowed.delete(number);
+            allowed.add(64); edit("qzone.allowedAudiences", [...allowed].sort((a, b) => a - b));
+            if (!allowed.has(current.ugcRight)) edit("qzone.ugcRight", 64);
+            audienceControl.replaceChildren(...[...allowed].sort((a, b) => a - b).map(number => {
+              const option = document.createElement("option"); option.value = String(number);
+              option.textContent = `${number} · ${{ 1: "公开", 4: "好友可见", 64: "仅自己" }[number]}`; return option;
+            }));
+            audienceControl.value = String(allowed.has(current.ugcRight) ? current.ugcRight : 64);
+          }, { type: "checkbox", hint: "仅扩大可供逐条审核的受众选项，不批准任何现有草稿；部分好友名单尚不支持。" });
+        }
+        for (const [key, label] of [["reads", "读取"], ["publish", "发表"], ["likes", "点赞"], ["comments", "评论"]]) {
+          registryField(limits, `${label}每日上限（0–20）`, `qzone.${key}.maxDaily`, settings[key].maxDaily, edit, { type: "number" });
+          registryField(limits, `${label}冷却（毫秒）`, `qzone.${key}.cooldownMs`, settings[key].cooldownMs, edit, { type: "number", hint: "0–86400000；受众、额度或开关变化会使旧审批失效，需重新核对。" });
+        }
+        section.append(advanced);
+        const runtime = document.createElement("section"); runtime.className = "settings-block"; runtime.dataset.qzoneRuntime = ""; runtime.dataset.accountId = registryState.selected;
+        section.append(runtime); host.append(section); renderQzoneRuntime(runtime, registryState.selected);
       } else if (tab === "connection") {
         if (!policy) {
           field("协议", "protocol", { options: [["snowluma", "SnowLuma"], ["napcat", "NapCat"]] });
@@ -6505,9 +6787,15 @@
       }
     }
     function registryValidate(value, keys) {
+      if (keys.includes("qzone") && value.qzone !== undefined) {
+        const p = value.qzone;
+        if (!p || typeof p !== "object" || Array.isArray(p) || [p.enabled, p.reads?.feeds, p.reads?.own, p.publish?.enabled, p.likes?.enabled, p.comments?.enabled].some(flag => typeof flag !== "boolean")) throw new Error("空间策略开关须为布尔值");
+        if (!["draft_only", "reviewed", "scoped_autonomy"].includes(p.mode) || ![1, 4, 64].includes(p.ugcRight) || !Array.isArray(p.allowedAudiences) || !p.allowedAudiences.includes(p.ugcRight)) throw new Error("空间策略须有有效模式及策略允许的明确受众");
+      }
       if (keys.includes("socialExperience") && value.socialExperience !== undefined) {
         const p = value.socialExperience;
         if (!p || typeof p !== "object" || Array.isArray(p)) throw new Error("社交表达配置须为对象");
+        if (p.behaviorPreset !== undefined && !["existing", "observant", "balanced", "engaged"].includes(p.behaviorPreset)) throw new Error("社交行为预设无效");
         for (const flag of [p.enabled, p.shadowMode, p.turn?.enabled, p.expression?.enabled, p.expression?.allowQuotes]) if (typeof flag !== "boolean") throw new Error("社交表达开关须为布尔值");
         if (!Array.isArray(p.conversationIds) || p.conversationIds.length > 128 || p.conversationIds.some(id => typeof id !== "string" || !/^(?:group|private):[1-9]\d{0,19}$/.test(id))) throw new Error("社交表达范围最多 128 项，须为 group:数字 或 private:数字（ID 最长 20 位）");
         if (p.enabled && !p.conversationIds.length) throw new Error("启用社交表达前须明确指定会话范围");
@@ -6518,7 +6806,7 @@
         if (t.minWaitMs > t.maxWaitMs || t.maxWaitMs > t.maxTurnMs || [t.ordinaryWaitMs, t.incompleteWaitMs].some(n => n < t.minWaitMs || n > t.maxWaitMs)) throw new Error("等待参数须满足：最短等待 ≤ 普通 / 未完等待 ≤ 等待上限 ≤ 整轮最长等待");
         if (e.minIntervalMs > e.maxIntervalMs) throw new Error("气泡最短间隔不能大于最长间隔");
         if (p.stickers !== undefined) {
-          for (const flag of [p.stickers?.enabled, p.stickers?.autoSend, p.stickers?.visionLearning, p.stickers?.groupLearning, p.stickers?.autonomousEligibility]) if (typeof flag !== "boolean") throw new Error("表情库开关须为布尔值");
+          for (const flag of [p.stickers?.enabled, p.stickers?.autoSend, p.stickers?.interactionEnabled, p.stickers?.visionLearning, p.stickers?.groupLearning, p.stickers?.autonomousEligibility]) if (typeof flag !== "boolean") throw new Error("表情库开关须为布尔值");
           if (!Number.isSafeInteger(p.stickers.maxDailyVisionCalls) || p.stickers.maxDailyVisionCalls < 0 || p.stickers.maxDailyVisionCalls > 100) throw new Error("每日视觉调用上限须为 0–100 的整数");
           if (!Number.isSafeInteger(p.stickers.maxDailyDownloads) || p.stickers.maxDailyDownloads < 0 || p.stickers.maxDailyDownloads > 100) throw new Error("每日学习下载上限须为 0–100 的整数");
           if (!Number.isSafeInteger(p.stickers.cooldownMs) || p.stickers.cooldownMs < 0 || p.stickers.cooldownMs > 86400000) throw new Error("表情冷却须为 0–86400000 毫秒（24 小时）的整数");
@@ -6628,7 +6916,7 @@
       for (const control of host.querySelectorAll("[data-registry-field]")) {
         const path = control.dataset.registryField;
         if (["selected", "context"].includes(path) || registryGet(value, path) === undefined) continue;
-        const transport = registryIdentityKeys.includes(path) && !registryPolicyKeys.includes(path);
+        const transport = path.startsWith("qzone.") || registryIdentityKeys.includes(path) && !registryPolicyKeys.includes(path);
         control.disabled = !!group && !transport;
         if (["protocolContainer", "napcatContainer", "webuiPort", "noVncPort", "vncPort", "snowlumaImage"].includes(path) && value.managed === false) control.disabled = true;
         if (control === document.activeElement) continue;
@@ -6660,7 +6948,7 @@
       }
       if (registryState.contexts[activePage] && (activePage !== "qa" || activeTabs.qa === "persona")) $("saveBtn").classList.add("hidden");
       const button = $("registrySaveTab");
-      if (button) button.disabled = registryState.busy || !registryState.loaded || !!registryState.error || (!!registryGroup(registryState.selected) && registryState.tab !== "connection");
+      if (button) button.disabled = registryState.busy || !registryState.loaded || !!registryState.error || (!!registryGroup(registryState.selected) && !["connection", "qzone"].includes(registryState.tab));
     }
     function registryDraftStatus(id, tab = null) {
       const draft = registryState.drafts.get(id);
@@ -6760,7 +7048,7 @@
       // Polling must never replace any focused control, including save/tab buttons.
       if (!force && registryItem() && host.dataset.accountId === registryState.selected && host.contains(document.activeElement)) {
         const draft = registryDraft(); const group = registryGroup(registryState.selected);
-        if (draft) syncRegistryDraftControls(host, group ? registryEditable(registryEffective(registryItem())) : draft.value, group);
+        if (draft) syncRegistryDraftControls(host, group && registryState.tab !== "qzone" ? registryEditable(registryEffective(registryItem())) : draft.value, group);
         const paused = registryItem().enabled === false;
         const badge = host.querySelector("[data-registry-participation-state]"); if (badge) { badge.textContent = paused ? "已暂停参与" : "参与中"; badge.className = `pill ${paused ? "" : "good"}`; }
         const action = host.querySelector("[data-registry-participation]"); if (action) action.textContent = paused ? "恢复参与" : "暂停参与";
@@ -6790,13 +7078,13 @@
         tabs.append(button);
       }
       host.append(tabs);
-      if (group) { const note = document.createElement("p"); note.className = "warning"; note.textContent = `共享身份与功能由接管组「${group.name}」管理；连接仍属于此账号。请在下方接管组编辑共享策略。`; host.append(note); }
+      if (group) { const note = document.createElement("p"); note.className = "warning"; note.textContent = registryState.tab === "qzone" ? `此账号属于接管组「${group.name}」。此页仅保存当前账号空间策略；实际可执行逻辑身份与当前载体仍由主机校验，不授予独立人格或接管权限。` : `共享身份与功能由接管组「${group.name}」管理；连接仍属于此账号。请在下方接管组编辑共享策略。`; host.append(note); }
       const fields = document.createElement("div"); fields.className = "form-grid";
-      registryFields(fields, group ? registryEditable(registryEffective(item)) : draft.value, registryState.tab, (path, value) => {
+      registryFields(fields, group && registryState.tab !== "qzone" ? registryEditable(registryEffective(item)) : draft.value, registryState.tab, (path, value) => {
         if (draft.saveState?.status !== "saving") draft.saveState = null;
         registrySet(draft.value, path, value); draft.dirty.add(path); renderRegistrySaveState();
         if (path === "managed") renderRegistryEditor(true);
-      }, { disabled: !!group && registryState.tab !== "connection" });
+      }, { disabled: !!group && !["connection", "qzone"].includes(registryState.tab) });
       host.append(fields);
       const note = document.createElement("p"); note.className = draft.conflict ? "warning" : "hint"; note.dataset.registryFeedback = ""; note.setAttribute("role", "status");
       note.textContent = draft.conflict ? "配置修订已变化。草稿保留；保存前将刷新并请求确认。" : registryState.tab === "models" && registryState.modelError ? registryState.modelError : "只保存当前标签，不保存其他账号或其他标签。模型只引用 API 管理中的方案，不包含密钥。"; host.append(note);

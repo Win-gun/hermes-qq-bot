@@ -2,11 +2,11 @@
 // authority inferred from model output. Failover policies use accountPolicy.
 const plain = value => value && typeof value === "object" && !Array.isArray(value);
 const defaults = {
-  enabled: false, shadowMode: true, conversationIds: [],
+  enabled: false, shadowMode: true, conversationIds: [], behaviorPreset: "existing",
   turn: { enabled: true, minWaitMs: 150, maxWaitMs: 4500, ordinaryWaitMs: 700, incompleteWaitMs: 2500, maxTurnMs: 8000 },
   expression: { enabled: true, maxMessages: 2, minIntervalMs: 200, maxIntervalMs: 800, allowQuotes: true },
   stickers: { enabled: false, autoSend: false, visionLearning: false, groupLearning: false,
-    autonomousEligibility: false, maxDailyVisionCalls: 8, maxDailyDownloads: 16, cooldownMs: 60000 },
+    autonomousEligibility: false, interactionEnabled: false, maxDailyVisionCalls: 8, maxDailyDownloads: 16, cooldownMs: 60000 },
   reactions: { enabled: false, cooldownMs: 60000, maxDaily: 30, emojiIds: ["76"] },
   language: { enabled: false, autoCandidates: true, implicitLearning: false },
   interestWatch: { enabled: false, maxDurationMs: 300000, maxActive: 4 },
@@ -19,6 +19,10 @@ const defaults = {
 export function validateSocialExperiencePolicy(value = {}) {
   if (!plain(value) || Object.keys(value).some(key => !Object.hasOwn(defaults, key))) throw new Error("社交表达策略字段无效");
   const result = structuredClone(defaults);
+  if (value.behaviorPreset !== undefined && !["existing", "observant", "balanced", "engaged"].includes(value.behaviorPreset))
+    throw new Error("社交行为预设无效");
+  if (value.behaviorPreset === undefined) delete result.behaviorPreset;
+  else result.behaviorPreset = value.behaviorPreset;
   for (const key of ["enabled", "shadowMode"]) {
     if (value[key] !== undefined && typeof value[key] !== "boolean") throw new Error(`${key} 必须是开关`);
     if (value[key] !== undefined) result[key] = value[key];

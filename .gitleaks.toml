@@ -37,3 +37,10 @@ condition = "AND"
 regexTarget = "secret"
 paths = ['''(^|/)scripts/agent-prompt-self-test\.js$''']
 regexes = ['''^(SYNTHETIC_PRIVATE_MARKER|test-SYNTH_SECRET_123|ghp_synthetic_secret_12345)$''']
+
+[[rules.allowlists]]
+description = "Exact Social Life episode redaction sentinel, not a credential"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''(^|/)scripts/social-episodes-self-test\.js$''']
+regexes = ['''^fixture-marker-9876$''']

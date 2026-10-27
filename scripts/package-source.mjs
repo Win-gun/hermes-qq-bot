@@ -5,6 +5,10 @@ import { root, releaseFiles, checkFiles, checkArchive, report } from "./release-
 
 const sourceFiles = Object.freeze([...new Set([
   ...releaseFiles,
+  "scripts/social-life-behavior-self-test.js", "scripts/social-life-behavior-evaluation.js",
+  "scripts/sticker-interaction-self-test.js", "scripts/poke-observation-self-test.js",
+  "scripts/social-native-wake-self-test.js", "scripts/qzone-self-test.js", "scripts/qzone-draft-self-test.js",
+  "scripts/social-episodes-self-test.js", "scripts/social-life-ui-self-test.js", "scripts/social-life-integration-self-test.js",
   "scripts/agent-life-self-test.js", "scripts/agent-prompt-self-test.js",
   "scripts/digital-life-ui-self-test.js", "scripts/digital-life-integration-self-test.js",
   "scripts/work-capabilities-self-test.js", "scripts/work-backends-self-test.js",

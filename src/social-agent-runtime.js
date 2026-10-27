@@ -36,6 +36,7 @@ export function withSocialExpressionPlan(decision, plan, options) {
 const safeKey = value => typeof value === "string" && /^(account|group):[A-Za-z0-9_.:\-]{1,100}$/.test(value);
 const conversation = value => typeof value === "string" && /^(group|private):[1-9]\d{0,19}$/.test(value);
 const qq = value => typeof value === "string" && /^[1-9]\d{0,19}$/.test(value);
+const nativeWake = value => typeof value === "string" && /^poke_notice:[a-f0-9]{64}$/.test(value);
 const localDay = time => new Date(time + 8 * 3_600_000).toISOString().slice(0, 10);
 const ERROR_CODES = new Set(["SOCIAL_DISABLED", "SOCIAL_CANCELLED", "SOCIAL_TIMEOUT", "SOCIAL_STALE", "SOCIAL_STATE_INVALID",
   "SOCIAL_INVALID_DECISION", "SOCIAL_INVALID_SEQUENCE", "SOCIAL_INVALID_TOOL", "SOCIAL_INVALID_SNAPSHOT",
@@ -193,6 +194,13 @@ function validateDecision(value, seenSeq, allowed, seenMessageIds) {
  * withSocialExpressionPlan attaches a detached, host-validated reply plan only.
  * Raw decision.expressionPlan remains forbidden; the legacy messages string[]
  * schema is unchanged. Only attached plans add expressionPlan to sendIntent.
+ * observe({logicalId,conversationId,nativeWakeId}) is HOST-ONLY metadata. Parent
+ * must first durably set runtime.nativeWakeId to that exact poke_notice digest.
+ * Native turns share this queue/budget/deadline, but not human unread fences.
+ * Their immutable callback scope includes nativeWakeId: ACK/send adapters MUST
+ * skip human watermarks and recheck native-event validity at the wire. Only
+ * reply/observe decisions are accepted, without throughSeq/materialIds/tools,
+ * continuity, interest or future plans. No native event is resumed or polled.
  * Public methods return content-free codes; status never returns model text.
  */
 export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, callModel, tools = {}, sendIntent, isCurrent,
@@ -263,16 +271,17 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
     await write(job, root => {
       const state = runtimeFor(root, job.ctx);
       if (state.turnId !== job.id) throw fail("SOCIAL_STALE");
+      if (job.nativeWakeId && (state.nativeWakeId !== job.nativeWakeId || state.lastNativeWakeId !== job.nativeWakeId)) throw fail("SOCIAL_STALE");
       Object.assign(state, patch, { updatedAt: now() });
     });
   }
   async function terminal(job, decision, seenSeq) {
     if (decision.interest && !guard(job).shadow) {
-      if (job.reflectOnly || job.discoveryWakeId || typeof applyInterest !== "function") throw fail("SOCIAL_INTEREST_REFUSED");
+      if (job.reflectOnly || job.discoveryWakeId || job.nativeWakeId || typeof applyInterest !== "function") throw fail("SOCIAL_INTEREST_REFUSED");
       await bounded(job, () => applyInterest(job.ctx, copy(decision.interest),
         { seenMessageIds: [...job.seenMessageIds], seenSeq, signal: job.controller.signal }));
     }
-    if (decision.continuity && !job.discoveryWakeId && !guard(job).shadow) {
+    if (decision.continuity && !job.discoveryWakeId && !job.nativeWakeId && !guard(job).shadow) {
       if (typeof applyContinuity !== "function") throw fail("SOCIAL_CONTINUITY_REJECTED");
       const result = await bounded(job, () => applyContinuity(job.ctx, copy(decision.continuity),
         { seenMessageIds: [...job.seenMessageIds], now: now(), signal: job.controller.signal }));
@@ -340,7 +349,8 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
         const state = runtimeFor(root, job.ctx);
         // Migrate prior in-flight claims before a new turn can overwrite status.
         // The durable fence survives new input, observe outcomes and restarts.
-        if ((state.status === "intent_claimed" || (state.status === "paused" && state.previousStatus === "intent_claimed"))
+        if (!nativeWake(state.activeNativeWakeId)
+          && (state.status === "intent_claimed" || (state.status === "paused" && state.previousStatus === "intent_claimed"))
           && integer(state.lastProcessedSeq, 0, Number.MAX_SAFE_INTEGER)) {
           state.intentFenceThroughSeq = Math.max(state.intentFenceThroughSeq || 0, state.lastProcessedSeq);
         }
@@ -348,18 +358,23 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
           || (state.status === "paused" && ["waiting", "diving"].includes(state.previousStatus));
         const authorizedDue = job.resumeDue && replayable
           && ["wait", "dive"].includes(state.plannedAction) && Number.isFinite(state.dueAt) && state.dueAt <= now();
-        const uncertain = [state.status, state.status === "paused" ? state.previousStatus : ""]
+        const uncertain = !nativeWake(state.activeNativeWakeId) && [state.status, state.status === "paused" ? state.previousStatus : ""]
           .some(value => ["intent_claimed", "schedule_claimed"].includes(value));
         const sameInput = state.lastInputReadThroughSeq === snapshot.readThroughSeq
           || !Array.isArray(snapshot.messages) || snapshot.messages.length === 0 || uncertain;
-        if (job.discoveryWakeId) {
+        if (job.nativeWakeId) {
+          if (state.nativeWakeId !== job.nativeWakeId || state.lastNativeWakeId === job.nativeWakeId) return false;
+          state.lastNativeWakeId = job.nativeWakeId;
+        } else if (job.discoveryWakeId) {
           // This host-created wake is not a human message or an unread ACK.
           // Claim once durably; never reuse an uncertain wake after restart.
           if (state.discoveryWakeId !== job.discoveryWakeId || state.lastDiscoveryWakeId === job.discoveryWakeId) return false;
           state.lastDiscoveryWakeId = job.discoveryWakeId;
         } else if (integer(state.lastProcessedSeq, seenSeq, Number.MAX_SAFE_INTEGER) && sameInput && !authorizedDue) return false;
         Object.assign(state, { turnId: job.id, status: "running", seenSeq, startedAt: now(),
-          ...(snapshot.readThroughSeq === undefined ? {} : { lastInputReadThroughSeq: snapshot.readThroughSeq }) });
+          ...(job.nativeWakeId || snapshot.readThroughSeq === undefined ? {} : { lastInputReadThroughSeq: snapshot.readThroughSeq }) });
+        if (job.nativeWakeId) state.activeNativeWakeId = job.nativeWakeId;
+        else delete state.activeNativeWakeId;
         delete state.dueAt;
         return true;
       });
@@ -380,11 +395,14 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
         try {
           const raw = await bounded(job, () => {
             invoked = true;
-            return callModel({ context: job.ctx, snapshot: copy({ ...snapshot, seenSeq, toolResults }), tools: copy(descriptors), signal });
+            return callModel({ context: job.ctx, snapshot: copy({ ...snapshot, seenSeq, toolResults }),
+              tools: copy(job.nativeWakeId ? [] : descriptors), signal });
           });
           trustedUsage = plain(raw) ? usageReceipts.get(raw) : undefined;
           if (plain(raw)) usageReceipts.delete(raw);
           try {
+            if (job.nativeWakeId && (!keys(raw, ["action", "messages", "usage"])
+              || !["reply", "observe"].includes(raw.action))) throw fail("SOCIAL_INVALID_DECISION");
             decision = validateDecision(raw, seenSeq, allowed, job.seenMessageIds);
             if (decision.interest && !job.seenMessageIds.includes(job.seenMessages.get(decision.interest.sourceSeq)))
               throw fail("SOCIAL_INVALID_INTEREST");
@@ -440,7 +458,7 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
           continue;
         }
         const patch = { status: decision.action === "wait" ? "waiting" : decision.action === "dive" ? "diving" : "idle",
-          ...(!job.discoveryWakeId ? { lastProcessedSeq: seenSeq } : {}) };
+          ...(!job.discoveryWakeId && !job.nativeWakeId ? { lastProcessedSeq: seenSeq } : {}) };
         if (["wait", "dive"].includes(decision.action)) {
           return await schedule(job, decision.action, decision.delayMs, seenSeq, decision.throughSeq, decision.continuity, undefined, decision.interest);
         }
@@ -459,12 +477,16 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
           await write(job, root => {
             const state = runtimeFor(root, job.ctx);
             if (state.turnId !== job.id) throw fail("SOCIAL_STALE");
+            if (job.nativeWakeId && (state.nativeWakeId !== job.nativeWakeId
+              || state.lastNativeWakeId !== job.nativeWakeId)) throw fail("SOCIAL_STALE");
             const throughSeq = decision.throughSeq ?? seenSeq;
-            if (!job.discoveryWakeId && state.intentFenceThroughSeq !== undefined && (!integer(state.intentFenceThroughSeq, 0, Number.MAX_SAFE_INTEGER)
+            if (!job.discoveryWakeId && !job.nativeWakeId && state.intentFenceThroughSeq !== undefined && (!integer(state.intentFenceThroughSeq, 0, Number.MAX_SAFE_INTEGER)
               || throughSeq <= state.intentFenceThroughSeq)) throw fail("SOCIAL_INTENT_ALREADY_CLAIMED");
             if (job.discoveryWakeId && state.discoveryIntentClaimed === job.discoveryWakeId) throw fail("SOCIAL_INTENT_ALREADY_CLAIMED");
-            Object.assign(state, patch, { status: "intent_claimed", ...(job.discoveryWakeId
-              ? { discoveryIntentClaimed: job.discoveryWakeId } : { intentFenceThroughSeq: throughSeq }), updatedAt: now() });
+            if (job.nativeWakeId && state.nativeIntentClaimed === job.nativeWakeId) throw fail("SOCIAL_INTENT_ALREADY_CLAIMED");
+            Object.assign(state, patch, { status: "intent_claimed", ...(job.nativeWakeId
+              ? { nativeIntentClaimed: job.nativeWakeId } : job.discoveryWakeId
+                ? { discoveryIntentClaimed: job.discoveryWakeId } : { intentFenceThroughSeq: throughSeq }), updatedAt: now() });
           });
           guard(job);
           if (guard(job).shadow) return { code: "SOCIAL_SHADOWED" };
@@ -486,10 +508,12 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
       return { code };
     } finally { if (timer !== undefined) clearTimer(timer); }
   }
-  function observe({ logicalId, conversationId, resumeDue = false, reflectOnly = false, discoveryWakeId } = {}) {
+  function observe({ logicalId, conversationId, resumeDue = false, reflectOnly = false, discoveryWakeId, nativeWakeId } = {}) {
     if (!safeKey(logicalId) || !conversation(conversationId)) return { code: "SOCIAL_INVALID_CONTEXT", queued: false };
     if (discoveryWakeId !== undefined && !/^[A-Za-z0-9:_-]{1,120}$/.test(discoveryWakeId)) return { code: "SOCIAL_INVALID_CONTEXT", queued: false };
-    const ctx = Object.freeze({ logicalId, conversationId });
+    if (nativeWakeId !== undefined && (!nativeWake(nativeWakeId) || discoveryWakeId !== undefined
+      || resumeDue !== false || reflectOnly !== false)) return { code: "SOCIAL_INVALID_CONTEXT", queued: false };
+    const ctx = Object.freeze({ logicalId, conversationId, ...(nativeWakeId ? { nativeWakeId } : {}) });
     try { policyFor(ctx); if (isCurrent(ctx) !== true) throw fail("SOCIAL_STALE"); }
     catch { return { code: "SOCIAL_DISABLED", queued: false }; }
     const key = keyFor(ctx);
@@ -498,7 +522,7 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
     // until the old turn's durable accounting has settled.
     const old = active.get(key);
     if (old) { old.reason = "SOCIAL_CANCELLED"; old.controller.abort(); }
-    pending.set(key, { ctx, resumeDue: resumeDue === true, reflectOnly: reflectOnly === true, discoveryWakeId });
+    pending.set(key, { ctx, resumeDue: resumeDue === true, reflectOnly: reflectOnly === true, discoveryWakeId, nativeWakeId });
     return { code: "SOCIAL_QUEUED", queued: true };
   }
   async function runDue() {
@@ -507,7 +531,8 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
       if (active.size >= 2) break;
       if (active.has(key)) continue;
       pending.delete(key);
-      const job = { key, ctx: request.ctx, resumeDue: request.resumeDue, reflectOnly: request.reflectOnly, discoveryWakeId: request.discoveryWakeId,
+      const job = { key, ctx: request.ctx, resumeDue: request.resumeDue, reflectOnly: request.reflectOnly,
+        discoveryWakeId: request.discoveryWakeId, nativeWakeId: request.nativeWakeId,
         id: `${now()}:${++serial}`, controller: new AbortController(), deadline: Infinity };
       active.set(key, job);
       const operation = run(job).finally(() => { if (active.get(key) === job) active.delete(key); });
