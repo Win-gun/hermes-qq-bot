@@ -255,7 +255,10 @@ try {
       res.resume(); res.on('end',()=>resolve(res.statusCode));
     }); delayed.on('error',reject); delayed.write('{');
   });
-  await pause(150); await policy({maxDailyCalls:999});
+  // Stop new fixture turns while checking the administrative approval path.
+  // Policy cancellation settles asynchronously; a slow CI writer may publish
+  // its final accounting after this PATCH, legitimately changing the state CAS.
+  await pause(150); await policy({enabled:false,maxDailyCalls:999});
   review=(await request(accountUrl)).body;
   delayed.end(JSON.stringify({expectedRevision:proposal.revision,expectedStateRevision:review.revision,decision:'approve'}).slice(1));
   assert.equal(await delayedResponse,409,'slow body cannot overwrite a newer policy using a fresh state revision');
@@ -263,7 +266,18 @@ try {
   const decisionBody={expectedRevision:proposal.revision,expectedStateRevision:review.revision,decision:'approve'};
   assert.equal((await request(resolveUrl,{method:'POST',body:decisionBody,auth:false})).status,403);
   assert.equal((await request(resolveUrl,{method:'POST',body:{...decisionBody,expectedStateRevision:'stale'}})).status,409);
-  assert.equal((await request(resolveUrl,{method:'POST',body:decisionBody})).status,200);
+  // The rejected attempts above are not an approval retry. Obtain the current
+  // review snapshot and submit exactly one actual approval; never relax CAS.
+  await until(async()=> {
+    const health=(await request('/health')).body;
+    return health.memoryStorage?.queuedTransactions===0 && health.memoryStorage?.pending===0;
+  },'fixture repository drains before a fresh approval snapshot');
+  const latestReview=(await request(accountUrl)).body;
+  const pendingProposal=latestReview.state.proposals.find(p=>p.id===proposal.id);
+  assert.equal(pendingProposal?.status,'pending','rejected requests must not claim the proposal');
+  assert.equal(pendingProposal.revision,proposal.revision);
+  const approvalResponse=await request(resolveUrl,{method:'POST',body:{...decisionBody,expectedStateRevision:latestReview.revision}});
+  assert.equal(approvalResponse.status,200,JSON.stringify(approvalResponse.body));
   const approvedConfig=JSON.parse(fs.readFileSync(path.join(home,'config.json'),'utf8'));
   assert.equal(approvedConfig.accounts.items[0].socialAgent.profile.expression,'synthetic approved expression');
   assert.equal(approvedConfig.accounts.items[0].style.systemPrompt,'synthetic-persona','original persona snapshot must survive approval');
