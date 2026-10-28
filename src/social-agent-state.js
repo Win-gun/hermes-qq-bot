@@ -329,6 +329,9 @@ export function appendSocialExperience(root, args = {}) {
   if ((existing?.experiences.length || 0) >= MAX_EXPERIENCES) return fail("backpressure");
   const experience = { messageId: args.messageId, userId: args.userId, text: clean(args.text),
     sentAt: args.sentAt, createdAt: args.now, kind: args.kind, confirmed: true };
+  // Host-only ACK provenance. Legacy or direct-answer observations cannot
+  // silently become evidence of autonomous personal interests.
+  if (args.agencyEligible === true && args.kind === "bot_reply") experience.agencyEligible = true;
   experience.id = socialExperienceId(experience, args);
   ensureConversation(root, args).experiences.push(experience);
   return { ok: true };
