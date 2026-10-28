@@ -295,4 +295,19 @@ await check("official MiMo searched summary grounds citations without granting f
   assert.equal(f.state.items[0].verification, "unverified");
   assert(f.state.items[0].uncertainty);
 });
+await check("agency rejects empty or removed interests without default queries or extra budget", async () => {
+  const empty = fixture({ policy: { interests: [] } });
+  const noFallback = createSocialDiscoveryRuntime({ ...empty.callbacks, allowDefaultTopics: () => false });
+  assert.equal((await noFallback.run(ctx)).code, "DISCOVERY_NO_ELIGIBLE_INTERESTS");
+  assert.equal(empty.searches.length, 0); assert.equal(empty.filters.length, 0);
+  assert.equal(empty.usage?.actualCalls || 0, 0); assert.equal(empty.collected.length, 0);
+  const changing = fixture({ policy: { interests: ["摄影", "科技"] }, search: (_ctx, _query, _options, count) => {
+    if (count === 1) changing.policy.interests = ["摄影"];
+    return evidence(count);
+  } });
+  const bounded = createSocialDiscoveryRuntime({ ...changing.callbacks, allowDefaultTopics: () => false });
+  assert.equal((await bounded.run(ctx)).code, "DISCOVERY_STALE");
+  assert.equal(changing.searches.length, 1); assert.equal(changing.filters.length, 0);
+  assert.equal(changing.collected.length, 0);
+});
 console.log(`social discovery runtime: ${checks} checks passed`);

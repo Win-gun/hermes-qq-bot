@@ -12,7 +12,7 @@ const error = code => Object.assign(new Error(code), { code });
 const CODES = new Set(["DISCOVERY_DISABLED", "DISCOVERY_CANCELLED", "DISCOVERY_TIMEOUT", "DISCOVERY_STALE",
   "DISCOVERY_NOT_IDLE", "DISCOVERY_WINDOW_CLOSED", "DISCOVERY_UNAVAILABLE", "DISCOVERY_INVALID_RESULT",
   "DISCOVERY_PERSISTENCE_FAILED", "DISCOVERY_BUDGET_EXHAUSTED", "DISCOVERY_INTERVAL", "DISCOVERY_DAILY_LIMIT",
-  "DISCOVERY_INVALID_CONTEXT", "DISCOVERY_BUSY", "DISCOVERY_FAILED"]);
+  "DISCOVERY_INVALID_CONTEXT", "DISCOVERY_BUSY", "DISCOVERY_FAILED", "DISCOVERY_NO_ELIGIBLE_INTERESTS"]);
 const safeCode = e => CODES.has(e?.code) ? e.code : "DISCOVERY_FAILED";
 const scopeOf = ctx => ({ logicalId: ctx.logicalId, accountId: ctx.accountId, revision: ctx.revision });
 const stateCode = reason => ({ disabled: "DISCOVERY_DISABLED", outside_window: "DISCOVERY_WINDOW_CLOSED",
@@ -26,11 +26,11 @@ export function withSocialDiscoveryUsage(result, usage) {
 const day = time => new Date(time + 8 * 3600000).toISOString().slice(0, 10);
 // Only short administrator-configured public topic tags are query inputs.
 // Never project root memory, conversations, identifiers or arbitrary ctx fields.
-function queries(policy, time) {
+function queries(policy, time, allowDefaults = true) {
   const tags = (Array.isArray(policy.interests) ? policy.interests : [])
     .filter(x => typeof x === "string" && /^[\p{L}][\p{L}\p{N} ·-]{0,23}$/u.test(x)
       && !/\d{5}|私聊|群聊|聊天|QQ|微信|用户|密码|token|secret|ignore|instruction/i.test(x));
-  const topics = tags.length ? [...new Set(tags)] : ["新奇巧妙的梗 游戏", "科技 趣闻", "生活 创意"];
+  const topics = tags.length ? [...new Set(tags)] : allowDefaults ? ["新奇巧妙的梗 游戏", "科技 趣闻", "生活 创意"] : [];
   return topics.slice(0, Math.min(3, policy.maxSearchesPerRound)).map(x => `${day(time)} ${x} 公开资讯`);
 }
 function publicUrl(value) {
@@ -91,7 +91,7 @@ function evidenceFrom(raw) {
  * startup replay or scheduling timer is created; guards exist only during run.
  */
 export function createSocialDiscoveryRuntime({ getPolicy, getRoot, transact, isCurrent, isIdle, search, filter,
-  onCollected, clock = Date.now } = {}) {
+  onCollected, allowDefaultTopics = () => true, clock = Date.now } = {}) {
   if ([getPolicy, getRoot, transact, isCurrent, isIdle].some(x => typeof x !== "function")) throw error("DISCOVERY_INVALID_CALLBACK");
   const now = typeof clock === "function" ? clock : () => clock.now();
   const setTimer = clock.setTimeout?.bind(clock) || setTimeout;
@@ -184,7 +184,10 @@ export function createSocialDiscoveryRuntime({ getPolicy, getRoot, transact, isC
       job.claimed = true;
       if (typeof job.roundId !== "string" || !job.roundId) throw error("DISCOVERY_PERSISTENCE_FAILED");
       const results = [];
-      for (const query of queries(guard(job), now())) {
+      const selectedQueries = queries(guard(job), now(), allowDefaultTopics(job.ctx) === true);
+      if (!selectedQueries.length) throw error("DISCOVERY_NO_ELIGIBLE_INTERESTS");
+      for (const query of selectedQueries) {
+        if (!queries(guard(job), now(), allowDefaultTopics(job.ctx) === true).includes(query)) throw error("DISCOVERY_STALE");
         const raw = await call(job, "search", () => search(job.ctx, query, { signal: job.controller.signal }));
         results.push(...evidenceFrom(raw));
       }
