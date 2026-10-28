@@ -19,6 +19,11 @@ const messageId = value => {
 const skipped = ack => ack !== null && typeof ack === "object" && !Array.isArray(ack)
   && [Object.prototype, null].includes(Object.getPrototypeOf(ack))
   && Object.keys(ack).length === 1 && Object.hasOwn(ack, "skipped") && ack.skipped === true;
+// The new voice adapter has a deliberately narrow ACK contract. Do not infer
+// success from a transport result with conflicting status or audio metadata.
+const voiceResult = (ack, key) => ack !== null && typeof ack === "object" && !Array.isArray(ack)
+  && [Object.prototype, null].includes(Object.getPrototypeOf(ack))
+  && Reflect.ownKeys(ack).length === 1 && Object.hasOwn(Object.getOwnPropertyDescriptor(ack, key) || {}, "value");
 
 /** Execute ONE host-validated plan ONCE. Never retry the whole result, including
  * sent=0 + uncertain=true. beforeEach owns identity/quiet/revision/quote authority
@@ -26,23 +31,29 @@ const skipped = ack => ack !== null && typeof ack === "object" && !Array.isArray
  * Quote provenance was validated by parseReplyPlan, not this shape check.
  * Cancellation during send still collects that attempt's ACK and persists it.
  * Receipt persistence runs even after abort; failure stops all remaining sends.
+ * allowVoice is host opt-in, not granted by supplying sendVoice. That callback
+ * alone owns synthesis + transport, rechecking identity/quiet/revision/signal
+ * after every pre-wire await. It returns {messageId} only for confirmed delivery,
+ * or exactly {skipped:true} ONLY when proven no wire was attempted. Never return
+ * skipped for an uncertain ACK; it permits a NEW guarded text fallback.
  * sent counts confirmed wire ACKs (not durable receipts); uncertain also covers
  * unknown receipt durability. accepted counts reaction API acceptance, never
  * visible delivery or bot speech. partial counts sent + accepted plan items. */
-export async function executeReplyPlan(plan, { sendText, sendSticker, sendReaction, sendMention, sendPoke,
+export async function executeReplyPlan(plan, { sendText, sendSticker, sendReaction, sendMention, sendPoke, sendVoice, allowVoice = false,
   allowedStickerIds = [], allowedReactionIds = [], allowedMentionIds = [], allowedPokeIds = [], direct = false, beforeEach, onReceipt, signal,
   sleep = wait, minIntervalMs = 800, maxIntervalMs = 2000 } = {}) {
   if (![sendText, beforeEach, onReceipt, sleep].every(fn => typeof fn === "function")) throw new TypeError("INVALID_REPLY_ADAPTER");
   if (![minIntervalMs, maxIntervalMs].every(n => Number.isSafeInteger(n) && n >= 0 && n <= 60000)
     || minIntervalMs > maxIntervalMs) throw new TypeError("INVALID_REPLY_INTERVAL");
   // Copy before any await, so host/model mutations cannot change later messages.
-  const ready = validateReplyPlan(plan, { maxMessages: 4, direct,
+  const ready = validateReplyPlan(plan, { maxMessages: 4, direct, allowVoice,
     allowedStickerIds, allowedReactionIds, allowedMentionIds, allowedPokeIds,
     allowedQuoteIds: plan?.replyToMessageId == null ? [] : [plan.replyToMessageId] });
   if (ready.messages.some(item => item.type === "sticker") && typeof sendSticker !== "function") throw new TypeError("INVALID_REPLY_ADAPTER");
   if (ready.messages.some(item => item.type === "reaction") && typeof sendReaction !== "function") throw new TypeError("INVALID_REPLY_ADAPTER");
   if (ready.messages.some(item => item.type === "poke") && typeof sendPoke !== "function") throw new TypeError("INVALID_REPLY_ADAPTER");
   if (ready.messages.some(item => item.type === "mention") && typeof sendMention !== "function") throw new TypeError("INVALID_REPLY_ADAPTER");
+  if (ready.messages.some(item => item.type === "voice") && typeof sendVoice !== "function") throw new TypeError("INVALID_REPLY_ADAPTER");
   const receipts = [];
   let sent = 0, accepted = 0, uncertain = false;
   const cancelled = () => signal?.aborted === true;
@@ -83,6 +94,7 @@ export async function executeReplyPlan(plan, { sendText, sendSticker, sendReacti
       let ack = type === "reaction" ? await sendReaction(item.reactionId, { signal })
         : type === "poke" ? await sendPoke(item.pokeId, { signal })
         : type === "mention" ? await sendMention(item.mentionId, content, { quoteId, index, signal })
+        : type === "voice" ? await sendVoice(content, { quoteId, index, signal })
         : type === "sticker" ? await sendSticker(item.stickerId, { quoteId, index }) : await sendText(content, { quoteId, index });
       if (native) {
         const valid = ack?.status === "accepted" && typeof ack.actionId === "string" && messageId(ack.actionId) !== null
@@ -92,7 +104,7 @@ export async function executeReplyPlan(plan, { sendText, sendSticker, sendReacti
             ...(messageId(ack.targetMessageId) !== null ? { targetMessageId: ack.targetMessageId } : {}) }
             : { status: ["rejected", "unsupported"].includes(ack?.status) ? ack.status : "uncertain" }) };
       } else {
-        if (type === "sticker" && skipped(ack)) {
+        if (["sticker", "voice"].includes(type) && skipped(ack) && (type !== "voice" || voiceResult(ack, "skipped"))) {
           // No wire attempt and therefore no failed/uncertain receipt. A fallback
           // is a NEW text attempt and must pass the current host guard again.
           if (!content) continue;
@@ -100,8 +112,9 @@ export async function executeReplyPlan(plan, { sendText, sendSticker, sendReacti
           try { if (!await guard() || cancelled()) break; } catch { break; }
           ack = await sendText(content, { quoteId, index });
         }
-        const ambiguousSkip = type === "sticker" && ack && typeof ack === "object" && "skipped" in ack;
-        const id = !ambiguousSkip && ack && typeof ack === "object" ? messageId(ack.messageId) : null;
+        const ambiguousSkip = ["sticker", "voice"].includes(type) && ack && typeof ack === "object" && "skipped" in ack;
+        const id = !ambiguousSkip && ack && typeof ack === "object" && (type !== "voice" || voiceResult(ack, "messageId"))
+          ? messageId(ack.messageId) : null;
         receipt = { index, type, ...(type === "sticker" ? { stickerId: item.stickerId }
           : type === "mention" ? { mentionId: item.mentionId } : {}), content,
           ...(ack === false ? { status: "failed" } : id !== null ? { status: "sent", messageId: id } : { status: "uncertain" }) };

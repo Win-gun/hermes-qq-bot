@@ -7400,7 +7400,8 @@
       const drafts = new Map();
       const views = {};
       const profileKeys = { identity: "身份", selfName: "自称", expression: "表达方式", interests: "兴趣", boundaries: "边界", examples: "表达示例" };
-      const defaults = () => ({ enabled: false, shadowMode: true, conversationIds: [], profile: {}, maxDailyCalls: 1000, maxToolCalls: 8, turnTimeoutMs: 60000, crossConversation: { enabled: false, groupIds: [], userIds: [] } });
+      const roleCardDefaults = () => ({ enabled: false, autoGrow: false, minUpdateIntervalMs: 86400000, maxVersions: 32 });
+      const defaults = () => ({ enabled: false, shadowMode: true, conversationIds: [], profile: {}, roleCard: roleCardDefaults(), maxDailyCalls: 1000, maxToolCalls: 8, turnTimeoutMs: 60000, crossConversation: { enabled: false, groupIds: [], userIds: [] } });
       const modeLabel = p => !p ? "未知" : !p.enabled ? "关闭" : p.shadowMode ? "观察（不发送）" : "主动（受既有权限约束）";
       const node = (tag, text, className) => { const el = document.createElement(tag); if (text !== undefined) el.textContent = String(text); if (className) el.className = className; return el; };
       const button = (text, action) => { const el = node("button", text, "secondary"); el.type = "button"; el.addEventListener("click", action); return el; };
@@ -7419,30 +7420,35 @@
         const d = v.selected ? get(v.selected) : null;
         v.status.textContent = !d ? "请选择账号。" : `已读取的保存模式：${d.savedMode || "未知"} · ${d.error || (d.loading ? "正在加载；已有草稿保留…" : d.busy ? "正在提交…" : `${d.dirty ? "有未保存草稿" : "已读取策略"} · 修订 ${d.revision ?? "未知"}${d.conflict ? " · 需要核对冲突" : ""}${d.notice ? ` · ${d.notice}` : ""}`)}`;
         v.latest.hidden = !d?.conflict || !d?.remotePolicy;
-        v.latest.textContent = d?.remotePolicy ? `服务器最新策略（只读；当前表单仍是本地草稿）\n${JSON.stringify({ mode: modeLabel(d.remotePolicy), conversationIds: d.remotePolicy.conversationIds, profile: Object.fromEntries(Object.keys(profileKeys).map(key => [key, d.remotePolicy.profile?.[key] || ""])), maxDailyCalls: d.remotePolicy.maxDailyCalls, maxToolCalls: d.remotePolicy.maxToolCalls, turnTimeoutMs: d.remotePolicy.turnTimeoutMs, crossConversation: { enabled: d.remotePolicy.crossConversation?.enabled === true, groupIds: d.remotePolicy.crossConversation?.groupIds || [], userIds: d.remotePolicy.crossConversation?.userIds || [] } }, null, 2)}` : "";
+        v.latest.textContent = d?.remotePolicy ? `服务器最新策略（只读；当前表单仍是本地草稿）\n${JSON.stringify({ mode: modeLabel(d.remotePolicy), conversationIds: d.remotePolicy.conversationIds, profile: Object.fromEntries(Object.keys(profileKeys).map(key => [key, d.remotePolicy.profile?.[key] || ""])), roleCard: { ...roleCardDefaults(), ...d.remotePolicy.roleCard }, maxDailyCalls: d.remotePolicy.maxDailyCalls, maxToolCalls: d.remotePolicy.maxToolCalls, turnTimeoutMs: d.remotePolicy.turnTimeoutMs, crossConversation: { enabled: d.remotePolicy.crossConversation?.enabled === true, groupIds: d.remotePolicy.crossConversation?.groupIds || [], userIds: d.remotePolicy.crossConversation?.userIds || [] } }, null, 2)}` : "";
         v.save.disabled = !d || d.revision == null || !d.dirty || d.conflict || d.busy || !!d.loading || !validAccount(v.selected);
         v.rebase.hidden = !d?.conflict;
         v.rebase.disabled = !!d?.loading || !!d?.busy || d?.remoteRevision == null;
+        renderRoleCard();
       }
-      async function load(id) {
+      async function load(id, { signal, headers, accept = () => true } = {}) {
         if (!id || !validAccount(id)) return;
         const d = get(id); if (d.loading) return d.loading;
+        d.policyEpoch = (d.policyEpoch || 0) + 1;
         d.error = "";
-        d.loading = (async () => {
+        const loading = (async () => {
           try {
-            const result = await api(accountPath(id));
+            const result = await api(accountPath(id), { signal, headers });
+            if (signal?.aborted || !accept()) return;
             if (result.ok !== true || result.revision == null || !result.policy || !result.state) throw new Error("invalid_response");
             d.savedMode = modeLabel(result.policy);
+            d.savedRoleCard = { ...roleCardDefaults(), ...result.policy.roleCard };
             if (d.dirty || d.busy) {
               if (d.revision !== result.revision) { d.conflict = true; d.remoteRevision = result.revision; d.remotePolicy = result.policy; }
             } else {
-              d.policy = { ...defaults(), ...structuredClone(result.policy), profile: { ...result.policy.profile }, crossConversation: { ...defaults().crossConversation, ...result.policy.crossConversation } };
+              d.policy = { ...defaults(), ...structuredClone(result.policy), profile: { ...result.policy.profile }, roleCard: { ...roleCardDefaults(), ...result.policy.roleCard }, crossConversation: { ...defaults().crossConversation, ...result.policy.crossConversation } };
               d.revision = result.revision; d.conflict = false;
             }
             d.state = result.state; d.stateRevision = result.revision;
-          } catch (error) { d.error = fail(error); }
-          finally { d.loading = null; renderAccount(id); }
+          } catch (error) { if (!signal?.aborted && accept()) d.error = fail(error); }
+          finally { if (d.loading === loading) { d.loading = null; renderAccount(id); } }
         })();
+        d.loading = loading;
         renderStatus(); return d.loading;
       }
       function edit(id, path, value) {
@@ -7484,6 +7490,9 @@
             const profile = node("details", undefined, "social-profile"); const summary = node("summary", "可选角色卡 · 不覆盖原始提示词"); profile.append(summary); grid.append(profile);
             const profileGrid = node("div", undefined, "form-grid"); profile.append(profileGrid);
             for (const [path, label] of Object.entries(profileKeys)) field(profileGrid, id, label, `profile.${path}`, p.profile?.[path], "textarea");
+            field(profileGrid, id, "启用 AI 自我角色卡（保存后生效）", "roleCard.enabled", p.roleCard?.enabled, "checkbox");
+            field(profileGrid, id, "允许自动成长（保存后生效）", "roleCard.autoGrow", p.roleCard?.autoGrow, "checkbox");
+            profile.append(node("p", "AI 自我角色卡仅补充表达、兴趣和互动示例，从属于原始提示词与静态角色设定；不改变核心身份或权限。生成入口在问答页。", "hint"));
             const cross = node("details", undefined, "social-profile"); cross.append(node("summary", "跨会话联系 · 显式范围与收件人同意")); grid.append(cross);
             const crossGrid = node("div", undefined, "form-grid"); cross.append(crossGrid);
             field(crossGrid, id, "允许提出跨会话联系", "crossConversation.enabled", p.crossConversation.enabled, "checkbox");
@@ -7507,11 +7516,12 @@
         const id = views.policy.selected; if (!validAccount(id)) return;
         const d = get(id); if (!d.dirty || d.busy || d.loading || d.conflict || d.revision == null) return;
         try { validate(d.policy); } catch (error) { d.error = error.message; renderStatus(); return; }
-        const version = d.version; d.busy = true; d.error = ""; renderPolicy();
+        const version = d.version, policy = structuredClone(d.policy); d.policyEpoch = (d.policyEpoch || 0) + 1; d.busy = true; d.error = ""; renderPolicy();
         try {
-          const result = await api(accountPath(id), { method: "PATCH", body: JSON.stringify({ expectedRevision: d.revision, policy: structuredClone(d.policy) }) });
+          const result = await api(accountPath(id), { method: "PATCH", body: JSON.stringify({ expectedRevision: d.revision, policy }) });
           if (result.ok !== true || result.revision == null) throw new Error("invalid_response");
           d.savedMode = modeLabel(result.policy || d.policy);
+          d.savedRoleCard = { ...roleCardDefaults(), ...(result.policy || policy).roleCard };
           d.revision = result.revision; if (d.version === version) { d.dirty = false; d.profileDirty = false; }
           d.notice = "已保存；未扩大已有功能或发送权限";
         } catch (error) { d.error = fail(error); if (error.status === 409) { d.conflict = true; d.remoteRevision = null; } }
@@ -7635,6 +7645,102 @@
         } catch (error) { if (views[kind === "plan" ? "plans" : "audit"].selected === id) status.textContent = fail(error); /* No uncertain mutation replay. */ }
         finally { if (kind !== "plan") { d.busy = false; renderPolicy(); } /* Disabled until explicit refresh, including on failure. */ }
       }
+      // Explicit-only runtime snapshots. Never project generated fields into policy drafts.
+      const roleCards = new Map();
+      const roleCardState = id => {
+        if (!roleCards.has(id)) roleCards.set(id, { topic: "", snapshot: null, busy: false, blocked: false, error: "", epoch: 0 });
+        return roleCards.get(id);
+      };
+      function roleCardReady(id, { generate = false, allowUnloaded = false } = {}) {
+        const d = drafts.get(id), accountDraft = registryState.drafts?.get(id);
+        return validAccount(id) && registryState.contexts.qa === id && (d?.revision != null || (allowUnloaded && !generate))
+          && (!generate || (d?.savedRoleCard?.enabled === true && d.policy.roleCard?.enabled === true))
+          && !d?.dirty && !d?.conflict && !d?.busy && !d?.loading && (!d?.error || (allowUnloaded && d.revision == null))
+          && !accountDraft?.dirty?.size && !accountDraft?.conflict && !registryState.busy;
+      }
+      function renderRoleCard() {
+        const v = views.qa; if (!v?.role) return;
+        const id = registryState.contexts.qa, d = drafts.get(id);
+        if (v.roleAccount !== id) {
+          v.roleAccount = id; v.roleEpoch = (v.roleEpoch || 0) + 1;
+          v.topic.value = id ? roleCardState(id).topic : "";
+        }
+        const c = id ? roleCardState(id) : null, ready = roleCardReady(id);
+        const current = c?.snapshot && c.snapshot.policyRevision === d?.revision && c.snapshot.registryEpoch === registryState.epoch;
+        v.roleStatus.textContent = !id ? "请先选择问答账号。" : c.error || (c.busy ? "正在处理；请勿重复提交…" : !ready ? (roleCardReady(id, { allowUnloaded: true }) ? "此账号策略尚未加载；点击「加载策略并刷新角色卡」即可只读查看。" : "请先处理未保存草稿、修订冲突或策略加载错误。") : c.blocked ? "上次操作未确认；请先手动刷新角色卡核对，不会自动重试。" : current ? `账号 ${id} · 配置修订 ${c.snapshot.revision} · 已读取角色卡${!roleCardReady(id, { generate: true }) || !c.snapshot.enabled ? " · 策略关闭，仅查看历史；生成需先保存启用" : ""}` : "尚未读取当前修订；请手动刷新角色卡。");
+        v.roleStatus.className = c?.error ? "warning" : "hint";
+        v.topic.disabled = !validAccount(id) || !!c?.busy;
+        v.refreshRole.textContent = d?.revision == null ? "加载策略并刷新角色卡（只读）" : "刷新角色卡（只读）";
+        v.refreshRole.disabled = !roleCardReady(id, { allowUnloaded: true }) || !!c?.busy;
+        v.generateRole.disabled = !roleCardReady(id, { generate: true }) || !!c?.busy || !!c?.blocked || !current || !c?.snapshot?.enabled;
+        v.rolePreview.replaceChildren();
+        if (!c?.snapshot) { v.rolePreview.append(node("p", "尚无角色卡快照。", "hint")); return; }
+        const card = c.snapshot.card, last = card.versions[card.versions.length - 1];
+        v.rolePreview.append(node("p", `角色卡修订 ${card.revision}${current ? "" : " · 旧快照，请刷新核对"} · 最近原因：${last?.reason || "暂无"}`, "hint"));
+        for (const key of ["expression", "interests", "examples"]) {
+          const line = node("p", `${profileKeys[key]}：${card.fields[key] || "尚未生成"}`); line.setAttribute("style", "white-space: pre-wrap; overflow-wrap: anywhere"); v.rolePreview.append(line);
+        }
+      }
+      async function roleCardOperation(id, generate = false) {
+        const c = roleCardState(id), v = views.qa;
+        if (!roleCardReady(id, { generate, allowUnloaded: !generate }) || c.busy) return;
+        const d = get(id), bootstrap = d.revision == null;
+        if (generate && (c.blocked || !c.snapshot?.enabled || c.snapshot.policyRevision !== d.revision || c.snapshot.registryEpoch !== registryState.epoch)) return;
+        if (generate && c.topic.length > 1000) { c.error = "主题最多 1000 字；输入已保留。"; renderRoleCard(); return; }
+        if (generate && !confirm(`确认生成并立即采用账号「${id}」的 AI 自我角色卡？\n可能产生一次模型调用费用；仅更新表达、兴趣和示例，不更改核心身份，不发 QQ 消息、不使用本机工具。`)) return;
+        // Social-state hashes fence local drafts only; role-card CAS uses the
+        // independent config revision returned by its own GET endpoint.
+        let policyRevision = d.revision, policyEpoch = d.policyEpoch;
+        const configRevision = c.snapshot?.revision, cardRevision = c.snapshot?.card.revision;
+        const version = d.version, topic = c.topic, registryEpoch = registryState.epoch, selectionEpoch = v.roleEpoch, epoch = ++c.epoch;
+        const controller = new AbortController(); let timer, bootstrapLoading;
+        const fenced = () => c.epoch === epoch && v.roleEpoch === selectionEpoch && registryState.epoch === registryEpoch
+          && d.version === version && validAccount(id) && registryState.contexts.qa === id;
+        const current = () => fenced() && d.revision === policyRevision && d.policyEpoch === policyEpoch
+          && roleCardReady(id, { generate, allowUnloaded: !generate });
+        c.busy = true; c.error = ""; renderRoleCard();
+        try {
+          // Bound auth bootstrap too. A timed-out or invalidated auth wait must
+          // never start a late POST; the shared api helper still owns transport.
+          const request = (async () => {
+            const token = await ensureAdminSession();
+            if (controller.signal.aborted || !current()) throw new Error("stale_request");
+            if (bootstrap) {
+              const pending = load(id, { signal: controller.signal, headers: { "x-hermes-qq-admin": token }, accept: fenced });
+              bootstrapLoading = d.loading;
+              await pending;
+              if (controller.signal.aborted || !fenced() || !roleCardReady(id)) throw new Error("stale_policy");
+              policyRevision = d.revision; policyEpoch = d.policyEpoch;
+            }
+            if (!current()) throw new Error("stale_request");
+            return api(`${accountPath(id)}/role-card${generate ? "/generate" : ""}`, {
+              method: generate ? "POST" : "GET", signal: controller.signal,
+              headers: { "x-hermes-qq-admin": token },
+              ...(generate ? { body: JSON.stringify({ expectedRevision: configRevision, cardRevision, topic }) } : {})
+            });
+          })();
+          const timeout = new Promise((_resolve, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error("request_timeout")); }, generate ? 65000 : 20000); });
+          const result = await Promise.race([request, timeout]);
+          if (!current() || result.ok !== true || typeof result.revision !== "string" || !result.revision.trim()
+            || (generate ? result.revision !== configRevision : typeof result.policy?.enabled !== "boolean")
+            || !Number.isSafeInteger(result.card?.revision) || result.card.revision < 0 || !result.card.fields || Array.isArray(result.card.fields)
+            || Object.entries({ expression: 800, interests: 800, examples: 2000 }).some(([key, max]) => result.card.fields[key] !== undefined && (typeof result.card.fields[key] !== "string" || result.card.fields[key].length > max))
+            || !Array.isArray(result.card.versions) || result.card.versions.length > 64) throw new Error("stale_response");
+          c.snapshot = { revision: result.revision, policyRevision, registryEpoch, enabled: generate ? c.snapshot.enabled : result.policy.enabled, card: structuredClone(result.card) }; c.blocked = false;
+        } catch (error) {
+          if (c.epoch === epoch) {
+            c.blocked = true;
+            c.error = error.status === 403 ? "管理员会话不可用；主题保留，请手动刷新核对，不会自动重试。"
+              : error.status === 409 ? "修订冲突；主题保留，请刷新账号策略和角色卡核对，不会自动重试。"
+                : "角色卡请求失败、超时或状态已变化；结果未确认，主题保留。请手动刷新核对，不会自动重试。";
+          }
+        } finally {
+          clearTimeout(timer); controller.abort();
+          if (bootstrapLoading && d.loading === bootstrapLoading) d.loading = null;
+          if (c.epoch === epoch) { c.epoch++; c.busy = false; }
+          renderRoleCard();
+        }
+      }
       function renderQa() {
         const v = views.qa; if (!v) return;
         const id = registryState.contexts.qa; const d = id ? drafts.get(id) : null;
@@ -7645,6 +7751,7 @@
           if (!v.body.firstChild) v.body.append(node("p", "尚未填写可选角色卡。", "hint"));
         } else v.body.append(node("p", "可选角色卡尚未加载；到账号功能编辑。", "hint"));
         v.edit.disabled = !validAccount(id);
+        renderRoleCard();
       }
       function renderAccount(id) { if (views.policy?.selected === id) renderPolicy(); if (views.audit?.selected === id) renderAudit(); renderQa(); }
       function select(kind, id) {
@@ -7701,6 +7808,16 @@
         const status = node("p", "", "hint"); const body = node("div");
         const editButton = button("编辑此账号角色卡", () => { const id = registryState.contexts.qa; switchPage("account-functions"); select("policy", id); views.policy.host.scrollIntoView({ block: "start" }); });
         views.qa = { host, status, body, edit: editButton }; host.append(status, body, editButton); $("page-qa").append(host);
+        const role = node("section", undefined, "settings-block"); role.append(node("h4", "AI 自我角色卡 · 互动偏好"));
+        role.append(node("p", "仅补充表达、兴趣与示例，从属于原始提示词和静态角色设定，不改核心身份。生成会立即采用，可能调用一次模型；不发 QQ 消息、不使用本机工具。自动成长须另行保存开启。", "hint"));
+        const roleStatus = node("p", "", "hint"); roleStatus.setAttribute("role", "status"); roleStatus.setAttribute("aria-live", "polite");
+        const rolePreview = node("div"), topicLabel = node("label", "可选生成主题 · 最多 1000 字"), topic = node("textarea"); topicLabel.htmlFor = topic.id = "social-role-card-topic"; topic.maxLength = 1000;
+        topic.addEventListener("input", () => { const id = views.qa.roleAccount; if (id && id === registryState.contexts.qa) roleCardState(id).topic = topic.value; });
+        const actions = node("div", undefined, "row");
+        const refreshRole = button("刷新角色卡（只读）", () => roleCardOperation(registryState.contexts.qa));
+        const generateRole = button("生成并采用角色卡…", () => roleCardOperation(registryState.contexts.qa, true));
+        Object.assign(views.qa, { role, roleStatus, rolePreview, topic, refreshRole, generateRole });
+        const topicField = node("div", undefined, "field"); topicField.append(topicLabel, topic); actions.append(refreshRole, generateRole); role.append(roleStatus, rolePreview, topicField, actions); host.append(role);
         window.addEventListener("beforeunload", event => { if ([...drafts.values()].some(d => d.dirty)) { event.preventDefault(); event.returnValue = ""; } });
         sync(); renderPolicy(); renderAudit();
       }

@@ -4,12 +4,14 @@ import { validateDiscoveryPolicy } from "./social-discovery-state.js";
 import { validateSocialExperiencePolicy } from "./social-experience-policy.js";
 import { digitalLifePolicy } from "./digital-life-policy.js";
 import { validateQzonePolicy } from "./qzone-policy.js";
+import { normalizeRoleCardPolicy } from "./self-role-card.js";
 
 // Validate writes before normalizing. In particular, never coerce enable flags
 // or silently broaden a malformed scope into a working autonomous policy.
 export function validateSocialAgentPolicy(value) {
   const plain = x => x && typeof x === "object" && !Array.isArray(x);
-  if (!plain(value) || Object.keys(value).some(k => !["enabled", "shadowMode", "conversationIds", "profile", "maxDailyCalls", "maxToolCalls", "turnTimeoutMs", "crossConversation", "discovery"].includes(k))) throw new Error("socialAgent 策略字段无效");
+  if (!plain(value) || Object.keys(value).some(k => !["enabled", "shadowMode", "conversationIds", "profile", "roleCard", "maxDailyCalls", "maxToolCalls", "turnTimeoutMs", "crossConversation", "discovery"].includes(k))) throw new Error("socialAgent 策略字段无效");
+  if (value.roleCard !== undefined) normalizeRoleCardPolicy(value.roleCard);
   if (value.discovery !== undefined && !validateDiscoveryPolicy(value.discovery).ok) throw new Error("采风策略无效");
   for (const k of ["enabled", "shadowMode"]) if (value[k] !== undefined && typeof value[k] !== "boolean") throw new Error(`${k} 必须是开关`);
   if (value.conversationIds !== undefined && (!Array.isArray(value.conversationIds) || value.conversationIds.length > 128 || value.conversationIds.some(x => typeof x !== "string" || !/^(group|private):[1-9]\d{0,19}$/.test(x)))) throw new Error("社交范围必须是显式规范会话 ID");

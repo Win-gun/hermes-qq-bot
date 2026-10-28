@@ -104,7 +104,7 @@ const realFunctions = [
   "stableMessageFingerprint", "accountScopedInboundKey", "claimConversationMessage", "messageTiming", "extractReplyMessageIds",
   "messageDebounceConfig", "isLikelyIncompleteInput", "shouldWaitForMoreInput", "flushDebouncedMessage", "enqueueDebouncedMessage", "pendingDebouncedContext", "orderedHistory", "mergeReplyCurrents",
   "quietUntil", "isQuiet", "repairInvalidQuietUntil", "parseDurationMs", "formatDuration", "isGroupAdmin", "handleBotCommand", "handleMemoryVerificationCommand",
-  "sameLogicalAccount", "recordBotMessage", "lastBotMessageForAccount", "sendGroupMessage", "deliverChatExpression", "lastNonBotMessage", "lastNonBotMessagesSince", "scoreImplicitReplyAgainstBotMessage", "isMediaOnlyText"
+  "sameLogicalAccount", "recordBotMessage", "lastBotMessageForAccount", "sendGroupMessage", "aiVoicePlanAllowed", "deliverChatExpression", "lastNonBotMessage", "lastNonBotMessagesSince", "scoreImplicitReplyAgainstBotMessage", "isMediaOnlyText"
 ];
 
 function harness(config = fixtureConfig(), mutation = {}) {

@@ -1,8 +1,19 @@
 # Hermes QQ Bot 桌面应用
 
+## beta.28（自主互动与自写成长卡）
+
+当前源码版本为 `1.0.0-beta.28`。账号可独立启用 AI 自写成长卡，逐步完善表达、
+兴趣和互动示例，保留原始提示词、核心身份及版本历史。问答页提供只读加载和
+显式生成采用；多人群仍通过 `/bot a`、`/bot b` 定向管理。
+
+已授权的 mixed 语音会话可由 AI 选择语音，沿用当前模型及同一自主预算。
+quiet、停止、实际协议能力、来源证据、账号隔离和发送闸门仍是执行边界。
+新功能默认关闭，安装或更新不会自动扩大账号、群聊、跨会话私聊或公开空间权限。
+详见 [自写成长卡契约与验收](SELF-ROLE-CARDS.md)。
+
 ## beta.27（Social Life 3.1）
 
-当前源码版本为 `1.0.0-beta.27`。本版增加有界表情互动、真实拍一拍事件唤醒、
+该版源码版本为 `1.0.0-beta.27`。本版增加有界表情互动、真实拍一拍事件唤醒、
 按账号隔离的空间草稿与审核流程，以及可追溯社交经历；具体能力和未完成门槛见
 [Social Life 3.1](SOCIAL-LIFE-3.1.md)。这些能力不等于空间自动公开发帖已启用。
 
@@ -28,7 +39,7 @@ npm run app:package
 npm run app:make
 ```
 
-`app:package` 生成 `out/` 下的应用包；`app:make` 生成 `out/make/` 下的 arm64 ZIP 与 DMG。若已有应用正在从默认 `out/` 运行，先设置 `HERMES_QQ_BUILD_OUT=out/parity-dev`，避免覆盖运行中的应用。打开 DMG 后将 App 拖入“应用程序”，再从该目录启动。当前代码版本是 `1.0.0-beta.24`（包含 [Social Experience 2.1](SOCIAL-EXPERIENCE-2.1.md)、[可靠性审查修复](AUDIT-REMEDIATION.md)、[记忆核实及学习升级](MEMORY-VERIFICATION.md)、[按账号自主社交与人格提案](SOCIAL-AGENT.md)、[社交表达及群表情学习](SOCIAL-EXPERIENCE-2.md)、凭据管理及文本调用优化）；测试版采用 ad-hoc 签名，未完成 Apple 公证或跨设备验收。首次打开可能需要在 Finder 中右键应用并选择“打开”。
+`app:package` 生成 `out/` 下的应用包；`app:make` 生成 `out/make/` 下的 arm64 ZIP 与 DMG。若已有应用正在从默认 `out/` 运行，先设置 `HERMES_QQ_BUILD_OUT=out/parity-dev`，避免覆盖运行中的应用。打开 DMG 后将 App 拖入“应用程序”，再从该目录启动。当前代码版本是 `1.0.0-beta.28`，包括[自写成长卡](SELF-ROLE-CARDS.md)、[Social Life 3.1](SOCIAL-LIFE-3.1.md)、[Social Experience 2.1](SOCIAL-EXPERIENCE-2.1.md)、[可靠性审查修复](AUDIT-REMEDIATION.md)、[记忆核实及学习升级](MEMORY-VERIFICATION.md)、[按账号自主社交与人格提案](SOCIAL-AGENT.md)、[社交表达及群表情学习](SOCIAL-EXPERIENCE-2.md)、凭据管理及文本调用优化。测试版采用 ad-hoc 签名，未完成 Apple 公证或跨设备验收。首次打开可能需要在 Finder 中右键应用并选择“打开”。
 
 `beta.15` 修复了其他 API 草稿误拦截密钥保存、Keychain 空值写入及新建模型方案默认关联错误连接的问题。旧版已保存的空凭据需要在本机重新录入；新写入会回读核对，成功后才显示已配置。页面 Keychain 写入支持单行可打印 ASCII，完整转义命令上限为 4000 字节，超出限制应使用环境变量配置；不会截断后写入。新增方案保持为草稿，不会自动切换功能或账号的线上模型绑定。
 

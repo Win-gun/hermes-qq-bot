@@ -1,6 +1,6 @@
 {
   "name": "qq-hermes-onebot-bridge",
-  "version": "1.0.0-beta.27",
+  "version": "1.0.0-beta.28",
   "description": "Local desktop manager and OneBot bridge for Hermes-powered QQ bots",
   "main": "desktop/main.cjs",
   "private": true,
@@ -22,6 +22,7 @@
     "test:group-stickers": "node scripts/sticker-cache-self-test.js && node scripts/group-sticker-learning-self-test.js && node scripts/message-reactions-self-test.js",
     "test:social-experience-21": "npm run test:social-experience && node scripts/sticker-semantic-evaluation-self-test.js && node scripts/conversation-turn-self-test.js && node scripts/social-interest-watch-self-test.js && node scripts/social-style-context-self-test.js && node scripts/native-social-actions-self-test.js && node scripts/forward-context-self-test.js && node scripts/social-experience-21-evaluation-self-test.js",
     "test:social-life-31": "node scripts/agent-prompt-self-test.js && node scripts/social-life-behavior-self-test.js && node scripts/sticker-interaction-self-test.js && node scripts/poke-observation-self-test.js && node scripts/social-native-wake-self-test.js && node scripts/qzone-self-test.js && node scripts/qzone-draft-self-test.js && node scripts/social-episodes-self-test.js && node scripts/social-life-ui-self-test.js && node scripts/social-life-integration-self-test.js",
+    "test:self-role-card": "node scripts/self-role-card-self-test.js && node scripts/self-role-card-generator-self-test.js && node scripts/self-role-card-ui-self-test.js && node scripts/reply-plan-voice-self-test.js && node scripts/self-role-card-bridge-guards-self-test.js && node scripts/self-role-card-integration-self-test.js",
     "social:evaluate:21": "node scripts/social-experience-21-evaluation.js",
     "test:features": "node scripts/bot-capabilities-self-test.js && node scripts/automation-rules-self-test.js && node scripts/voice-intent-self-test.js && node scripts/voice-credentials-self-test.js && node scripts/voice-service-self-test.js && node scripts/voice-onebot-self-test.js && node scripts/voice-mode-self-test.js && node scripts/voice-consent-self-test.js && node scripts/voice-design-self-test.js && node scripts/task-web-policy-self-test.js && node scripts/new-features-integration-self-test.js",
     "test:backup": "node scripts/backup-service-self-test.js",

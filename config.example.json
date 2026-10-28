@@ -87,6 +87,7 @@
       "socialAgent": {
         "enabled": false,
         "shadowMode": true,
+        "roleCard": { "enabled": false, "autoGrow": false, "minUpdateIntervalMs": 86400000, "maxVersions": 32 },
         "conversationIds": [],
         "profile": { "identity": "", "selfName": "", "expression": "", "interests": "", "boundaries": "", "examples": "" },
         "maxDailyCalls": 1000,
