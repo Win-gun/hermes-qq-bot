@@ -10152,11 +10152,12 @@ async function main() {
       if (result.ok && proposal.publicDraft && policy.agency.publicDrafts && scope.offeredDiscoveryIds.includes(proposal.publicDraft.materialId)) {
         const candidate = buildAgencyQzoneCandidate(memory, { ...base, ...proposal.publicDraft, audience: 64 });
         if (candidate.ok) {
-          const zone = qzoneCapture(scope.accountId);
-          if (zone && qzoneCurrent(zone) && !signal.aborted && socialCurrent(ctx)) {
+          const zone = qzoneRuntime.open(scope.accountId);
+          if (zone?.policy.enabled && qzoneCurrent(zone) && !signal.aborted && socialCurrent(ctx)) {
             // Local draft only. No autonomy authorization, publish, interaction,
             // private feed read or extra model call is introduced here.
-            await qzoneRuntime.createDraft(zone, candidate.draft);
+            try { await qzoneRuntime.createDraft(zone, candidate.draft); }
+            catch (error) { if (error.message !== "QZONE_DUPLICATE") throw error; }
             requireSocialCurrent(ctx, signal);
           }
         }
@@ -10185,6 +10186,7 @@ async function main() {
         const autoGrowth = socialPolicy(scope.accountId).agency.enabled && growthPolicy.enabled && growthPolicy.autoGrow && !socialPolicy(scope.accountId).shadowMode
           && ctx.conversationId.startsWith("group:") && !scope.contactSource;
         let growthCode;
+        let acceptedAutoChanges = [];
         if (autoGrowth && selfChanges.length) {
           const card = getSelfRoleCard(local, { logicalId: ctx.logicalId });
           let fields;
@@ -10196,11 +10198,12 @@ async function main() {
             evidenceMessageIds: [...new Set([...selfChanges.flatMap(change => change.evidenceMessageIds),
               ...getSocialPreferences(local, { logicalId: ctx.logicalId, now, kind: "self" }).entries
                 .filter(entry => entry.status === "active" && selfChanges.some(change => change.value.split(/[,，、;；\n]/).map(x => x.trim()).includes(entry.value)))
-                .flatMap(entry => entry.evidence.map(ref => ref.messageId))])].slice(0, 32),
+                .flatMap(entry => entry.evidence.map(ref => ref.messageId))])],
             now, policy: growthPolicy }) : { ok: false, code: "ROLE_CARD_INVALID_GROWTH" };
           growthCode = growth.ok ? "ROLE_CARD_APPLIED" : growth.code;
+          if (growth.ok) acceptedAutoChanges = selfChanges;
         }
-        const reviewedChanges = autoGrowth ? personaChanges?.filter(change => !selfChanges.includes(change)) : personaChanges;
+        const reviewedChanges = autoGrowth ? personaChanges?.filter(change => !acceptedAutoChanges.includes(change)) : personaChanges;
         if (reviewedChanges?.length) {
           const result = proposePersonaChanges(local, { ...ctx, userId: scope.userId,
             changes: reviewedChanges.map(change => ({ ...change, value: redactSensitive(change.value, config, { force: true }) })),

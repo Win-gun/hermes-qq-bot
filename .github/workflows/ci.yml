@@ -34,6 +34,7 @@ jobs:
       - run: npm run test:social-experience-21
       - run: npm run test:social-life-31
       - run: npm run test:self-role-card
+      - run: npm run test:social-agency-32
       - run: npm run test:text-completion
       - run: npm run test:accounts
         timeout-minutes: 4

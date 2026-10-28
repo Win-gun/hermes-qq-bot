@@ -243,15 +243,15 @@ await check("reply: prepare -> exactly one existing send -> complete, detached m
 for (const action of ["wait", "dive"]) {
   await check(`${action}: forwards agency to terminal once; does not self-wake`, async () => {
     const f = fixture({ decision: terminal(action) });
-    assert.equal(await f.run(), "SOCIAL_WAITING"); assertMetadata(f, action, ["complete"]);
-    assert.deepEqual(f.order, ["model", `schedule:${action}`, "agency:complete", `decision:${action}`]);
-    assert.equal(f.sends.length, 0); assert.equal(f.schedules.length, 1);
+    assert.equal(await f.run(), "SOCIAL_COMPLETED"); assertMetadata(f, "observe", ["complete"]);
+    assert.deepEqual(f.order, ["model", "agency:complete", "decision:observe"]);
+    assert.equal(f.sends.length, 0); assert.equal(f.schedules.length, 0);
     assert.deepEqual(f.agencies[0].proposal, proposal());
     f.clock.advance(2000); assert.deepEqual(await f.runtime.runDue(), []);
     assert.equal(f.models.length, 1); assert.equal(f.agencies.length, 1);
     const restarted = f.restart(); assert.deepEqual(await restarted.runDue(), []);
     assert.equal(await f.run({}, restarted), "SOCIAL_ALREADY_PROCESSED");
-    assert.equal(f.schedules.length, 1); assert.equal(f.agencies.length, 1);
+    assert.equal(f.schedules.length, 0); assert.equal(f.agencies.length, 1);
   });
 }
 
@@ -470,7 +470,7 @@ await check("AGENCY REGRESSION due wait without fresh related input must not con
   let offered = [];
   const f = fixture({
     model: f => {
-      if (f.models.length === 1) return terminal("wait");
+      if (f.models.length === 1) return terminal("wait", {});
       offered = agencySnapshot(memory, { ...currentBase(f), userId: "701", query: "太空探索", coreText: "" }).intentions;
       assert.equal(offered.length, 1, "old-topic prompt offered the newly stored candidate without a new message");
       return reply({ useIntentIds: [offered[0].id] });
@@ -481,6 +481,7 @@ await check("AGENCY REGRESSION due wait without fresh related input must not con
         seenMessageIds: originalIds, ownEvidenceIds: [], materialIds: [], offeredIntentIds: offered.map(e => e.id) }),
   });
   assert.equal(await f.run(), "SOCIAL_WAITING");
+  assert(proposeSocialIntent(memory, { ...currentBase(f), ...proposal().intents[0], expectedRevision: 0 }).ok);
   const beforeMessages = clone(memory.socialAgents.bots[CTX.logicalId].conversations[CTX.conversationId].messages);
   f.clock.advance(1000);
   const result = await f.run({ resumeDue: true });

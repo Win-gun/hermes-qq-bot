@@ -471,6 +471,17 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
         }
         const patch = { status: decision.action === "wait" ? "waiting" : decision.action === "dive" ? "diving" : "idle",
           ...(!job.discoveryWakeId && !job.nativeWakeId ? { lastProcessedSeq: seenSeq } : {}) };
+        // A retained thought is passive state, not a reason to install a timer.
+        // Only a fresh event may reconsider it. Keep legacy explicit scheduling
+        // without journal proposals unchanged.
+        if (["wait", "dive"].includes(decision.action) && decision.agency?.intents?.length) {
+          const shadow = guard(job).shadow;
+          await finish(job, { ...patch, status: shadow ? "shadow" : "idle", dueAt: null, plannedAction: null });
+          await terminal(job, { ...decision, action: "observe" }, seenSeq);
+          if (shadow) return { code: "SOCIAL_SHADOWED" };
+          metrics.completed += 1;
+          return { code: "SOCIAL_COMPLETED" };
+        }
         if (["wait", "dive"].includes(decision.action)) {
           return await schedule(job, decision.action, decision.delayMs, seenSeq, decision.throughSeq, decision.continuity, undefined, decision.interest, decision.agency);
         }

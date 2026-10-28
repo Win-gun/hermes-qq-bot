@@ -7401,7 +7401,8 @@
       const views = {};
       const profileKeys = { identity: "身份", selfName: "自称", expression: "表达方式", interests: "兴趣", boundaries: "边界", examples: "表达示例" };
       const roleCardDefaults = () => ({ enabled: false, autoGrow: false, minUpdateIntervalMs: 86400000, maxVersions: 32 });
-      const defaults = () => ({ enabled: false, shadowMode: true, conversationIds: [], profile: {}, roleCard: roleCardDefaults(), maxDailyCalls: 1000, maxToolCalls: 8, turnTimeoutMs: 60000, crossConversation: { enabled: false, groupIds: [], userIds: [] } });
+      const agencyDefaults = () => ({ enabled: false, publicDrafts: false });
+      const defaults = () => ({ enabled: false, shadowMode: true, conversationIds: [], profile: {}, roleCard: roleCardDefaults(), agency: agencyDefaults(), maxDailyCalls: 1000, maxToolCalls: 8, turnTimeoutMs: 60000, crossConversation: { enabled: false, groupIds: [], userIds: [] } });
       const modeLabel = p => !p ? "未知" : !p.enabled ? "关闭" : p.shadowMode ? "观察（不发送）" : "主动（受既有权限约束）";
       const node = (tag, text, className) => { const el = document.createElement(tag); if (text !== undefined) el.textContent = String(text); if (className) el.className = className; return el; };
       const button = (text, action) => { const el = node("button", text, "secondary"); el.type = "button"; el.addEventListener("click", action); return el; };
@@ -7420,7 +7421,7 @@
         const d = v.selected ? get(v.selected) : null;
         v.status.textContent = !d ? "请选择账号。" : `已读取的保存模式：${d.savedMode || "未知"} · ${d.error || (d.loading ? "正在加载；已有草稿保留…" : d.busy ? "正在提交…" : `${d.dirty ? "有未保存草稿" : "已读取策略"} · 修订 ${d.revision ?? "未知"}${d.conflict ? " · 需要核对冲突" : ""}${d.notice ? ` · ${d.notice}` : ""}`)}`;
         v.latest.hidden = !d?.conflict || !d?.remotePolicy;
-        v.latest.textContent = d?.remotePolicy ? `服务器最新策略（只读；当前表单仍是本地草稿）\n${JSON.stringify({ mode: modeLabel(d.remotePolicy), conversationIds: d.remotePolicy.conversationIds, profile: Object.fromEntries(Object.keys(profileKeys).map(key => [key, d.remotePolicy.profile?.[key] || ""])), roleCard: { ...roleCardDefaults(), ...d.remotePolicy.roleCard }, maxDailyCalls: d.remotePolicy.maxDailyCalls, maxToolCalls: d.remotePolicy.maxToolCalls, turnTimeoutMs: d.remotePolicy.turnTimeoutMs, crossConversation: { enabled: d.remotePolicy.crossConversation?.enabled === true, groupIds: d.remotePolicy.crossConversation?.groupIds || [], userIds: d.remotePolicy.crossConversation?.userIds || [] } }, null, 2)}` : "";
+        v.latest.textContent = d?.remotePolicy ? `服务器最新策略（只读；当前表单仍是本地草稿）\n${JSON.stringify({ mode: modeLabel(d.remotePolicy), conversationIds: d.remotePolicy.conversationIds, profile: Object.fromEntries(Object.keys(profileKeys).map(key => [key, d.remotePolicy.profile?.[key] || ""])), roleCard: { ...roleCardDefaults(), ...d.remotePolicy.roleCard }, agency: { ...agencyDefaults(), ...d.remotePolicy.agency }, maxDailyCalls: d.remotePolicy.maxDailyCalls, maxToolCalls: d.remotePolicy.maxToolCalls, turnTimeoutMs: d.remotePolicy.turnTimeoutMs, crossConversation: { enabled: d.remotePolicy.crossConversation?.enabled === true, groupIds: d.remotePolicy.crossConversation?.groupIds || [], userIds: d.remotePolicy.crossConversation?.userIds || [] } }, null, 2)}` : "";
         v.save.disabled = !d || d.revision == null || !d.dirty || d.conflict || d.busy || !!d.loading || !validAccount(v.selected);
         v.rebase.hidden = !d?.conflict;
         v.rebase.disabled = !!d?.loading || !!d?.busy || d?.remoteRevision == null;
@@ -7441,7 +7442,7 @@
             if (d.dirty || d.busy) {
               if (d.revision !== result.revision) { d.conflict = true; d.remoteRevision = result.revision; d.remotePolicy = result.policy; }
             } else {
-              d.policy = { ...defaults(), ...structuredClone(result.policy), profile: { ...result.policy.profile }, roleCard: { ...roleCardDefaults(), ...result.policy.roleCard }, crossConversation: { ...defaults().crossConversation, ...result.policy.crossConversation } };
+              d.policy = { ...defaults(), ...structuredClone(result.policy), profile: { ...result.policy.profile }, roleCard: { ...roleCardDefaults(), ...result.policy.roleCard }, agency: { ...agencyDefaults(), ...result.policy.agency }, crossConversation: { ...defaults().crossConversation, ...result.policy.crossConversation } };
               d.revision = result.revision; d.conflict = false;
             }
             d.state = result.state; d.stateRevision = result.revision;
@@ -7487,6 +7488,11 @@
             field(grid, id, "运行模式（保存后生效）", "mode", !p.enabled ? "off" : p.shadowMode ? "observe" : "active", "text", [["off", "关闭"], ["observe", "观察 · 不发送"], ["active", "主动 · 仍受发送权限约束"]]);
             field(grid, id, "明确会话范围 · 每行一个 group:数字 或 private:数字", "conversationIds", p.conversationIds, "textarea");
             for (const [path, label] of [["maxDailyCalls", "每日模型调用上限"], ["maxToolCalls", "每轮工具调用上限"], ["turnTimeoutMs", "每轮超时（毫秒）"]]) field(grid, id, label, path, p[path], "number");
+            const agency = node("details", undefined, "social-profile"); agency.append(node("summary", "主体性 · 账号偏好与待表达想法")); grid.append(agency);
+            const agencyGrid = node("div", undefined, "form-grid"); agency.append(agencyGrid);
+            field(agencyGrid, id, "启用账号主体性（保存后生效）", "agency.enabled", p.agency?.enabled, "checkbox");
+            field(agencyGrid, id, "允许公开资料草稿候选（保存后生效）", "agency.publicDrafts", p.agency?.publicDrafts, "checkbox");
+            agency.append(node("p", "默认关闭，仅属于当前逻辑账号；独立账号不共享偏好，显式接管组沿用同一逻辑身份。仅在已配置群范围内工作，仍受观察模式、quiet与预算约束。公开资料仅产生空间待审草稿，不授予发表、点赞、评论或自主发布权限。管理入口在问答页角色卡下。", "hint"));
             const profile = node("details", undefined, "social-profile"); const summary = node("summary", "可选角色卡 · 不覆盖原始提示词"); profile.append(summary); grid.append(profile);
             const profileGrid = node("div", undefined, "form-grid"); profile.append(profileGrid);
             for (const [path, label] of Object.entries(profileKeys)) field(profileGrid, id, label, `profile.${path}`, p.profile?.[path], "textarea");
@@ -7504,6 +7510,7 @@
         renderStatus();
       }
       function validate(p) {
+        if (!p.agency || typeof p.agency.enabled !== "boolean" || typeof p.agency.publicDrafts !== "boolean") throw new Error("主体性开关必须为明确的布尔值。");
         if (!Array.isArray(p.conversationIds) || p.conversationIds.length > 128 || p.conversationIds.some(id => !/^(group|private):[1-9]\d{0,19}$/.test(id))) throw new Error("最多 128 个会话，必须为 group:数字 或 private:数字（ID 最长 20 位）。");
         if (p.enabled && !p.conversationIds.length) throw new Error("启用前必须明确指定会话范围。");
         for (const key of ["maxDailyCalls", "maxToolCalls", "turnTimeoutMs"]) if (!Number.isSafeInteger(p[key]) || p[key] < (key === "maxToolCalls" ? 0 : key === "turnTimeoutMs" ? 1000 : 1)) throw new Error("每日调用至少 1；工具调用可为 0；超时至少 1000 毫秒，均须为整数。");
@@ -7665,6 +7672,7 @@
           v.roleAccount = id; v.roleEpoch = (v.roleEpoch || 0) + 1;
           v.topic.value = id ? roleCardState(id).topic : "";
         }
+        renderAgency();
         const c = id ? roleCardState(id) : null, ready = roleCardReady(id);
         const current = c?.snapshot && c.snapshot.policyRevision === d?.revision && c.snapshot.registryEpoch === registryState.epoch;
         v.roleStatus.textContent = !id ? "请先选择问答账号。" : c.error || (c.busy ? "正在处理；请勿重复提交…" : !ready ? (roleCardReady(id, { allowUnloaded: true }) ? "此账号策略尚未加载；点击「加载策略并刷新角色卡」即可只读查看。" : "请先处理未保存草稿、修订冲突或策略加载错误。") : c.blocked ? "上次操作未确认；请先手动刷新角色卡核对，不会自动重试。" : current ? `账号 ${id} · 配置修订 ${c.snapshot.revision} · 已读取角色卡${!roleCardReady(id, { generate: true }) || !c.snapshot.enabled ? " · 策略关闭，仅查看历史；生成需先保存启用" : ""}` : "尚未读取当前修订；请手动刷新角色卡。");
@@ -7741,6 +7749,300 @@
           renderRoleCard();
         }
       }
+      // SOCIAL_AGENCY_UI_BEGIN — explicit snapshots; never merge runtime data into policy drafts.
+      const agencyStates = new Map();
+      const agencyState = id => {
+        if (!agencyStates.has(id)) agencyStates.set(id, { conversationId: "", userId: "", evidenceDrafts: new Map(), snapshot: null, busy: false,
+          blocked: false, error: "", notice: "", epoch: 0, controller: null, compareRevision: "", compatibleIds: new Set() });
+        return agencyStates.get(id);
+      };
+      const agencyGroup = value => typeof value === "string" && /^group:[1-9]\d{0,19}$/.test(value);
+      const agencyMember = c => c.conversationId ? c.userId.trim() : "";
+      const agencyEvidenceKey = (c, entry) => JSON.stringify([c.conversationId, agencyMember(c), entry.id]);
+      function agencyEvidenceIds(value) {
+        if (typeof value !== "string" || value.length > 4096) return null;
+        const ids = value.split(/[,，\r\n]+/u).map(id => id.trim()).filter(Boolean);
+        return ids.length > 0 && ids.length <= 32 && new Set(ids).size === ids.length
+          && ids.every(id => /^[A-Za-z0-9_:.-]{1,128}$/.test(id) && !["__proto__", "constructor", "prototype"].includes(id)) ? ids : null;
+      }
+      const agencyNaturalExpiry = entry => entry.status === "expired" && entry.tombstone === null
+        && Number.isSafeInteger(entry.expiresAt) && entry.expiresAt > 0
+        && Array.isArray(entry.feedback?.negativeEvidenceIds) && !entry.feedback.negativeEvidenceIds.length
+        && Array.isArray(entry.feedback?.correctionEvidenceIds) && !entry.feedback.correctionEvidenceIds.length;
+      const agencyBootstrapClean = id => {
+        const d = drafts.get(id), account = registryState.drafts?.get(id);
+        return !d?.dirty && !d?.conflict && !account?.dirty?.size && !account?.conflict;
+      };
+      const agencyCanRead = (id, { allowUnloaded = false } = {}) => validAccount(id) && registryState.contexts.qa === id
+        && (drafts.get(id)?.revision != null || allowUnloaded && agencyBootstrapClean(id))
+        && !drafts.get(id)?.loading && !drafts.get(id)?.busy && !registryState.busy;
+      function agencyCurrent(id) {
+        const d = drafts.get(id), c = agencyState(id), s = c.snapshot, account = registryState.drafts?.get(id);
+        return agencyCanRead(id) && !!s && s.conversationId === c.conversationId && s.userId === agencyMember(c)
+          && s.policyRevision === d.revision && s.policyEpoch === d.policyEpoch && s.registryEpoch === registryState.epoch
+          && s.registryRevision === registryState.revision
+          && (registryState.revision == null || s.data.revision === registryState.revision)
+          && !d.dirty && !d.conflict && !d.error && !account?.dirty?.size && !account?.conflict;
+      }
+      const agencyWritable = id => agencyCurrent(id) && !agencyState(id).busy && !agencyState(id).blocked;
+      function agencyData(result, conversationId, userId) {
+        const uint = n => Number.isSafeInteger(n) && n >= 0;
+        const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
+        const fields = value => object(value) && Object.entries(value).every(([key, text]) =>
+          Object.hasOwn({ expression: 800, interests: 800, examples: 2000 }, key)
+          && typeof text === "string" && text.length <= ({ expression: 800, interests: 800, examples: 2000 })[key]);
+        if (result?.ok !== true || typeof result.revision !== "string" || !result.revision.trim()
+          || !uint(result.preferenceRevision) || typeof result.growthFrozen !== "boolean"
+          || typeof result.policy?.enabled !== "boolean" || typeof result.policy?.publicDrafts !== "boolean"
+          || !Array.isArray(result.conversations) || result.conversations.length > 128 || !result.conversations.every(agencyGroup)
+          || (conversationId && !result.conversations.includes(conversationId))
+          || !Array.isArray(result.preferences) || result.preferences.length > 256
+          || result.preferences.some(e => !object(e) || typeof e.id !== "string" || e.id.length > 160
+            || !["self", "group", "member"].includes(e.kind) || !["candidate", "active", "rejected", "expired"].includes(e.status)
+            || typeof e.value !== "string" || e.value.length > 160 || typeof e.dimension !== "string" || e.dimension.length > 32
+            || (e.kind !== "self" && e.conversationId !== conversationId)
+            || (e.kind === "member" && (!userId || e.userId !== userId))
+            || !Array.isArray(e.evidence) || e.evidence.length > 32
+            || e.evidence.some(ref => !object(ref) || typeof ref.messageId !== "string" || ref.messageId.length > 160 || !agencyGroup(ref.conversationId)))
+          || !uint(result.card?.revision) || !fields(result.card.fields) || !Array.isArray(result.card.versions) || result.card.versions.length > 64
+          || result.card.versions.some(version => !object(version) || !uint(version.revision) || version.revision < 1
+            || version.revision > result.card.revision || !fields(version.fields))
+          || (conversationId ? !uint(result.journal?.revision) || !Array.isArray(result.journal.entries) || result.journal.entries.length > 256
+            || result.journal.entries.some(e => !object(e) || typeof e.id !== "string" || e.id.length > 160
+              || e.conversationId !== conversationId || !["candidate", "pending", "expressed", "abandoned", "expired"].includes(e.status)
+              || typeof e.summary !== "string" || e.summary.length > 300) : result.journal !== null)) throw new Error("invalid_agency_response");
+        return structuredClone(result);
+      }
+      async function agencyOperation(op = "", extra = {}) {
+        const id = registryState.contexts.qa, v = views.qa;
+        if (!id || !agencyCanRead(id, { allowUnloaded: !op })) return;
+        const c = agencyState(id), d = get(id);
+        const bootstrap = !op && d.revision == null;
+        if (c.busy || !["", "freeze", "review", "reconfirm", "cancel-intent", "rollback"].includes(op) || (op && !agencyWritable(id))) return;
+        if (agencyMember(c) && !/^[1-9]\d{0,19}$/.test(agencyMember(c))) { c.error = "成员 QQ 号须为明确的数字 ID（最长20位）；不会按昵称搜索。请修正后手动刷新。"; renderAgency(); return; }
+        if (op === "review") {
+          const entry = c.snapshot.data.preferences.find(e => e.id === extra.id);
+          if (!entry || !["candidate", "active"].includes(entry.status) || !["approve", "reject", "expire"].includes(extra.action)) return;
+          if (entry.kind === "self" && extra.action === "approve" && !c.compatibleIds.has(entry.id)) return;
+          extra = { id: entry.id, action: extra.action, ...(entry.kind === "self" && extra.action === "approve" ? { compatibility: "compatible" } : {}) };
+        }
+        if (op === "reconfirm") {
+          const entry = c.snapshot.data.preferences.find(e => e.id === extra.id);
+          if (!entry || !c.conversationId || !agencyNaturalExpiry(entry)
+            || entry.kind === "member" && entry.userId !== agencyMember(c)) return;
+          const ids = agencyEvidenceIds(c.evidenceDrafts.get(agencyEvidenceKey(c, entry)) || "");
+          if (!ids || ids.some(id => entry.evidence.some(ref => ref.messageId === id))) {
+            c.error = "请输入1–32个不重复、未用于此偏好的新证据ID（每行或逗号分隔），不要粘贴聊天正文。"; renderAgency(); return;
+          }
+          extra = { id: entry.id, evidenceMessageIds: ids };
+        }
+        if (op === "cancel-intent" && (!c.conversationId || !c.snapshot.data.journal?.entries.some(e => e.id === extra.id && ["candidate", "pending"].includes(e.status)))) return;
+        if (op === "rollback" && (d.policy.roleCard?.enabled !== true || !c.snapshot.data.card.versions.some(e => e.revision === extra.targetRevision)
+          || extra.targetRevision === c.snapshot.data.card.revision)) return;
+        if (op && !confirm(op === "freeze" ? `确认${extra.frozen ? "冻结" : "解除冻结"}账号「${id}」的自动成长？不会删除偏好、授予权限或触发发送。`
+          : op === "review" ? `确认${({ approve: "批准", reject: "拒绝", expire: "标记过期" })[extra.action]}此账号的偏好？${extra.compatibility ? "你已明确确认其与核心设定兼容。" : ""}不授予联系或发送权限。`
+            : op === "reconfirm" ? "确认用手动填写的新证据ID重新确认此自然过期偏好？宿主将核对过期后的真实来源、核心兼容与成熟度，不能复活墓碑或跳过校验；不发消息、不调用模型。"
+            : op === "cancel-intent" ? "确认取消此群的待表达想法？pending不是任务，不自动唤醒；取消后不应重建同来源。"
+              : `确认将账号「${id}」的角色卡追加回滚到版本 ${extra.targetRevision}？保留既有历史，不更改核心身份或发送权限。`)) return;
+        const snapshot = c.snapshot, conversationId = c.conversationId, userId = agencyMember(c), version = d.version,
+          registryEpoch = registryState.epoch, registryRevision = registryState.revision,
+          selectionEpoch = v.agencySelectionEpoch, epoch = ++c.epoch;
+        let policyRevision = d.revision, policyEpoch = d.policyEpoch;
+        const controller = new AbortController(); c.controller = controller; let timer, bootstrapLoading;
+        const fenced = () => !controller.signal.aborted && c.epoch === epoch && v.agencySelectionEpoch === selectionEpoch
+          && registryState.contexts.qa === id && validAccount(id) && c.conversationId === conversationId && agencyMember(c) === userId
+          && d.version === version && (!bootstrap || agencyBootstrapClean(id))
+          && registryState.epoch === registryEpoch && registryState.revision === registryRevision;
+        const current = () => fenced() && agencyCanRead(id, { allowUnloaded: bootstrap })
+          && d.revision === policyRevision && d.policyEpoch === policyEpoch
+          && (!op || agencyCurrent(id));
+        c.busy = true; c.error = ""; c.notice = ""; renderAgency();
+        try {
+          const request = (async () => {
+            const token = await ensureAdminSession();
+            if (!current()) throw new Error("stale_agency_request");
+            if (bootstrap) {
+              // Explicit GET-only bootstrap shares this request's deadline,
+              // selection fence and signal. Never adopt a late policy into an
+              // edited draft or start an agency GET after invalidation.
+              let bootstrapEpoch;
+              const pending = load(id, { signal: controller.signal, headers: { "x-hermes-qq-admin": token },
+                accept: () => fenced() && d.revision === policyRevision && d.policyEpoch === bootstrapEpoch });
+              bootstrapLoading = d.loading; bootstrapEpoch = d.policyEpoch;
+              await pending;
+              if (!fenced() || !agencyCanRead(id) || d.error || d.policyEpoch !== bootstrapEpoch) throw new Error("stale_agency_policy");
+              policyRevision = d.revision; policyEpoch = d.policyEpoch;
+            }
+            if (!current()) throw new Error("stale_agency_request");
+            const body = op ? { expectedRevision: snapshot.data.revision, preferenceRevision: snapshot.data.preferenceRevision,
+              ...extra, ...(op === "cancel-intent" ? { journalRevision: snapshot.data.journal.revision } : {}),
+              ...(op === "rollback" ? { cardRevision: snapshot.data.card.revision } : {}) } : undefined;
+            return api(`${accountPath(id)}/agency${op ? `/${op}` : ""}${conversationId ? `?conversation_id=${encodeURIComponent(conversationId)}${userId ? `&user_id=${encodeURIComponent(userId)}` : ""}` : ""}`, {
+              method: op ? "POST" : "GET", signal: controller.signal, headers: { "x-hermes-qq-admin": token },
+              ...(body ? { body: JSON.stringify(body) } : {}) });
+          })();
+          const timeout = new Promise((_resolve, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error("agency_timeout")); }, 20000); });
+          const result = await Promise.race([request, timeout]);
+          if (!current()) throw new Error("stale_agency_response");
+          const data = agencyData(result, conversationId, userId);
+          if (op && data.revision !== snapshot.data.revision) throw new Error("stale_agency_response");
+          c.snapshot = { data, conversationId, userId, policyRevision, policyEpoch, registryEpoch, registryRevision };
+          c.compatibleIds.clear(); c.blocked = false;
+          c.notice = op ? "操作已确认；仅更新本地管理状态，不发送、不自动唤醒。" : "已手动刷新；不会自动轮询。";
+        } catch (error) {
+          if (c.epoch === epoch) {
+            c.blocked = true;
+            c.error = error.status === 409 ? "修订冲突或证据不足；请刷新账号策略并手动刷新本区核对，不会自动重试。"
+              : error.status === 403 ? "管理员会话不可用；请手动刷新核对，不会自动重试。"
+                : "请求失败、超时或状态已变化；结果未确认。请手动刷新核对，不会自动重试。";
+          }
+        } finally {
+          clearTimeout(timer); controller.abort();
+          if (bootstrapLoading && d.loading === bootstrapLoading) d.loading = null;
+          if (c.epoch === epoch) { c.busy = false; c.controller = null; }
+          renderAgency();
+        }
+      }
+      function renderAgency() {
+        const v = views.qa; if (!v?.agency) return;
+        const id = registryState.contexts.qa;
+        if (v.agencyAccount !== id) {
+          const old = agencyStates.get(v.agencyAccount);
+          if (old?.controller) { old.controller.abort(); old.epoch++; old.controller = null; old.busy = false; old.blocked = true; old.error = "账号已切换，旧请求结果未确认；请手动刷新核对。"; }
+          v.agencyAccount = id; v.agencySelectionEpoch = (v.agencySelectionEpoch || 0) + 1;
+        }
+        const c = id ? agencyState(id) : null, d = drafts.get(id), s = c?.snapshot?.data;
+        const current = id && agencyCurrent(id), writable = id && agencyWritable(id);
+        v.agencyStatus.textContent = !id ? "请先选择问答账号。" : c.error || (c.busy ? "正在处理；请勿重复提交…"
+          : !s ? (d?.revision == null ? "此账号策略尚未加载；点击「加载策略并刷新管理数据」即可只读加载。" : "尚未读取管理快照；请点击刷新。")
+            : `${c.notice} 账号 ${id} · 配置 ${s.revision} · 偏好修订 ${s.preferenceRevision} · ${s.growthFrozen ? "成长已冻结" : "成长未冻结"}${current ? "" : " · 只读旧快照：请处理未保存策略、冲突或配置修订，再刷新核对"}`);
+        v.agencyStatus.className = c?.error ? "warning" : "hint";
+        v.agencyRefresh.textContent = d?.revision == null ? "加载策略并刷新管理数据（只读）" : "刷新管理数据（只读）";
+        v.agencyRefresh.disabled = !id || !agencyCanRead(id, { allowUnloaded: true }) || !!c?.busy;
+        const groups = (s?.conversations || d?.policy?.conversationIds || []).filter(agencyGroup);
+        const scopeKey = JSON.stringify([id, groups]);
+        if (v.agencyScopeKey !== scopeKey) {
+          v.agencyScopeKey = scopeKey;
+          v.agencyScope.replaceChildren(node("option", "仅账号自身偏好 / 角色卡")); v.agencyScope.firstChild.value = "";
+          for (const group of groups) { const option = node("option", group); option.value = group; v.agencyScope.append(option); }
+        }
+        if (v.agencyScope.value !== (c?.conversationId || "")) v.agencyScope.value = c?.conversationId || "";
+        v.agencyScope.disabled = !id || !!c?.busy || !agencyCanRead(id);
+        if (v.agencyMember.value !== (c?.userId || "")) v.agencyMember.value = c?.userId || "";
+        v.agencyMember.disabled = !id || !c?.conversationId || !!c?.busy || !agencyCanRead(id);
+        // Polls/theme refreshes must not detach native controls, reset details,
+        // or destroy the user's focus/caret. Snapshot identity is intentional:
+        // a new explicit response invalidates handlers even if JSON is equal.
+        if (s && !s.card.versions.some(version => String(version.revision) === c.compareRevision))
+          c.compareRevision = String(s.card.versions.at(-2)?.revision || s.card.versions.at(-1)?.revision || "");
+        const bodyKey = [id, s, c?.conversationId, c && agencyMember(c), c?.compareRevision,
+          !!c?.busy, !!c?.blocked, !!current, !!writable, d?.policy?.roleCard?.enabled === true,
+          d?.revision, d?.policyEpoch, d?.version, registryState.epoch, registryState.revision, v.agencySelectionEpoch];
+        if (v.agencyBodyKey?.length === bodyKey.length && bodyKey.every((value, i) => Object.is(value, v.agencyBodyKey[i]))) return;
+        v.agencyBodyKey = bodyKey;
+        const renderEpoch = v.agencyBodyEpoch = (v.agencyBodyEpoch || 0) + 1;
+        v.agencyBody.replaceChildren();
+        if (!s) return;
+        // A detached old control must not apply its action to a newly selected
+        // account or a newer snapshot, even if a delayed event still fires.
+        const live = () => v.agencyBodyEpoch === renderEpoch && registryState.contexts.qa === id && agencyState(id).snapshot?.data === s;
+        const perform = (op, extra) => {
+          if (!live()) return;
+          return agencyOperation(op, extra);
+        };
+        const frozen = button(s.growthFrozen ? "解除成长冻结…" : "冻结自动成长…", () => perform("freeze", { frozen: !s.growthFrozen }));
+        frozen.disabled = !writable; v.agencyBody.append(frozen);
+        const prefs = node("details"); prefs.open = true; prefs.append(node("summary", `偏好 · ${s.preferences.length} 条 · Self / Group / Member 分开归属`));
+        if (!s.preferences.length) prefs.append(node("p", "当前范围暂无偏好；成员偏好不会自动成为账号自身兴趣。", "hint"));
+        for (const entry of s.preferences) {
+          const row = node("div", undefined, "social-record");
+          const scope = entry.kind === "self" ? "Self · 当前逻辑账号" : `${entry.kind === "group" ? "Group" : "Member"} · ${entry.conversationId}${entry.kind === "member" ? ` · QQ ${String(entry.userId || "").slice(0, 20)}` : ""}`;
+          row.append(node("p", `${scope} · ${entry.dimension} · ${entry.status} · ${entry.value}`));
+          row.append(node("p", `偏好 ID：${entry.id} · 证据 ${entry.evidence.length} 条 · 来源类型 ${String(entry.sourceType || "未知").slice(0, 40)}`, "hint"));
+          const evidence = node("details"); evidence.append(node("summary", "来源证据指针（不读取原始聊天）"));
+          for (const ref of entry.evidence) evidence.append(node("p", `${ref.conversationId} · ${ref.messageId} · ${String(ref.polarity || "未知").slice(0, 20)} · 原始时间 ${Number.isSafeInteger(ref.sentAt) ? ref.sentAt : "未知"}`, "hint"));
+          row.append(evidence);
+          const active = ["candidate", "active"].includes(entry.status), actions = node("div", undefined, "row");
+          const approve = button("批准偏好…", () => perform("review", { id: entry.id, action: "approve" }));
+          approve.disabled = !writable || !active || entry.kind === "self" && !c.compatibleIds.has(entry.id);
+          if (entry.kind === "self") {
+            const label = node("label"), check = node("input"); check.type = "checkbox"; check.checked = c.compatibleIds.has(entry.id); check.disabled = !writable || !active;
+            label.append(check, node("span", "我已核对：此自身偏好与账号核心设定兼容，不构成权限授权"));
+            check.addEventListener("change", () => { if (!live() || !agencyWritable(id)) return; if (check.checked) c.compatibleIds.add(entry.id); else c.compatibleIds.delete(entry.id); approve.disabled = !agencyWritable(id) || !active || !check.checked; }); row.append(label);
+          }
+          actions.append(approve);
+          for (const [action, label] of [["reject", "拒绝偏好…"], ["expire", "标记过期…"]]) {
+            const control = button(label, () => perform("review", { id: entry.id, action })); control.disabled = !writable || !active; actions.append(control);
+          }
+          if (entry.status === "expired") {
+            const natural = agencyNaturalExpiry(entry), field = node("div", undefined, "field"), label = node("label", "新证据ID（每行或逗号分隔，仅填实际新回执/来源ID）"), input = node("textarea");
+            const key = agencyEvidenceKey(c, entry); label.htmlFor = input.id = `social-agency-evidence-${encodeURIComponent(entry.id)}`;
+            input.maxLength = 4096; input.value = c.evidenceDrafts.get(key) || ""; input.disabled = !writable || !natural || !c.conversationId;
+            const reconfirm = button("基于新证据重新确认…", () => perform("reconfirm", { id: entry.id }));
+            reconfirm.disabled = !writable || !natural || !c.conversationId || !agencyEvidenceIds(input.value);
+            input.addEventListener("input", () => {
+              if (!live() || !agencyWritable(id)) return;
+              c.evidenceDrafts.set(key, input.value);
+              reconfirm.disabled = !natural || !c.conversationId || !agencyEvidenceIds(input.value);
+            });
+            field.append(label, input, node("p", natural ? "只接受自然TTL过期后的真实新证据；不自动补填，不读取私聊。核心兼容、成熟度及原始时间由宿主重新校验，成功后仍可能保持候选。请先选择证据所在的已配置群。" : "此记录有墓碑、负反馈或缺少自然过期证明，不提供重新确认。", "hint"), reconfirm); row.append(field);
+          }
+          row.append(actions); prefs.append(row);
+        }
+        v.agencyBody.append(prefs);
+        const journal = node("details"); journal.append(node("summary", "待表达想法 · 不是任务，不自动唤醒"));
+        if (!s.journal) journal.append(node("p", "选择上方已配置的群并手动刷新，才能查看或取消该群想法。", "hint"));
+        else {
+          journal.append(node("p", `本群想法修订 ${s.journal.revision} · ${s.journal.entries.length} 条；pending不代表已表达或发送成功。`, "hint"));
+          for (const entry of s.journal.entries) {
+            const row = node("div", undefined, "social-record"); row.append(node("p", `${entry.status} · ${String(entry.kind || "").slice(0, 32)} · ${entry.summary}`));
+            row.append(node("p", `ID：${entry.id} · 群：${entry.conversationId}`, "hint"));
+            const cancel = button("取消此想法…", () => perform("cancel-intent", { id: entry.id }));
+            cancel.disabled = !writable || !["candidate", "pending"].includes(entry.status); row.append(cancel); journal.append(row);
+          }
+        }
+        v.agencyBody.append(journal);
+        const history = node("details"); history.append(node("summary", `角色卡版本比较 / 追加回滚 · 当前 ${s.card.revision}`));
+        const picker = node("select"), label = node("label", "比较目标版本"); label.htmlFor = picker.id = "social-agency-card-version";
+        for (const version of s.card.versions) { const option = node("option", `版本 ${version.revision}`); option.value = String(version.revision); picker.append(option); }
+        picker.value = c.compareRevision; picker.disabled = !!c.busy || !s.card.versions.length;
+        picker.addEventListener("change", () => { if (!live() || c.busy) return; c.compareRevision = picker.value; renderAgency(); }); history.append(label, picker);
+        const target = s.card.versions.find(version => String(version.revision) === c.compareRevision), compare = node("div", undefined, "form-grid");
+        for (const [title, fields] of [[`当前版本 ${s.card.revision}`, s.card.fields], [`目标版本 ${target?.revision ?? "无"}`, target?.fields || {}]]) {
+          const column = node("div", undefined, "field"); column.append(node("h5", title));
+          for (const key of ["expression", "interests", "examples"]) column.append(node("p", `${profileKeys[key]}：${fields[key] || "未设置"}`)); compare.append(column);
+        }
+        history.append(compare, node("p", "回滚会追加一个新版本并保留原历史；不覆盖核心身份、权限或原始提示词。", "hint"));
+        const rollback = button("追加回滚到所选版本…", () => perform("rollback", { targetRevision: Number(c.compareRevision) }));
+        rollback.disabled = !writable || !target || target.revision === s.card.revision || d?.policy?.roleCard?.enabled !== true;
+        history.append(rollback); v.agencyBody.append(history);
+      }
+      function mountAgency(role) {
+        const v = views.qa, area = node("details", undefined, "settings-block"); area.id = "social-agency-management";
+        area.append(node("summary", "管理 · 偏好、待表达想法与角色卡历史"));
+        area.append(node("p", "仅管理当前问答账号的逻辑身份。Self是账号偏好，Group是当前群趋势，Member是该成员偏好，不能互相升级。冻结只阻止自动成长；待表达想法不是任务，不自动唤醒。此区不发布空间、不发QQ、不调用模型。", "hint"));
+        const label = node("label", "查看范围（仅限已配置群）"), scope = node("select"); label.htmlFor = scope.id = "social-agency-scope";
+        const memberLabel = node("label", "可选成员QQ号 · 先选群，不填则仅看Self和Group"), member = node("input");
+        member.type = "text"; member.inputMode = "numeric"; member.maxLength = 20; memberLabel.htmlFor = member.id = "social-agency-member";
+        const refresh = button("刷新管理数据（只读）", () => agencyOperation());
+        const status = node("p", "", "hint"); status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite");
+        const body = node("div"), actions = node("div", undefined, "row"); actions.append(refresh);
+        scope.addEventListener("change", () => {
+          const id = registryState.contexts.qa; if (!id || !agencyCanRead(id)) return;
+          const c = agencyState(id), groups = c.snapshot?.data.conversations || drafts.get(id).policy.conversationIds.filter(agencyGroup);
+          if (scope.value && !groups.includes(scope.value)) return;
+          c.controller?.abort(); c.epoch++; c.controller = null; c.busy = false;
+          c.conversationId = scope.value; c.snapshot = null; c.compatibleIds.clear(); c.error = ""; c.notice = ""; renderAgency();
+        });
+        member.addEventListener("input", () => {
+          const id = registryState.contexts.qa; if (!id || !agencyCanRead(id)) return;
+          const c = agencyState(id); if (!c.conversationId || c.busy) return;
+          c.controller?.abort(); c.epoch++; c.userId = member.value; c.snapshot = null; c.compatibleIds.clear(); c.error = ""; c.notice = ""; renderAgency();
+        });
+        Object.assign(v, { agency: area, agencyStatus: status, agencyScope: scope, agencyMember: member, agencyRefresh: refresh, agencyBody: body });
+        area.append(label, scope, memberLabel, member, actions, status, body); role.append(area);
+      }
+      // SOCIAL_AGENCY_UI_END
       function renderQa() {
         const v = views.qa; if (!v) return;
         const id = registryState.contexts.qa; const d = id ? drafts.get(id) : null;
@@ -7818,6 +8120,7 @@
         const generateRole = button("生成并采用角色卡…", () => roleCardOperation(registryState.contexts.qa, true));
         Object.assign(views.qa, { role, roleStatus, rolePreview, topic, refreshRole, generateRole });
         const topicField = node("div", undefined, "field"); topicField.append(topicLabel, topic); actions.append(refreshRole, generateRole); role.append(roleStatus, rolePreview, topicField, actions); host.append(role);
+        mountAgency(role);
         window.addEventListener("beforeunload", event => { if ([...drafts.values()].some(d => d.dirty)) { event.preventDefault(); event.returnValue = ""; } });
         sync(); renderPolicy(); renderAudit();
       }

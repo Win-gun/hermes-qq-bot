@@ -69,7 +69,8 @@ export function agencySnapshot(root, args) {
       || e.coreConsistency.hash === createHash("sha256").update(args.coreText).digest("hex"))).slice(0, 18).map(e => ({ id: e.id, kind: e.kind,
       dimension: e.dimension, value: e.value, confidence: e.confidence, expiresAt: e.expiresAt })),
     intentions: selectRelevantSocialIntents(root, { logicalId: args.logicalId, conversationId: args.conversationId,
-      query: args.query, now: args.now, limit: 3 }),
+      query: args.query, now: args.now, limit: 3 }).map(({ id, kind, summary, reason, trigger, createdAt, expiresAt }) =>
+      ({ id, kind, summary, reason, trigger, createdAt, expiresAt })),
     ownEvidence: (state?.experiences || []).filter(e => e.kind === "bot_reply" && e.confirmed === true && e.agencyEligible === true)
       .slice(-8).map(e => ({ messageId: e.messageId, text: e.text.slice(0, 240), sentAt: e.sentAt })) };
 }

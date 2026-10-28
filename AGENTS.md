@@ -280,6 +280,15 @@ images into memory. Message reactions are external writes even without a
 `send_` prefix: every request must cross the same physical send gate and quiet
 checks. An accepted reaction is not a new QQ message or a spoken experience.
 
+Social Agency 3.2 contracts and unrun effect gates are in `docs/SOCIAL-AGENCY-3.2.md`.
+`socialAgent.agency` defaults off. Self/Group/Member preferences are separate;
+only actual eligible own ACKs plus cross-date evidence and current core hash may
+support automatic self growth. The bounded intent journal is passive semantic
+state, never a send queue or model wake timer. Pending/uncertain work is not
+replayed; fresh related events and normal routing/quiet/budget gates still apply.
+Public QZone candidates remain review-only drafts. Run `npm run test:social-agency-32`;
+synthetic parity is not model A/B, QQ protocol or human naturalness acceptance.
+
 Core source upgrade contracts and outstanding acceptance gates are tracked in
 `docs/CORE-UPGRADE.md`. The memory repository is the sole cooperating writer;
 read-only tools must not acquire its lock. AI extraction claims each batch

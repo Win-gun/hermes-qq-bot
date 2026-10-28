@@ -3,6 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { beginDiscoveryRound, recoverDiscoveryState } from "../src/social-discovery-state.js";
 import { recoverQzoneState } from "../src/qzone-runtime.js";
+import { ingestSocialMessage, appendSocialExperience } from "../src/social-agent-state.js";
+import { recordSocialPreference, setSocialGrowthFrozen } from "../src/social-preferences.js";
+import { proposeSocialIntent, settleSocialIntent } from "../src/social-intent-journal.js";
+import { applySelfRoleCard, rollbackSelfRoleCard } from "../src/self-role-card.js";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import vm from "node:vm";
@@ -59,6 +63,27 @@ const memoryFixture = { groups: { 123: { users: { 42: { nickname: "测试" } } }
   "group:fixture-failover": { plans: { second: { id: "second", status: "waiting", revision: 1 } },
     conversations: { "private:42": { readThroughSeq: 2, experiences: [], runtime: { status: "waiting", dueAt: 50 } } } },
 } } };
+// Real 3.2 schemas, not marker-shaped approximations. Backup restoration must
+// preserve pending non-executable semantics, own ACK proof and rollback history.
+const agency = {}, agencyAt = Date.UTC(2026, 9, 28, 5), agencyScope = { logicalId: "account:agency", conversationId: "group:101", now: agencyAt };
+assert(ingestSocialMessage(agency, { ...agencyScope, message: { messageId: "public-human", userId: "11", text: "讨论科技的新方向",
+  sentAt: agencyAt, receivedAt: agencyAt } }).ok);
+assert(appendSocialExperience(agency, { ...agencyScope, userId: "11", messageId: "own-ack", text: "我喜欢科技", kind: "bot_reply",
+  confirmed: true, agencyEligible: true, sentAt: agencyAt }).ok);
+assert(recordSocialPreference(agency, { ...agencyScope, kind: "self", dimension: "interest", value: "科技", coreText: "喜欢科技",
+  evidenceMessageIds: ["own-ack"], expectedRevision: 0 }).ok);
+assert(setSocialGrowthFrozen(agency, { logicalId: agencyScope.logicalId, expectedRevision: 1, frozen: true,
+  actor: { authorized: true }, reason: "fixture freeze", now: agencyAt }).ok);
+const agencyIntent = proposeSocialIntent(agency, { ...agencyScope, kind: "question", summary: "科技发展的新方向", reason: "公开讨论的后续线索",
+  trigger: { kind: "related_message", terms: ["科技"] }, evidenceMessageIds: ["public-human"], ttlMs: 60000, expectedRevision: 0 });
+assert(agencyIntent.ok);
+assert(settleSocialIntent(agency, { ...agencyScope, id: agencyIntent.id, expectedRevision: 1, status: "pending", reason: "fixture pending" }).ok);
+const agencyCard = { logicalId: agencyScope.logicalId, policy: { enabled: true }, reason: "fixture card", evidenceMessageIds: ["own-ack"], explicit: true };
+assert(applySelfRoleCard(agency, { ...agencyCard, expectedRevision: 0, fields: { expression: "稳健表达" }, now: agencyAt }).ok);
+assert(applySelfRoleCard(agency, { ...agencyCard, expectedRevision: 1, fields: { interests: "科技" }, now: agencyAt + 1 }).ok);
+assert(rollbackSelfRoleCard(agency, { logicalId: agencyScope.logicalId, policy: { enabled: true }, expectedRevision: 2,
+  targetRevision: 1, actor: { authorized: true }, now: agencyAt + 2 }).ok);
+memoryFixture.socialAgents.bots[agencyScope.logicalId] = agency.socialAgents.bots[agencyScope.logicalId];
 memoryFixture.qzoneSocial = { version: 1, bots: { "account:fixture": { owners: { "10001": {
   owner: { accountId: "fixture", qq: "10001" }, claims: { fingerprint: { id: "wire-claim", draftId: "pending", at: 12 } },
   days: {}, lastReadAt: null, lastWriteAt: {},
@@ -84,13 +109,14 @@ function checkSocialRestore(target) {
   assert.equal(actual.socialAgents.bots["account:fixture"].discovery.rounds[0].status, "interrupted");
   assert.equal(recoverDiscoveryState(expected, { now: interruptedAt }).ok, true);
   for (const bot of Object.values(expected.socialAgents.bots)) {
-    for (const plan of Object.values(bot.plans)) {
+    for (const plan of Object.values(bot.plans || {})) {
       if (!["completed", "failed", "cancelled", "expired", "superseded", "paused"].includes(plan.status)) {
         plan.previousStatus = plan.status; plan.status = "paused"; plan.reason = "backup_restore"; plan.revision++;
       }
     }
     for (const conv of Object.values(bot.conversations)) {
       const runtime = conv.runtime;
+      if (!runtime) continue;
       if (!["idle", "shadow", "completed", "failed", "cancelled", "paused"].includes(runtime.status)) {
         runtime.previousStatus = runtime.status; runtime.status = "paused"; runtime.reason = "backup_restore";
       }
