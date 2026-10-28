@@ -19,6 +19,7 @@ import { getSocialPreferences, reviewSocialPreference, reconfirmSocialPreference
 import { getSocialIntentJournal, settleSocialIntent } from "./social-intent-journal.js";
 import { agencySnapshot, applyAgencyObservations, claimAgencyIntent, completeAgencyIntent, agencyGrowthAllowed, abandonAgencyAttention, isAgencyStop, AGENCY_INSTRUCTION } from "./social-agency.js";
 import { createAgencyInterestSelector, agencyPreferenceContext } from "./social-agency-context.js";
+import { buildAgencyQzoneCandidate } from "./social-agency-qzone.js";
 import { socialExperienceFor } from "./social-experience-policy.js";
 import { evaluateConversationTurn } from "./conversation-turn-manager.js";
 import { parseReplyPlan, validateReplyPlan, replyPlanPrompt, fromSocialMessages } from "./reply-plan.js";
@@ -10148,6 +10149,18 @@ async function main() {
         return observed;
       });
       requireSocialCurrent(ctx, signal);
+      if (result.ok && proposal.publicDraft && policy.agency.publicDrafts && scope.offeredDiscoveryIds.includes(proposal.publicDraft.materialId)) {
+        const candidate = buildAgencyQzoneCandidate(memory, { ...base, ...proposal.publicDraft, audience: 64 });
+        if (candidate.ok) {
+          const zone = qzoneCapture(scope.accountId);
+          if (zone && qzoneCurrent(zone) && !signal.aborted && socialCurrent(ctx)) {
+            // Local draft only. No autonomy authorization, publish, interaction,
+            // private feed read or extra model call is introduced here.
+            await qzoneRuntime.createDraft(zone, candidate.draft);
+            requireSocialCurrent(ctx, signal);
+          }
+        }
+      }
       return result;
     },
     applyContinuity: async (ctx, proposal, { seenMessageIds, now, signal }) => {

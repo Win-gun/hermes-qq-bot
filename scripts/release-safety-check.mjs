@@ -60,6 +60,7 @@ export const releaseFiles = Object.freeze([
   "src/social-intent-journal.js",
   "src/social-agency.js",
   "src/social-agency-context.js",
+  "src/social-agency-qzone.js",
   "src/social-behavior.js",
   "src/social-episodes.js",
   "src/sticker-interaction.js",
