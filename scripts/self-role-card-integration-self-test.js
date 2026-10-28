@@ -8,7 +8,8 @@ import http from "node:http";
 import { spawn } from "node:child_process";
 import WebSocket from "ws";
 import { registryConfig } from "../src/account-registry.js";
-import { ingestSocialMessage } from "../src/social-agent-state.js";
+import { ingestSocialMessage, appendSocialExperience } from "../src/social-agent-state.js";
+import { recordSocialPreference } from "../src/social-preferences.js";
 const root = path.resolve(import.meta.dirname, ".."), home = fs.mkdtempSync(path.join(os.tmpdir(), "self-role-card-bridge-"));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function port() { const s = net.createServer(); await new Promise(r => s.listen(0, "127.0.0.1", r)); const p = s.address().port; await new Promise(r => s.close(r)); return p; }
@@ -33,9 +34,13 @@ const model = http.createServer(async (req, res) => {
   } else if (prompt.includes("你是受限社交规划器")) {
     const { snapshot } = JSON.parse(prompt.split("\n").at(-1));
     const source = snapshot.messages.filter(item => !item.isBot).at(-1);
-    decision = JSON.stringify({ action: "reply", messages: ["语音测试"], expressionPlan: { version: 1, action: "reply", replyToMessageId: null,
-      messages: [{ type: "voice", content: "你好，这是自主语音测试。" }] },
-      continuity: { personaChanges: [{ field: "expression", value: "喜欢简洁但有观点的表达", evidenceMessageIds: [source.messageId] }] } });
+    const second = source.messageId === "41003";
+    decision = JSON.stringify({ action: "reply", messages: ["科技语音测试"], expressionPlan: { version: 1, action: "reply", replyToMessageId: null,
+      messages: [{ type: "voice", content: "你好，这是科技话题的自主语音测试。" }] },
+      agency: { preferences: [{ kind: "member", dimension: "interest", value: "科技", evidenceMessageIds: [source.messageId] }],
+        ...(second ? { useIntentIds: [snapshot.socialAgency.intentions[0].id] } : { intents: [{ kind: "question", summary: "了解公开科技见闻的新方向",
+          reason: "当前讨论存在可进一步了解的方向", trigger: { kind: "related_message", terms: ["科技"] }, evidenceMessageIds: [source.messageId], ttlMs: 3600000 }] }) },
+      continuity: { personaChanges: [{ field: second ? "interests" : "expression", value: second ? "科技" : "喜欢简洁但有观点的表达", evidenceMessageIds: [source.messageId] }] } });
   }
   res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ choices: [{ message: { content: decision } }] }));
 });
@@ -53,10 +58,18 @@ try {
   config.accounts = { version: 2, items: ["alpha", "beta"].map((id, i) => ({ id, qq: String(11001 + i), displayName: id, selfName: id, style: { systemPrompt: `${id}-original` },
     enabled: true, protocolEnabled: true, managed: true, protocolContainer: `synthetic-role-${id}`, protocol: "napcat", onebotPath: "/role-fixture", features: { chat: true, proactive: true }, sendTypes: { text: true, record: true },
     socialAgent: { enabled: true, shadowMode: false, conversationIds: ["group:31001"], maxDailyCalls: 10, turnTimeoutMs: 5000,
+      agency: { enabled: true, publicDrafts: false },
       roleCard: { enabled: true, autoGrow: true, minUpdateIntervalMs: 60000, maxVersions: 32 } },
     socialExperience: { enabled: true, shadowMode: false, conversationIds: ["group:31001"], expression: { enabled: true, minIntervalMs: 0, maxIntervalMs: 0 } } })), failoverGroups: [] };
   fs.writeFileSync(path.join(home, "config.json"), JSON.stringify(registryConfig(config, { strict: true })));
   const seed = { groups: {} }, seededAt = Date.now();
+  const past = [seededAt - 26 * 3600000, seededAt - 25 * 3600000, seededAt - 3600000];
+  check(ingestSocialMessage(seed, { logicalId: "account:alpha", conversationId: "group:31001", now: past[0],
+    message: { messageId: "prior-human", userId: "21001", text: "先前讨论科技", sentAt: past[0], receivedAt: past[0] } }).ok, "synthetic prior public conversation");
+  past.forEach((at, i) => check(appendSocialExperience(seed, { logicalId: "account:alpha", conversationId: "group:31001", userId: "21001",
+    messageId: `prior-ack-${i}`, text: "我喜欢科技", kind: "bot_reply", confirmed: true, agencyEligible: true, sentAt: at, now: at }).ok, "historical ACK fixture"));
+  check(recordSocialPreference(seed, { logicalId: "account:alpha", conversationId: "group:31001", kind: "self", dimension: "interest", value: "科技",
+    evidenceMessageIds: past.map((_, i) => `prior-ack-${i}`), expectedRevision: 0, now: seededAt, coreText: "alpha-original" }).ok, "candidate grounded in own cross-date ACKs, compatibility unknown");
   check(ingestSocialMessage(seed, { logicalId: "account:alpha", conversationId: "private:21001", now: seededAt,
     message: { messageId: "private-seed", userId: "21001", text: "PRIVATE_SOURCE_MARKER", sentAt: seededAt, receivedAt: seededAt } }).ok,
     "private fixture evidence actually exists before generation");
@@ -86,12 +99,34 @@ try {
   check((await api(route("alpha") + "/generate", "POST", { expectedRevision: state.revision, cardRevision: 0, topic: "" })).status === 409 && textCalls === 0, "wrong revision does not call model");
   sockets[0].send(JSON.stringify({ post_type: "message", message_type: "group", self_id: 11001, group_id: 31001, user_id: 21001, message_id: 41001,
     time: Math.floor(Date.now() / 1000), message: [{ type: "text", data: { text: "分享一个有趣的科技话题" } }], raw_message: "分享一个有趣的科技话题", sender: { nickname: "Human" } }));
-  await until(async () => (await api(route("alpha"))).body.card.revision === 1, "provenance-bound autonomous growth");
   await until(() => wire.some(x => x.i === 0 && x.action === "send_group_msg" && x.params.message.some?.(s => s.type === "record")), "AI-selected voice");
   check(fs.readFileSync(ttsLog, "utf8") === "1", "one fake TTS call, no duplicated voice");
+  const agencyPath = "/api/social-agent/accounts/alpha/agency?conversation_id=group:31001";
+  check((await api(agencyPath, "GET", undefined, false)).status === 403, "agency inventory authenticated");
+  await until(async () => (await api(agencyPath)).body.journal.entries.length === 1, "agency candidate durably committed after actual fake ACK");
+  let agency = (await api(agencyPath)).body;
+  check(agency.card.revision === 0, "single human proposal cannot rewrite stable personality");
+  check(agency.preferences.some(p => p.kind === "self" && p.status === "candidate") && agency.preferences.some(p => p.kind === "group") === false,
+    "self candidate not confused with temporary group interest");
+  check((await api("/api/social-agent/accounts/alpha/agency?conversation_id=group:99999")).status === 400, "foreign scope refused");
+  const selfPreference = agency.preferences.find(p => p.kind === "self");
+  const postAgency = (op, body) => api(`/api/social-agent/accounts/alpha/agency/${op}?conversation_id=group:31001`, "POST",
+    { expectedRevision: agency.revision, preferenceRevision: agency.preferenceRevision, ...body });
+  check((await postAgency("review", { id: selfPreference.id, action: "approve" })).status === 409, "self compatibility not silently assumed");
+  check((await postAgency("review", { id: selfPreference.id, action: "approve", compatibility: "compatible" })).status === 200, "explicit local admin compatibility binds current core");
+  check((await postAgency("freeze", { frozen: true })).status === 409, "stale preference revision cannot freeze or overwrite");
+  agency = (await api(agencyPath)).body;
+  check((await postAgency("freeze", { frozen: true })).body.growthFrozen === true, "growth frozen without changing config or other account");
+  agency = (await api(agencyPath)).body;
+  check((await postAgency("freeze", { frozen: false })).body.growthFrozen === false, "explicit unfreeze");
+  sockets[0].send(JSON.stringify({ post_type: "message", message_type: "group", self_id: 11001, group_id: 31001, user_id: 21001, message_id: 41003,
+    time: Math.floor(Date.now() / 1000), message: [{ type: "text", data: { text: "继续科技话题" } }], raw_message: "继续科技话题", sender: { nickname: "Human" } }));
+  await until(async () => (await api(route("alpha"))).body.card.revision === 1, "cross-date verified own preference may project to subordinate card");
+  await until(async () => (await api(agencyPath)).body.journal.entries[0]?.status === "expressed", "semantic intent completes only with new ACK-backed relevant content");
+  check(fs.readFileSync(ttsLog, "utf8") === "11", "one existing sender and TTS invocation per accepted event");
   check((await api(route("beta"))).body.card.revision === 0, "peer does not acquire another role card");
   const grown = (await api(route("alpha"))).body;
-  check(grown.card.versions[0].evidenceMessageIds.includes("41001"), "growth pins actual sender evidence");
+  check(grown.card.versions[0].evidenceMessageIds.includes("41003"), "growth pins current interaction and previously verified own preference");
   const generated = await api(route("alpha") + "/generate", "POST", { expectedRevision: grown.revision, cardRevision: 1, topic: "科技兴趣" });
   check(generated.status === 200 && generated.body.card.revision === 2, `explicit generation accepted: ${JSON.stringify(generated.body)}`);
   check(generated.body.revision === grown.revision, "card write does not change configuration revision");
@@ -124,7 +159,7 @@ try {
     && JSON.stringify(x.params.message).includes("自写角色卡 v2")), "account-addressed rolecard command");
   check(wire.slice(beforeCommand).filter(x => x.action === "send_group_msg" && JSON.stringify(x.params.message).includes("自写角色卡 v2")).every(x => x.i === 0),
     "group rolecard command routes only to the selected logical bot");
-  console.log(JSON.stringify({ ok: true, checks, fakeTextCalls: textCalls, fakeTtsCalls: 1, realQqWrites: 0, realModelCalls: 0, productionTouched: false }));
+  console.log(JSON.stringify({ ok: true, checks, fakeTextCalls: textCalls, fakeTtsCalls: 2, realQqWrites: 0, realModelCalls: 0, productionTouched: false }));
   if (process.env.HERMES_QQ_ROLECARD_UI === "1") {
     console.log(JSON.stringify({ fixtureUi: `${base}/admin`, fixturePid: process.pid, stateIsolated: true }));
     await new Promise(resolve => {

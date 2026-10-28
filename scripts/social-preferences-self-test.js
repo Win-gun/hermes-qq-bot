@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
-  recordSocialPreference, getSocialPreferences, reviewSocialPreference, setSocialGrowthFrozen,
+  recordSocialPreference, getSocialPreferences, reviewSocialPreference, reconfirmSocialPreference, setSocialGrowthFrozen,
 } from "../src/social-preferences.js";
 import { ingestSocialMessage, appendSocialExperience } from "../src/social-agent-state.js";
 
@@ -48,6 +48,36 @@ function failed(root, fn, code) {
 function reviewed(root, id, extra = {}) {
   return reviewSocialPreference(root, { logicalId: BOT, id, expectedRevision: store(root).revision,
     action: "reject", actor, reason: "synthetic correction", now: T + 2 * DAY, ...extra });
+}
+function expiredFixture(kind = "self") {
+  const root = {}, ids = ["old1", "old2", "old3"];
+  for (let i = 0; i < ids.length; i++) {
+    const at = T + (kind !== "group" && i === 2 ? DAY : i);
+    if (kind === "self") ack(root, ids[i], at);
+    else human(root, ids[i], kind === "group" ? String(11 + i) : USER, at);
+  }
+  const result = record(root, { kind, evidenceMessageIds: ids, now: T + DAY,
+    ...(kind === "self" ? { coreText: "我喜欢摄影 旧核心" } : {}), ...(kind === "member" ? { userId: USER } : {}) });
+  assert.equal(result.status, "active");
+  return { root, id: result.id, original: copy(store(root).entries[0]) };
+}
+function newEvidence(fixture, { count = 3, distinctDays = true, distinctPeople = true, conversationId = GROUP,
+  prefix = "new", text = "我喜欢摄影", eligible = true } = {}) {
+  const { root, original } = fixture, ids = [];
+  for (let i = 0; i < count; i++) {
+    const id = `${prefix}${i}`, at = original.expiresAt + 1 + (distinctDays && i === count - 1 && count > 1 ? DAY : i);
+    ids.push(id);
+    if (original.kind === "self") ack(root, id, at, { conversationId, text, eligible });
+    else human(root, id, distinctPeople && original.kind === "group" ? String(11 + i) : USER, at, text, conversationId);
+  }
+  return { ids, now: original.expiresAt + 2 * DAY };
+}
+function reconfirmed(fixture, fresh, extra = {}) {
+  const { root, id, original } = fixture;
+  return reconfirmSocialPreference(root, { logicalId: BOT, id, conversationId: GROUP,
+    expectedRevision: store(root).revision, evidenceMessageIds: fresh.ids, actor, reason: "synthetic reconfirm", now: fresh.now,
+    ...(original.kind === "self" ? { coreText: "我喜欢摄影 当前核心" } : {}),
+    ...(original.kind === "member" ? { userId: USER } : {}), ...extra });
 }
 
 test("absent read is detached, read-only, exact default", () => {
@@ -362,6 +392,250 @@ test("TTL is original sentAt based, lazy/read-only, and no replay refresh", () =
     failed(root, () => reviewed(root, store(root).entries[0].id, { now: T + life, action: "approve",
       ...(kind === "self" ? { compatibility: "compatible" } : {}) }), "EXPIRED");
   }
+});
+
+test("reconfirm natural TTL expiry preserves exact ID, old evidence and firstSeen for all kinds", () => {
+  for (const kind of ["self", "group", "member"]) {
+    const fixture = expiredFixture(kind), { root, id, original } = fixture;
+    const fresh = newEvidence(fixture);
+    const oldRevision = store(root).revision;
+    failed(root, () => record(root, { kind, evidenceMessageIds: fresh.ids, now: fresh.now,
+      ...(kind === "member" ? { userId: USER } : {}) }), "EXPIRED");
+    failed(root, () => reviewed(root, id, { action: "approve", now: fresh.now,
+      ...(kind === "self" ? { compatibility: "compatible", coreText: "摄影" } : {}) }), "EXPIRED");
+    const result = reconfirmed(fixture, fresh);
+    assert.deepEqual(result, { ok: true, id, status: "active", revision: oldRevision + 1 });
+    const e = store(root).entries[0];
+    assert.equal(store(root).entries.length, 1);
+    assert.equal(e.id, original.id);
+    assert.equal(e.firstSeenAt, original.firstSeenAt);
+    assert.equal(e.createdAt, original.createdAt);
+    assert.deepEqual(e.evidence.slice(0, 3), original.evidence);
+    assert.equal(e.evidence.length, 6);
+    assert.equal(e.lastSeenAt, original.expiresAt + 1 + DAY);
+    assert.equal(e.expiresAt, e.lastSeenAt + (kind === "group" ? 7 : 30) * DAY);
+    assert.notEqual(e.lastSeenAt, fresh.now, "reconfirmation time is not evidence time");
+    assert.deepEqual(e.review, { action: "reconfirm", reason: "synthetic reconfirm", at: fresh.now,
+      compatibility: null, previousExpiresAt: original.expiresAt });
+    assert.equal(e.confidence, 0.85);
+    assert.equal(view(root, { conversationId: GROUP, userId: USER, now: fresh.now }).entries[0].status, "active");
+    if (kind === "self") {
+      assert.deepEqual(e.coreConsistency, { hash: createHash("sha256").update("我喜欢摄影 当前核心").digest("hex"),
+        compatible: true, source: "literal" });
+      assert.equal(JSON.stringify(e).includes("我喜欢摄影 当前核心"), false);
+    }
+    failed(root, () => reconfirmed(fixture, fresh), "NOT_NATURALLY_EXPIRED");
+  }
+});
+
+test("reconfirm never uses expired evidence or administrator authority to bypass recent maturity", () => {
+  for (const kind of ["self", "group", "member"]) {
+    for (const options of [{ count: 1 }, { count: 2 }, { count: 3, distinctDays: false, distinctPeople: false }]) {
+      const fixture = expiredFixture(kind), fresh = newEvidence(fixture, options);
+      assert.equal(reconfirmed(fixture, fresh).status, "candidate");
+      const e = store(fixture.root).entries[0];
+      assert.equal(e.evidence.length, 3 + options.count);
+      if (options.count === 1) assert.equal(e.confidence, 0.25, "three expired old refs must not contribute confidence");
+    }
+  }
+  const fixture = expiredFixture(), fresh = newEvidence(fixture, { count: 1 });
+  assert.equal(reconfirmed(fixture, fresh, { evidenceMessageIds: [fresh.ids[0], fresh.ids[0], fresh.ids[0]] }).status, "candidate");
+  assert.equal(store(fixture.root).entries[0].evidence.length, 4);
+});
+
+test("reconfirm re-evaluates core compatibility instead of inheriting old administrator approval", () => {
+  const fixture = expiredFixture(), { root, id } = fixture;
+  assert.equal(reviewed(root, id, { action: "approve", compatibility: "compatible", now: T + 2 * DAY,
+    coreText: "我喜欢摄影 旧核心" }).ok, true);
+  const fresh = newEvidence(fixture);
+  assert.equal(reconfirmed(fixture, fresh, { coreText: "我喜欢音乐 当前核心" }).status, "candidate");
+  const e = store(root).entries[0];
+  assert.equal(e.coreConsistency.hash, createHash("sha256").update("我喜欢音乐 当前核心").digest("hex"));
+  assert.equal(e.coreConsistency.compatible, null);
+  assert.equal(e.coreConsistency.source, "unknown");
+  assert.equal(reviewed(root, id, { action: "approve", compatibility: "compatible", now: fresh.now,
+    coreText: "我喜欢音乐 当前核心" }).status, "active");
+});
+
+test("reconfirm requires exact host actor, CAS, strict schema and current self core", () => {
+  const fixture = expiredFixture(), fresh = newEvidence(fixture), { root } = fixture;
+  for (const bad of [undefined, true, "admin", { authorized: false }, { authorized: "true" },
+    { authorized: true, role: "admin" }, Object.create({ authorized: true })]) {
+    failed(root, () => reconfirmed(fixture, fresh, { actor: bad }), "INVALID_ARGS");
+  }
+  for (const expectedRevision of [undefined, "1", -1, 1.1]) {
+    failed(root, () => reconfirmed(fixture, fresh, { expectedRevision }), "INVALID_ARGS");
+  }
+  failed(root, () => reconfirmed(fixture, fresh, { expectedRevision: 0 }), "REVISION_CONFLICT");
+  for (const coreText of [undefined, null, {}, "", " ", "核".repeat(32_769)]) {
+    failed(root, () => reconfirmed(fixture, fresh, { coreText }), "INVALID_ARGS");
+  }
+  for (const extra of [{ kind: "self" }, { value: "音乐" }, { compatibility: "compatible" }, { explicit: true },
+    { permission: "admin" }, { evidenceMessageIds: [] }, { reason: "" }, { now: NaN }, { action: "reconfirm" }]) {
+    failed(root, () => reconfirmed(fixture, fresh, extra), "INVALID_ARGS");
+  }
+  failed(root, () => record(root, { kind: "self", evidenceMessageIds: fresh.ids, now: fresh.now,
+    reconfirm: true }), "INVALID_ARGS");
+  failed(root, () => reviewed(root, fixture.id, { action: "reconfirm", now: fresh.now }), "INVALID_ARGS");
+  assert.equal(reconfirmed(fixture, fresh, { coreText: "核".repeat(32_768) }).status, "candidate");
+  const scoped = expiredFixture("group"), groupFresh = newEvidence(scoped);
+  failed(scoped.root, () => reconfirmed(scoped, groupFresh, { coreText: "摄影" }), "INVALID_ARGS");
+});
+
+test("reconfirm only accepts new actual refs strictly after prior expiry", () => {
+  for (const kind of ["self", "group", "member"]) {
+    const fixture = expiredFixture(kind), { root, original } = fixture;
+    const fresh = newEvidence(fixture, { count: 1 });
+    failed(root, () => reconfirmed(fixture, fresh, { evidenceMessageIds: [original.evidence[0].messageId] }), "FRESH_EVIDENCE_REQUIRED");
+    for (const offset of [-1, 0]) {
+      const id = `boundary${offset === 0 ? "equal" : "before"}`, at = original.expiresAt + offset;
+      if (kind === "self") ack(root, id, at); else human(root, id, USER, at);
+      failed(root, () => reconfirmed(fixture, fresh, { evidenceMessageIds: [id] }), "FRESH_EVIDENCE_REQUIRED");
+    }
+    failed(root, () => reconfirmed(fixture, fresh, { evidenceMessageIds: [fresh.ids[0], "missing"] }), "INVALID_EVIDENCE");
+    failed(root, () => reconfirmed(fixture, fresh, { now: original.expiresAt - 1 }), "NOT_NATURALLY_EXPIRED");
+    failed(root, () => reconfirmed(fixture, fresh, { now: original.expiresAt }), "INVALID_EVIDENCE");
+    failed(root, () => reconfirmed(fixture, fresh, { now: original.expiresAt + 1 + (kind === "group" ? 7 : 30) * DAY }), "INVALID_EVIDENCE");
+  }
+});
+
+test("reconfirm enforces logical bot, exact group/member scope and no private or self user source", () => {
+  for (const kind of ["self", "group", "member"]) {
+    const fixture = expiredFixture(kind), fresh = newEvidence(fixture), { root } = fixture;
+    failed(root, () => reconfirmed(fixture, fresh, { logicalId: "account:other", expectedRevision: 0 }), "NOT_FOUND");
+    failed(root, () => reconfirmed(fixture, fresh, { id: `preference:${"0".repeat(64)}` }), "NOT_FOUND");
+    failed(root, () => reconfirmed(fixture, fresh, { conversationId: "private:11" }), "INVALID_ARGS");
+    failed(root, () => reconfirmed(fixture, fresh, { userId: "99" }), "SCOPE_MISMATCH");
+    if (kind !== "self") failed(root, () => reconfirmed(fixture, fresh, { conversationId: OTHER_GROUP }), "SCOPE_MISMATCH");
+  }
+  const member = expiredFixture("member"), memberFresh = newEvidence(member);
+  human(member.root, "outsider", "99", member.original.expiresAt + 1);
+  failed(member.root, () => reconfirmed(member, memberFresh, { evidenceMessageIds: ["outsider"] }), "INVALID_EVIDENCE");
+  const global = expiredFixture(), globalFresh = newEvidence(global, { conversationId: OTHER_GROUP });
+  assert.equal(reconfirmed(global, globalFresh, { conversationId: OTHER_GROUP }).status, "active");
+  const e = store(global.root).entries[0];
+  assert.equal(e.userId, null);
+  assert.equal(e.conversationId, null);
+  assert.equal(e.evidence.every(ref => ref.senderId === null && ref.sourceType === "agency_bot_reply"), true);
+});
+
+test("reconfirm cannot use member text, unmarked ACKs, quotes, bot messages or negative/correction refs", () => {
+  const self = expiredFixture(), selfFresh = newEvidence(self, { eligible: false });
+  failed(self.root, () => reconfirmed(self, selfFresh), "INVALID_EVIDENCE");
+  human(self.root, "human-only", USER, self.original.expiresAt + 1);
+  failed(self.root, () => reconfirmed(self, selfFresh, { evidenceMessageIds: ["human-only"] }), "INVALID_EVIDENCE");
+  for (const flag of ["isQuoted", "isBot"]) {
+    const group = expiredFixture("group"), fresh = newEvidence(group);
+    conv(group.root).messages.find(m => m.messageId === fresh.ids[0])[flag] = true;
+    failed(group.root, () => reconfirmed(group, fresh), "INVALID_EVIDENCE");
+  }
+  for (const text of ["我不喜欢摄影", "更正 摄影并不是兴趣"]) {
+    const fixture = expiredFixture(), fresh = newEvidence(fixture, { text });
+    failed(fixture.root, () => reconfirmed(fixture, fresh), "NEGATIVE_EVIDENCE");
+  }
+});
+
+test("reconfirm never revives negative, correction, rejected or explicitly expired tombstones", () => {
+  for (const action of ["reject", "expire"]) {
+    const fixture = expiredFixture(), fresh = newEvidence(fixture);
+    assert.equal(reviewed(fixture.root, fixture.id, { action }).ok, true);
+    failed(fixture.root, () => reconfirmed(fixture, fresh), "TOMBSTONED");
+  }
+  for (const text of ["我不喜欢摄影", "更正 摄影并不是兴趣"]) {
+    const fixture = expiredFixture(), { root, id, original } = fixture;
+    ack(root, "negative", T + DAY + 1, { text });
+    assert.equal(record(root, { kind: "self", evidenceMessageIds: ["negative"], now: T + DAY + 1 }).status, "rejected");
+    const fresh = newEvidence(fixture);
+    failed(root, () => reconfirmed(fixture, fresh), "TOMBSTONED");
+    assert.equal(store(root).entries[0].id, id);
+    assert.deepEqual(store(root).entries[0].evidence.slice(0, 3), original.evidence);
+  }
+});
+
+test("explicit reconfirm preserves freeze and bounded audit across further ordinary writes and expiry cycles", () => {
+  const fixture = expiredFixture(), { root, id, original } = fixture, fresh = newEvidence(fixture, { count: 1 });
+  assert.equal(setSocialGrowthFrozen(root, { logicalId: BOT, expectedRevision: store(root).revision,
+    frozen: true, actor, reason: "pause", now: fresh.now }).ok, true);
+  assert.equal(reconfirmed(fixture, fresh).status, "candidate");
+  assert.equal(store(root).growthFrozen, true);
+  failed(root, () => record(root, { kind: "self", evidenceMessageIds: fresh.ids, now: fresh.now }), "GROWTH_FROZEN");
+  const secondOriginal = copy(store(root).entries[0]);
+  const second = { root, id, original: secondOriginal }, next = newEvidence(second, { count: 1, prefix: "cycle2" });
+  assert.equal(reconfirmed(second, next).status, "candidate");
+  assert.equal(store(root).entries[0].evidence.length, 5);
+  assert.equal(store(root).entries[0].firstSeenAt, original.firstSeenAt);
+  assert.equal(store(root).entries[0].review.previousExpiresAt, secondOriginal.expiresAt);
+  assert.equal(store(root).growthFrozen, true);
+  assert.equal(setSocialGrowthFrozen(root, { logicalId: BOT, expectedRevision: store(root).revision,
+    frozen: false, actor, reason: "resume", now: next.now }).ok, true);
+  assert.equal(record(root, { kind: "self", evidenceMessageIds: next.ids, now: next.now }).duplicate, true);
+  const audit = copy(store(root).entries[0].review);
+  ack(root, "ordinary1", next.now + 1); ack(root, "ordinary2", next.now + 2);
+  assert.equal(record(root, { kind: "self", evidenceMessageIds: ["ordinary1", "ordinary2"], now: next.now + 2 }).status, "active");
+  assert.deepEqual(store(root).entries[0].review, audit);
+  assert.equal(store(root).entries[0].evidence.length, 7);
+});
+
+test("reconfirm lifetime evidence capacity is non-evicting and failures preserve state", () => {
+  for (const count of [31, 32]) {
+    const root = {}, ids = Array.from({ length: count }, (_, i) => `old${i}`);
+    for (let i = 0; i < count; i++) ack(root, ids[i], T + i);
+    const result = record(root, { kind: "self", evidenceMessageIds: ids, now: T + count, coreText: "摄影" });
+    assert.equal(result.ok, true);
+    const fixture = { root, id: result.id, original: copy(store(root).entries[0]) }, fresh = newEvidence(fixture, { count: 1 });
+    if (count === 32) failed(root, () => reconfirmed(fixture, fresh), "BACKPRESSURE");
+    else {
+      assert.equal(reconfirmed(fixture, fresh).status, "candidate");
+      assert.equal(store(root).entries[0].evidence.length, 32);
+      assert.deepEqual(store(root).entries[0].evidence.slice(0, count), fixture.original.evidence);
+    }
+  }
+});
+
+test("reconfirm updates the existing slot at 256 entries without deleting or allocating another entry", () => {
+  const root = {}, labels = Array.from({ length: 256 }, (_, i) => `合成标签${i}`);
+  human(root, "h1", USER, T, labels.join(" "));
+  for (const value of labels) assert.equal(record(root, { value }).ok, true);
+  const fixture = { root, id: store(root).entries[0].id, original: copy(store(root).entries[0]) };
+  const rest = copy(store(root).entries.slice(1)), fresh = newEvidence(fixture, { count: 1, text: labels[0] });
+  assert.equal(reconfirmed(fixture, fresh).ok, true);
+  assert.equal(store(root).entries.length, 256);
+  assert.equal(store(root).entries[0].id, fixture.id);
+  assert.deepEqual(store(root).entries.slice(1), rest);
+});
+
+test("reconfirm fails atomically on non-writable slots, corrupt state and malicious schema", () => {
+  const fixture = expiredFixture(), fresh = newEvidence(fixture), { root } = fixture;
+  failed(root, () => reconfirmed(fixture, fresh, { ...JSON.parse('{"__proto__":{"polluted":true}}') }), "INVALID_ARGS");
+  failed(root, () => reconfirmed(fixture, fresh, { [Symbol("authority")]: true }), "INVALID_ARGS");
+  let calls = 0;
+  const request = { logicalId: BOT, id: fixture.id, expectedRevision: store(root).revision, conversationId: GROUP,
+    evidenceMessageIds: fresh.ids, actor, reason: "synthetic reconfirm", now: fresh.now };
+  Object.defineProperty(request, "coreText", { enumerable: true, get() { calls++; return "摄影"; } });
+  assert.equal(reconfirmSocialPreference(root, request).code, "SOCIAL_PREFERENCE_INVALID_ARGS");
+  assert.equal(calls, 0);
+  const damaged = copy(root); store(damaged).entries[0].confidence = 1;
+  failed(damaged, () => reconfirmed({ ...fixture, root: damaged }, fresh), "INVALID_STATE");
+  Object.defineProperty(bot(root), "socialPreferences", { writable: false });
+  failed(root, () => reconfirmed(fixture, fresh), "NOT_WRITABLE");
+  const absent = {};
+  failed(absent, () => reconfirmSocialPreference(absent, { ...request, coreText: "摄影", expectedRevision: 0 }), "NOT_FOUND");
+  assert.deepEqual(absent, {});
+});
+
+test("reconfirm audit validates strictly and old review schemas remain readable", () => {
+  const fixture = expiredFixture(), fresh = newEvidence(fixture);
+  assert.equal(reconfirmed(fixture, fresh).ok, true);
+  for (const mutate of [e => { delete e.review.previousExpiresAt; }, e => { e.review.previousExpiresAt = fresh.now; },
+    e => { e.review.previousExpiresAt--; }, e => { e.coreConsistency.hash = null; },
+    e => { e.review.compatibility = "compatible"; }, e => { e.review.extra = true; }]) {
+    const root = copy(fixture.root); mutate(store(root).entries[0]);
+    assert.throws(() => view(root, { now: fresh.now }), /INVALID_STATE/);
+  }
+  assert.equal(reviewed(fixture.root, fixture.id, { action: "approve", compatibility: "compatible", coreText: "摄影",
+    now: fresh.now }).ok, true);
+  assert.equal(own(store(fixture.root).entries[0].review, "previousExpiresAt"), false);
+  assert.equal(view(fixture.root, { now: fresh.now }).entries[0].review.action, "approve");
 });
 
 test("expired evidence cannot contribute to new maturity", () => {

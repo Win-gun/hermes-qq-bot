@@ -35,7 +35,7 @@ function accessor(key, value) {
   return Object.defineProperty({}, key, { enumerable: true, get() { throw new Error(`getter evaluated: ${value}`); } });
 }
 
-assert.deepEqual(Object.keys(api).sort(), ["applySelfRoleCard", "getSelfRoleCard", "normalizeRoleCardPolicy", "selfRoleCardPrompt"]);
+assert.deepEqual(Object.keys(api).sort(), ["applySelfRoleCard", "getSelfRoleCard", "normalizeRoleCardPolicy", "rollbackSelfRoleCard", "selfRoleCardPrompt"]);
 assert.deepEqual(normalizeRoleCardPolicy(), { enabled: false, autoGrow: false, minUpdateIntervalMs: DAY, maxVersions: 32 });
 const policy = normalizeRoleCardPolicy(); policy.enabled = true;
 assert.equal(normalizeRoleCardPolicy().enabled, false, "defaults are detached");

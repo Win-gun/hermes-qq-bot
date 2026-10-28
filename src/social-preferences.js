@@ -155,10 +155,18 @@ function validEntry(e, logicalId) {
     if (!list(e.feedback[key]) || JSON.stringify(e.feedback[key]) !== JSON.stringify(e.evidence
       .filter(ref => ref.polarity === type).map(ref => ref.messageId))) return false;
   }
-  if (e.review !== null && (!exact(e.review, ["action", "reason", "at", "compatibility"])
-    || !["approve", "reject", "expire"].includes(e.review.action) || !reasonOK(e.review.reason)
+  if (e.review !== null && (!record(e.review)
+    || !exact(e.review, e.review.action === "reconfirm"
+      ? ["action", "reason", "at", "compatibility", "previousExpiresAt"] : ["action", "reason", "at", "compatibility"])
+    || !["approve", "reject", "expire", "reconfirm"].includes(e.review.action) || !reasonOK(e.review.reason)
     || !stamp(e.review.at) || e.review.at > e.updatedAt || e.review.at < e.createdAt
     || (e.kind === "self" && e.review.action === "approve" ? e.review.compatibility !== "compatible" : e.review.compatibility !== null))) return false;
+  if (e.review?.action === "reconfirm" && (!stamp(e.review.previousExpiresAt)
+    || e.review.previousExpiresAt > e.review.at || (e.kind === "self" && c.hash === null)
+    || !e.evidence.some(ref => ref.sentAt + ttl(e.kind) === e.review.previousExpiresAt)
+    || !e.evidence.some(ref => ref.polarity === "positive"
+      && ref.sentAt > e.review.previousExpiresAt && ref.sentAt <= e.review.at
+      && e.review.at < ref.sentAt + ttl(e.kind)))) return false;
   if ((c.source === "admin") !== (e.kind === "self" && e.review?.action === "approve")) return false;
   if (e.tombstone !== null && (!exact(e.tombstone, ["type", "at", "reason"])
     || !["negative", "correction", "expired"].includes(e.tombstone.type) || !stamp(e.tombstone.at)
@@ -384,6 +392,62 @@ export function reviewSocialPreference(root, args = {}) {
     if (args.action !== "approve") e.tombstone = { type: args.action === "reject" ? "correction" : "expired",
       at: args.now, reason: args.reason };
     e.updatedAt = args.now;
+    e.confidence = confidence(e, args.now);
+    e.status = computedStatus(e, args.now);
+    return { ok: true, id: e.id, status: e.status };
+  });
+}
+
+/** Phase 6: host-only, explicit new evidence cycle for NATURAL TTL expiry only.
+ * Args: logicalId, id, expectedRevision, conversationId, evidenceMessageIds,
+ * actor:{authorized:true}, reason, now; member also needs exact userId; self
+ * MUST supply current trusted coreText (nonempty, <=32768). No kind/value/model
+ * authority, public record bypass flag, IO or separate publication path.
+ *
+ * Every supplied ID must be new to this entry and resolve in the current scoped
+ * conversation to fresh positive evidence strictly AFTER its previous expiresAt.
+ * Same ID/firstSeenAt/old refs are retained; 32 refs remains a hard lifetime cap.
+ * One/two new refs or insufficient diversity create only a candidate, NEVER an
+ * active preference. Old expired refs cannot qualify. Self compatibility is
+ * freshly evaluated against current coreText, not inherited from old approval;
+ * unknown stays candidate and may subsequently undergo explicit host approval.
+ *
+ * Like other explicit host reviews this does not clear/bypass growthFrozen for
+ * runtime projection. The audit adds previousExpiresAt only for action=reconfirm;
+ * legacy reviews retain their exact schema. No terminal tombstone is revived.
+ */
+export function reconfirmSocialPreference(root, args = {}) {
+  if (!keys(args, ["logicalId", "id", "expectedRevision", "conversationId", "userId", "evidenceMessageIds",
+    "actor", "reason", "now", "coreText"]) || !common(args)
+    || !required(args, ["id", "conversationId", "evidenceMessageIds", "actor", "reason"])
+    || typeof args.id !== "string" || !/^preference:[a-f0-9]{64}$/.test(args.id) || !group(args.conversationId)
+    || !actorOK(args.actor) || !reasonOK(args.reason)
+    || !list(args.evidenceMessageIds) || !args.evidenceMessageIds.length || !args.evidenceMessageIds.every(token)
+    || (own(args, "userId") && !qq(args.userId))
+    || (own(args, "coreText") && (typeof args.coreText !== "string" || !args.coreText.trim()
+      || args.coreText.length > 32_768))) return fail("INVALID_ARGS");
+  return write(root, args, (s, bot) => {
+    const e = s.entries.find(entry => entry.id === args.id);
+    if (!e) return fail("NOT_FOUND");
+    if (e.tombstone || e.status === "rejected" || e.feedback.negativeEvidenceIds.length
+      || e.feedback.correctionEvidenceIds.length) return fail("TOMBSTONED");
+    if (args.now < e.expiresAt) return fail("NOT_NATURALLY_EXPIRED");
+    if ((e.kind !== "self" && e.conversationId !== args.conversationId)
+      || (e.kind === "member" ? args.userId !== e.userId : own(args, "userId"))) return fail("SCOPE_MISMATCH");
+    if (e.kind === "self" ? !own(args, "coreText") : own(args, "coreText")) return fail("INVALID_ARGS");
+    if (args.evidenceMessageIds.some(id => e.evidence.some(ref => ref.messageId === id))) return fail("FRESH_EVIDENCE_REQUIRED");
+    const resolved = resolveEvidence(bot, { ...args, kind: e.kind, value: e.value });
+    if (!resolved.ok) return resolved;
+    if (resolved.refs.some(ref => ref.sentAt <= e.expiresAt)) return fail("FRESH_EVIDENCE_REQUIRED");
+    if (resolved.refs.some(ref => ref.polarity !== "positive")) return fail("NEGATIVE_EVIDENCE");
+    if (e.evidence.length + resolved.refs.length > MAX_EVIDENCE) return fail("BACKPRESSURE");
+    const previousExpiresAt = e.expiresAt;
+    e.evidence.push(...resolved.refs);
+    e.lastSeenAt = Math.max(...resolved.refs.map(ref => ref.sentAt));
+    e.expiresAt = e.lastSeenAt + ttl(e.kind);
+    e.updatedAt = args.now;
+    if (e.kind === "self") e.coreConsistency = consistency(args.coreText, e.value);
+    e.review = { action: "reconfirm", reason: args.reason, at: args.now, compatibility: null, previousExpiresAt };
     e.confidence = confidence(e, args.now);
     e.status = computedStatus(e, args.now);
     return { ok: true, id: e.id, status: e.status };

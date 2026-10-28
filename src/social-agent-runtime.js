@@ -1,5 +1,6 @@
 // Callback-only planner. No sockets, files, model clients or background timers.
 import { validateReplyPlan } from "./reply-plan.js";
+import { validateAgencyProposal } from "./social-agency.js";
 
 const TOOL_NAMES = ["read_unread", "read_detail", "read_history", "read_memory", "web_search", "schedule_followup"];
 const plain = value => value !== null && typeof value === "object" && !Array.isArray(value)
@@ -109,7 +110,11 @@ function validateArgs(name, args, seenSeq) {
 }
 
 function validateDecision(value, seenSeq, allowed, seenMessageIds) {
-  if (!keys(value, ["action", "messages", "throughSeq", "delayMs", "tool", "continuity", "usage", "materialIds", "interest"])) throw fail("SOCIAL_INVALID_DECISION");
+  if (!keys(value, ["action", "messages", "throughSeq", "delayMs", "tool", "continuity", "usage", "materialIds", "interest", "agency"])) throw fail("SOCIAL_INVALID_DECISION");
+  if (value.agency !== undefined) {
+    validateAgencyProposal(value.agency);
+    if (value.action === "tool" || (value.agency.useIntentIds?.length && value.action !== "reply")) throw fail("SOCIAL_INVALID_DECISION");
+  }
   if (value.materialIds !== undefined && (!Array.isArray(value.materialIds) || value.materialIds.length > 3
     || value.materialIds.some(id => !text(id, 160)))) throw fail("SOCIAL_INVALID_DECISION");
   if (!["reply", "observe", "wait", "dive", "tool"].includes(value.action)) throw fail("SOCIAL_INVALID_DECISION");
@@ -204,7 +209,7 @@ function validateDecision(value, seenSeq, allowed, seenMessageIds) {
  * Public methods return content-free codes; status never returns model text.
  */
 export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, callModel, tools = {}, sendIntent, isCurrent,
-  applyContinuity, applyInterest, onDecision, clock = Date.now } = {}) {
+  applyContinuity, applyInterest, applyAgency, onDecision, clock = Date.now } = {}) {
   if ([getPolicy, getSnapshot, transact, callModel, sendIntent, isCurrent].some(fn => typeof fn !== "function")) throw fail("SOCIAL_INVALID_CALLBACK");
   const now = typeof clock === "function" ? clock : () => clock.now();
   const setTimer = typeof clock.setTimeout === "function" ? clock.setTimeout.bind(clock) : setTimeout;
@@ -276,6 +281,12 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
     });
   }
   async function terminal(job, decision, seenSeq) {
+    if (decision.agency && !guard(job).shadow) {
+      if (job.reflectOnly || job.nativeWakeId || typeof applyAgency !== "function") throw fail("SOCIAL_INVALID_DECISION");
+      const result = await bounded(job, () => applyAgency(job.ctx, copy(decision.agency), {
+        stage: "complete", action: decision.action, seenMessageIds: [...job.seenMessageIds], seenSeq, now: now(), signal: job.controller.signal }));
+      if (result?.ok === false) throw fail("SOCIAL_INVALID_DECISION");
+    }
     if (decision.interest && !guard(job).shadow) {
       if (job.reflectOnly || job.discoveryWakeId || job.nativeWakeId || typeof applyInterest !== "function") throw fail("SOCIAL_INTEREST_REFUSED");
       await bounded(job, () => applyInterest(job.ctx, copy(decision.interest),
@@ -293,7 +304,7 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
         signal: job.controller.signal }));
     }
   }
-  async function schedule(job, action, delayMs, seenSeq, throughSeq, continuity, userId, interest) {
+  async function schedule(job, action, delayMs, seenSeq, throughSeq, continuity, userId, interest, agency) {
     const dueAt = now() + delayMs;
     const shadow = guard(job).shadow;
     if (!shadow && !allowed.includes("schedule_followup")) throw fail("SOCIAL_SCHEDULE_UNAVAILABLE");
@@ -302,7 +313,7 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
     await finish(job, { status: shadow ? "shadow" : "schedule_claimed", plannedAction: action,
       dueAt, lastProcessedSeq: seenSeq, ...(continuity ? { continuity } : {}) });
     if (shadow || guard(job).shadow) {
-      await terminal(job, { action, throughSeq, continuity, interest }, seenSeq);
+      await terminal(job, { action, throughSeq, continuity, interest, agency }, seenSeq);
       return { code: "SOCIAL_SHADOWED" };
     }
     await bounded(job, () => {
@@ -312,7 +323,7 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
         { signal: job.controller.signal, action, dueAt, throughSeq, ...recipient });
     });
     await finish(job, { status: action === "dive" ? "diving" : "waiting" });
-    await terminal(job, { action, throughSeq, continuity, interest }, seenSeq);
+    await terminal(job, { action, throughSeq, continuity, interest, agency }, seenSeq);
     return { code: "SOCIAL_WAITING" };
   }
   async function run(job) {
@@ -347,6 +358,7 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
         .map(item => item.messageId))].slice(0, 256);
       const start = await write(job, root => {
         const state = runtimeFor(root, job.ctx);
+        job.hasFreshInput = seenSeq > (state.lastProcessedSeq || 0);
         // Migrate prior in-flight claims before a new turn can overwrite status.
         // The durable fence survives new input, observe outcomes and restarts.
         if (!nativeWake(state.activeNativeWakeId)
@@ -460,7 +472,7 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
         const patch = { status: decision.action === "wait" ? "waiting" : decision.action === "dive" ? "diving" : "idle",
           ...(!job.discoveryWakeId && !job.nativeWakeId ? { lastProcessedSeq: seenSeq } : {}) };
         if (["wait", "dive"].includes(decision.action)) {
-          return await schedule(job, decision.action, decision.delayMs, seenSeq, decision.throughSeq, decision.continuity, undefined, decision.interest);
+          return await schedule(job, decision.action, decision.delayMs, seenSeq, decision.throughSeq, decision.continuity, undefined, decision.interest, decision.agency);
         }
         if (decision.continuity) patch.continuity = decision.continuity;
         if (decision.delayMs) patch.dueAt = now() + decision.delayMs;
@@ -491,9 +503,21 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
           guard(job);
           if (guard(job).shadow) return { code: "SOCIAL_SHADOWED" };
           metrics.intents += 1;
-          await bounded(job, () => sendIntent(job.ctx, { messages: decision.messages,
+          if (decision.agency) {
+            if (job.nativeWakeId || job.reflectOnly || typeof applyAgency !== "function") throw fail("SOCIAL_INVALID_DECISION");
+            if (job.resumeDue && !job.hasFreshInput && decision.agency.useIntentIds?.length) throw fail("SOCIAL_INVALID_DECISION");
+            const result = await bounded(job, () => applyAgency(job.ctx, copy(decision.agency), {
+              stage: "prepare", action: "reply", seenMessageIds: [...job.seenMessageIds], seenSeq, now: now(), signal }));
+            if (result?.ok === false) throw fail("SOCIAL_INVALID_DECISION");
+          }
+          const receipt = await bounded(job, () => sendIntent(job.ctx, { messages: decision.messages,
             materialIds: decision.materialIds || [], throughSeq: decision.throughSeq, seenSeq, signal,
             ...(expressionPlan ? { expressionPlan: copy(expressionPlan) } : {}) }));
+          // Legacy adapters resolve void only after verified completion. An
+          // explicit failure/uncertainty must never consume a semantic intent,
+          // even if a faulty adapter also says confirmed:true.
+          if (receipt === false || receipt?.ok === false || receipt?.uncertain === true
+            || ["uncertain", "failed", "unconfirmed"].includes(receipt?.status)) throw fail("SOCIAL_CALLBACK_FAILED");
         }
         await finish(job, patch);
         await terminal(job, decision, seenSeq);

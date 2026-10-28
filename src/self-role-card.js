@@ -1,5 +1,5 @@
 /**
- * Pure, synchronous account-owned draft store. Call apply ONLY inside the
+ * Pure, synchronous account-owned draft store. Call writers ONLY inside the
  * repository's latest-draft transaction. The caller verifies actual evidence,
  * identity, policy/quiet revisions and explicit authorization; IDs are not proof.
  * No IO, clock, model, automatic writer, permission inference or core persona edit.
@@ -88,13 +88,23 @@ function validCard(card) {
   let previous = {}, at = 0;
   for (let index = 0; index < card.versions.length; index++) {
     const version = card.versions[index];
-    if (!exactKeys(version, ["revision", "fields", "reason", "evidenceMessageIds", "at"])
+    const baseKeys = ["revision", "fields", "reason", "evidenceMessageIds", "at"];
+    if (!keys(version, [...baseKeys, "operation", "sourceRevision"])
+      || !baseKeys.every(key => own(version, key))
       || version.revision !== index + 1 || !positive(version.at) || version.at < at
       || !text(version.reason, 240) || !nonempty(version.reason)) return false;
     const snapshot = fieldsOf(version.fields), evidence = evidenceOf(version.evidenceMessageIds);
-    if (!snapshot || !changedNonempty(snapshot, previous) || !evidence
+    if (!snapshot || !evidence
       || evidence.length !== version.evidenceMessageIds.length
-      || evidence.some((id, i) => id !== version.evidenceMessageIds[i])
+      || evidence.some((id, i) => id !== version.evidenceMessageIds[i])) return false;
+    if (own(version, "operation") || own(version, "sourceRevision")) {
+      // Metadata is paired and rollback-only. Refer only to a fully validated
+      // earlier version, never this/future revisions or an invented revision 0.
+      if (!own(version, "operation") || version.operation !== "rollback" || !own(version, "sourceRevision")
+        || !positive(version.sourceRevision) || version.sourceRevision >= version.revision
+        || !sameFields(snapshot, card.versions[version.sourceRevision - 1].fields)
+        || sameFields(snapshot, previous)) return false;
+    } else if (!changedNonempty(snapshot, previous)
       || FIELD_NAMES.some(key => own(previous, key) && !own(snapshot, key))) return false;
     previous = snapshot;
     at = version.at;
@@ -120,6 +130,22 @@ function locate(root, logicalId) {
   return { target: bot, key: "selfRoleCard", card: bot.selfRoleCard };
 }
 
+function publishCard(slot, logicalId, card) {
+  const result = { ok: true, revision: card.revision, card: copy(card) };
+  const bot = { selfRoleCard: card }, bots = { [logicalId]: bot };
+  const value = slot.missing === "socialAgents" ? { version: 1, bots }
+    : slot.missing === "bots" ? bots : slot.missing === "bot" ? bot : card;
+  const descriptor = Object.getOwnPropertyDescriptor(slot.target, slot.key);
+  if (descriptor ? !descriptor.writable : !Object.isExtensible(slot.target)) return fail("NOT_WRITABLE");
+  // One data-property publication, after every check and all fallible copying.
+  // defineProperty cannot invoke an inherited setter on the publication slot.
+  try {
+    Object.defineProperty(slot.target, slot.key, descriptor ? { ...descriptor, value }
+      : { value, enumerable: true, configurable: true, writable: true });
+  } catch { return fail("NOT_WRITABLE"); }
+  return result;
+}
+
 /** Detached view. Absent defaults are read-only; invalid scope/state throws a
  * coded TypeError rather than masquerading as an absent card.
  */
@@ -130,7 +156,7 @@ export function getSelfRoleCard(root, options = {}) {
 
 /** Append one immutable-by-store snapshot using exact CAS. explicit bypasses
  * ONLY autoGrow/cooldown. Even explicit requests need enabled policy, evidence,
- * valid time/fields/CAS and free capacity. No rollback or automatic eviction.
+ * valid time/fields/CAS and free capacity. Merge-only; no automatic eviction.
  */
 export function applySelfRoleCard(root, args = {}) {
   if (!keys(args, ["logicalId", "expectedRevision", "fields", "reason", "evidenceMessageIds", "now", "policy", "explicit"])) {
@@ -169,19 +195,46 @@ export function applySelfRoleCard(root, args = {}) {
   const snapshot = { revision: nextRevision, fields: copy(merged), reason: args.reason,
     evidenceMessageIds, at: args.now };
   const card = { revision: nextRevision, fields: merged, versions: [...prior.versions, snapshot] };
-  const result = { ok: true, revision: nextRevision, card: copy(card) };
-  const bot = { selfRoleCard: card }, bots = { [args.logicalId]: bot };
-  const value = slot.missing === "socialAgents" ? { version: 1, bots }
-    : slot.missing === "bots" ? bots : slot.missing === "bot" ? bot : card;
-  const descriptor = Object.getOwnPropertyDescriptor(slot.target, slot.key);
-  if (descriptor ? !descriptor.writable : !Object.isExtensible(slot.target)) return fail("NOT_WRITABLE");
-  // One data-property publication, after every check and all fallible copying.
-  // defineProperty cannot invoke an inherited setter on the publication slot.
-  try {
-    Object.defineProperty(slot.target, slot.key, descriptor ? { ...descriptor, value }
-      : { value, enumerable: true, configurable: true, writable: true });
-  } catch { return fail("NOT_WRITABLE"); }
-  return result;
+  return publishCard(slot, args.logicalId, card);
+}
+
+/** Explicit administrator-host rollback, inside the same latest-draft writer.
+ * actor.authorized MUST be attached by an authenticated host, never model/HTTP
+ * prose. Exact old field presence/values replace (not merge into) current fields;
+ * missing fields are removed, while EVERY old version remains untouched.
+ * Appends {operation:'rollback',sourceRevision:targetRevision} with a generated
+ * audit reason and the original source version's evidence IDs, not new evidence.
+ * Like explicit apply, bypasses ONLY autoGrow/cooldown (freeze lives elsewhere).
+ * Enabled strict policy, exact CAS, monotonic time and capacity still apply.
+ * Success/rejection shapes are identical to applySelfRoleCard.
+ */
+export function rollbackSelfRoleCard(root, args = {}) {
+  if (!keys(args, ["logicalId", "expectedRevision", "targetRevision", "now", "policy", "actor"])) return fail("INVALID_ARGS");
+  if (!own(args, "logicalId") || !logical(args.logicalId)) return fail("INVALID_LOGICAL_ID");
+  if (!own(args, "actor") || !exactKeys(args.actor, ["authorized"]) || args.actor.authorized !== true) return fail("UNAUTHORIZED");
+  let policy;
+  try { policy = normalizeRoleCardPolicy(own(args, "policy") ? args.policy : undefined); }
+  catch { return fail("INVALID_POLICY"); }
+  if (!policy.enabled) return fail("DISABLED");
+  if (!own(args, "expectedRevision") || !revision(args.expectedRevision)) return fail("INVALID_REVISION");
+  if (!own(args, "targetRevision") || !positive(args.targetRevision)) return fail("INVALID_TARGET_REVISION");
+  if (!own(args, "now") || !positive(args.now)) return fail("INVALID_TIME");
+  let slot;
+  try { slot = locate(root, args.logicalId); }
+  catch { return fail("INVALID_STATE"); }
+  const prior = slot.card;
+  if (args.expectedRevision !== prior.revision) return fail("REVISION_CONFLICT");
+  if (args.targetRevision > prior.revision) return fail("INVALID_TARGET_REVISION");
+  if (prior.revision >= policy.maxVersions) return fail("CAPACITY");
+  if (args.now < prior.versions.at(-1).at) return fail("INVALID_TIME");
+  const source = prior.versions[args.targetRevision - 1];
+  if (sameFields(source.fields, prior.fields)) return fail("NO_CHANGE");
+  const fields = copy(source.fields), nextRevision = prior.revision + 1;
+  const snapshot = { revision: nextRevision, fields: copy(fields),
+    reason: `管理员回滚至版本 ${args.targetRevision}`, evidenceMessageIds: copy(source.evidenceMessageIds), at: args.now,
+    operation: "rollback", sourceRevision: args.targetRevision };
+  const card = { revision: nextRevision, fields, versions: [...prior.versions, snapshot] };
+  return publishCard(slot, args.logicalId, card);
 }
 
 /** Current preference data only: no history, reasons, evidence or inner thought.

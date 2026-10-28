@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { normalizeDiscoveryPolicy } from "./social-discovery-state.js";
 import { normalizeRoleCardPolicy } from "./self-role-card.js";
+import { normalizeAgencyPolicy } from "./social-agency.js";
 
 /**
  * Pure social continuity state. Invoke writers ONLY inside mutateMemory's
@@ -69,12 +70,16 @@ export function socialAgentConfig(value = {}) {
   let roleCard;
   try { roleCard = normalizeRoleCardPolicy(value.roleCard); }
   catch { roleCard = normalizeRoleCardPolicy(); }
+  let agency;
+  try { agency = normalizeAgencyPolicy(value.agency); }
+  catch { agency = normalizeAgencyPolicy(); }
   const profile = object(value.profile) ? value.profile : {};
   const cross = object(value.crossConversation) ? value.crossConversation : {};
   return {
     enabled: value.enabled === true,
     shadowMode: value.shadowMode !== false,
     roleCard,
+    agency,
     conversationIds: strings(value.conversationIds, conversation, 128),
     profile: Object.fromEntries(["identity", "selfName", "expression", "interests", "boundaries", "examples"]
       .map(key => [key, clean(profile[key], key === "examples" ? 2000 : 800)])),
