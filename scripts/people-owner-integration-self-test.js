@@ -168,7 +168,9 @@ function access(v,write){const p=filePath(v);if(p===null)return;const local=p===
  const source=p===root||p.startsWith(root+path.sep);const relative=path.relative(root,p);
  const runtime=/^(?:config\\.json(?:\\.|$)|data(?:\\/|$)|logs(?:\\/|$)|secrets(?:\\/|$)|napcat[^/]*(?:\\/|$)|snowluma[^/]*(?:\\/|$))/.test(relative);
  if(write?!local:(!local&&!(source&&!runtime)&&p!=='/dev/null'))denied('filesystem',write?'FIXTURE_WRITE_OUTSIDE_HOME':'FIXTURE_READ_OUTSIDE_SAFE_ROOTS');}
-for(const name of ['readFileSync','readFile','existsSync','statSync','lstatSync','accessSync','readdirSync','createReadStream']){const old=fs[name];fs[name]=function(file,...args){access(file,false);return old.call(this,file,...args);};}
+// Linux's backend attests only procfs existence during construction. Permit
+// that exact metadata probe, never listing/reading procfs or opening its FDs.
+for(const name of ['readFileSync','readFile','existsSync','statSync','lstatSync','accessSync','readdirSync','createReadStream']){const old=fs[name];fs[name]=function(file,...args){if(process.platform==='linux'&&name==='existsSync'&&filePath(file)==='/proc/self/fd'){record('platformProbe','PROC_FD_EXISTS');return old.call(this,file,...args);}access(file,false);return old.call(this,file,...args);};}
 for(const name of ['writeFileSync','writeFile','appendFileSync','appendFile','mkdirSync','mkdir','rmSync','rm','unlinkSync','unlink','rmdirSync','rmdir','createWriteStream','chmodSync','chmod','utimesSync']){const old=fs[name];if(old)fs[name]=function(file,...args){access(file,true);return old.call(this,file,...args);};}
 for(const name of ['renameSync','rename','linkSync','link','copyFileSync','copyFile']){const old=fs[name];fs[name]=function(a,b,...args){access(a,true);access(b,true);return old.call(this,a,b,...args);};}
 for(const name of ['openSync','open']){const old=fs[name];fs[name]=function(file,flags,...args){access(file,typeof flags==='number'?flags!==0:/[wa+]/.test(String(flags)));return old.call(this,file,flags,...args);};}
@@ -659,6 +661,7 @@ try {
     check(guards.some(row => row.type === "timer" && row.code === "ONEBOT_SEND_ACK_5000MS"), "legacy OneBot send timer recognized at 20s only");
     check(guards.some(row => row.type === "timer" && row.code === "ONEBOT_REQUEST_ACK_5000MS"), "owner raw request ACK timer recognized at 20s only");
     check(guards.filter(row => row.type === "spawnSyncDenied").every(row => !["security", "hermes", "hermesqq2"].includes(row.code)), "no Keychain or CLI model lookup");
+    if (process.platform === "linux") check(guards.some(row => row.type === "platformProbe" && row.code === "PROC_FD_EXISTS"), "only exact Linux procfs existence probe is admitted");
   }, "scripts/people-owner-integration-self-test.js fixture preload");
   if (process.env.HERMES_QQ_PEOPLE_UI === "1") await holdForUi();
 } catch (error) {
