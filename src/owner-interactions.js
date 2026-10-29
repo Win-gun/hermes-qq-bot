@@ -50,37 +50,62 @@ function message(value) {
   return typeof value === 'string' && value !== '0' && /^-?[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(value)
     ? value : null;
 }
-function validState(state) {
+/** One pass over untrusted persisted state: validate every row and return the
+ * dedup/dimension indexes derived from those same rows, or null when corrupt.
+ * Each day row is hashed once, not once per check. Callers must not treat the
+ * returned indexes as a cache across writes; they describe only this snapshot.
+ */
+function inspectState(state) {
   if (!object(state) || state.version !== 1 || !time(state.startedAt) || !time(state.watermark)
     || state.watermark < state.startedAt || !Array.isArray(state.events)
     || state.events.length > OWNER_INTERACTION_LIMITS.events || !Array.isArray(state.days)
     || state.days.length > OWNER_INTERACTION_LIMITS.dayDimensions || !Array.isArray(state.gaps)
-    || state.gaps.length > 31) return false;
-  const events = new Set(), days = new Set(), gaps = new Set();
-  return state.events.every(row => object(row) && dimensions(row) && hex(row.key) && !events.has(row.key)
-    && (events.add(row.key), true) && time(row.at) && row.at <= state.watermark
-    && ['received', 'sent'].includes(row.direction) && ['group', 'private'].includes(row.channel))
-    && state.days.every(row => object(row) && dimensions(row) && time(row.day) && dayOf(row.day) === row.day
-      && row.day <= state.watermark && countsValid(row)
-      && !days.has(hash([row.day, row.logicalBotId, row.accountId]))
-      && (days.add(hash([row.day, row.logicalBotId, row.accountId])), true))
-    && state.gaps.every(row => object(row) && time(row.day) && dayOf(row.day) === row.day
-      && time(row.from) && time(row.to) && row.from < row.to && dayOf(row.from) === row.day
-      && row.to <= row.day + DAY && row.to <= state.watermark + 1 && !gaps.has(row.day)
-      && (gaps.add(row.day), true));
+    || state.gaps.length > 31) return null;
+  const events = new Set(), days = new Set(), gaps = new Set(), dayIndex = new Map();
+  let oldestEvent = null, oldestDay = null, oldestGap = null;
+  for (const row of state.events) {
+    if (!object(row) || !dimensions(row) || !hex(row.key) || events.has(row.key) || !time(row.at)
+      || row.at > state.watermark || !['received', 'sent'].includes(row.direction)
+      || !['group', 'private'].includes(row.channel)) return null;
+    events.add(row.key);
+    if (oldestEvent === null || row.at < oldestEvent) oldestEvent = row.at;
+  }
+  for (const row of state.days) {
+    if (!object(row) || !dimensions(row) || !time(row.day) || dayOf(row.day) !== row.day
+      || row.day > state.watermark || !countsValid(row)) return null;
+    const key = hash([row.day, row.logicalBotId, row.accountId]);
+    if (days.has(key)) return null;
+    days.add(key);
+    dayIndex.set(key, row);
+    if (oldestDay === null || row.day < oldestDay) oldestDay = row.day;
+  }
+  for (const row of state.gaps) {
+    if (!object(row) || !time(row.day) || dayOf(row.day) !== row.day || !time(row.from) || !time(row.to)
+      || row.from >= row.to || dayOf(row.from) !== row.day || row.to > row.day + DAY
+      || row.to > state.watermark + 1 || gaps.has(row.day)) return null;
+    gaps.add(row.day);
+    if (oldestGap === null || row.to < oldestGap) oldestGap = row.to;
+  }
+  return { events, days, dayIndex, gaps, oldestEvent, oldestDay, oldestGap };
 }
 function add(counts, row) {
   counts[row.direction] += 1;
   counts[row.channel === 'group' ? 'groupMessages' : 'privateMessages'] += 1;
 }
-function prune(state) {
+/** Rebuild only when the retention cutoff has actually passed a retained row. */
+function prune(state, index) {
   const cutoff = Math.max(0, state.watermark - OWNER_INTERACTION_LIMITS.retentionMs);
+  const stale = (index.oldestEvent !== null && index.oldestEvent < cutoff)
+    || (index.oldestDay !== null && index.oldestDay + DAY <= cutoff)
+    || (index.oldestGap !== null && index.oldestGap <= cutoff);
+  if (!stale) return false;
   state.events = state.events.filter(row => row.at >= cutoff);
   // Preserve the original full-day counts even when exact detail at the left
   // retention edge expires. Queries never use these to guess partial-day data.
   state.days = state.days.filter(row => row.day + DAY > cutoff);
   state.gaps = state.gaps.filter(row => row.to > cutoff)
     .map(row => ({ ...row, from: Math.max(row.from, cutoff) }));
+  return true;
 }
 function markGap(state, at) {
   const day = dayOf(at), gap = state.gaps.find(row => row.day === day);
@@ -98,14 +123,15 @@ export function recordOwnerInteraction(root, input = {}) {
   const channel = conversation(conversationId), id = message(messageId);
   if (!channel || id === null) return failure('INVALID_ID');
   const old = root.ownerInteractions;
-  if (old !== undefined && !validState(old)) return failure('INVALID_STATE');
+  const index = old === undefined ? null : inspectState(old);
+  if (old !== undefined && !index) return failure('INVALID_STATE');
   const watermark = Math.max(old?.watermark ?? now, now);
   if (at > watermark) return failure('FUTURE_EVENT');
   if (!old && at < Math.max(0, watermark - OWNER_INTERACTION_LIMITS.retentionMs))
     return { ok: true, recorded: false, ignored: 'expired' };
   const state = old ?? { version: 1, startedAt: now, watermark, events: [], days: [], gaps: [] };
   state.watermark = watermark;
-  prune(state);
+  if (index) prune(state, index);
   root.ownerInteractions = state;
   if (at < Math.max(0, watermark - OWNER_INTERACTION_LIMITS.retentionMs))
     return { ok: true, recorded: false, ignored: 'expired' };
@@ -114,9 +140,15 @@ export function recordOwnerInteraction(root, input = {}) {
   // IDs and message content are never retained.
   const key = hash(['owner-interactions:v1', dayOf(at), logicalBotId, accountId,
     channel.key, direction, id]);
-  if (state.events.some(row => row.key === key)) return { ok: true, recorded: false, duplicate: true };
-  let daily = state.days.find(row => row.day === dayOf(at)
-    && row.logicalBotId === logicalBotId && row.accountId === accountId);
+  // The dedup index above was built from the same rows; prune only removes
+  // rows older than the retention cutoff, which already failed this check.
+  if (index ? index.events.has(key) : state.events.some(row => row.key === key))
+    return { ok: true, recorded: false, duplicate: true };
+  const day = dayOf(at), dailyKey = hash([day, logicalBotId, accountId]);
+  // The index was built from the same retained rows; a day row for `at` always
+  // survives prune because day + DAY > at >= cutoff.
+  const daily = (index ? index.dayIndex.get(dailyKey) : undefined)
+    ?? state.days.find(row => row.day === day && row.logicalBotId === logicalBotId && row.accountId === accountId);
   if (state.events.length >= OWNER_INTERACTION_LIMITS.events
     || (!daily && state.days.length >= OWNER_INTERACTION_LIMITS.dayDimensions)) {
     markGap(state, at);
@@ -124,11 +156,12 @@ export function recordOwnerInteraction(root, input = {}) {
   }
   const row = { key, at, logicalBotId, accountId, direction, channel: channel.channel };
   state.events.push(row);
-  if (!daily) {
-    daily = { day: dayOf(at), logicalBotId, accountId, ...zeros() };
-    state.days.push(daily);
+  if (daily) add(daily, row);
+  else {
+    const created = { day, logicalBotId, accountId, ...zeros() };
+    state.days.push(created);
+    add(created, row);
   }
-  add(daily, row);
   return { ok: true, recorded: true, duplicate: false };
 }
 
@@ -142,7 +175,7 @@ export function queryOwnerInteractions(root, options = {}) {
   if (!object(root)) return empty('invalid', ['INVALID_STATE']);
   const state = root.ownerInteractions;
   if (state === undefined) return empty('not_started', ['NOT_STARTED']);
-  if (!validState(state)) return empty('invalid', ['INVALID_STATE']);
+  if (!inspectState(state)) return empty('invalid', ['INVALID_STATE']);
   const coverageFrom = Math.max(state.startedAt, state.watermark - OWNER_INTERACTION_LIMITS.retentionMs, 0);
   const coverageTo = state.watermark + 1;
   const reasons = [];

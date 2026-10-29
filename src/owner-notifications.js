@@ -108,9 +108,65 @@ function summaryDate(at, timezone) {
   return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}.${p.fractionalSecond} ${p.timeZoneName}`;
 }
 
+/** Genuine host event families only. Each entry is a machine code the host has
+ * actually observed and may record in the operational ledger; the Chinese text
+ * is a fixed description, never model output or event text. Adding a code here
+ * is a description decision, NOT authority: severity, recipients and critical
+ * alerting stay with the host's own events and config.
+ */
+export const OWNER_EVENT_CODES = Object.freeze({
+  MODEL_CALL_FAILED: "模型调用失败",
+  MODEL_TIMEOUT: "模型调用超时",
+  ONEBOT_UNAVAILABLE: "OneBot 连接不可用",
+  ONEBOT_SEND_FAILED: "OneBot 发送失败",
+  STICKER_SEND_FAILED: "表情发送失败",
+  PERMISSION_DENIED: "权限校验未通过",
+  MEMORY_WRITE_FAILED: "记忆写入失败",
+  MEMORY_WRITE_UNCERTAIN: "记忆写入结果不确定",
+  CONFIG_INVALID: "配置校验失败",
+  IDENTITY_UNVERIFIED: "身份核验未通过",
+  PROTOCOL_AUTH_REQUIRED: "协议端需要重新登录",
+  TASK_FAILED: "后台任务失败",
+  TASK_INTERRUPTED: "后台任务被中断",
+  OWNER_NOTIFICATIONS_PERSISTENCE_UNCERTAIN: "通知状态写入结果不确定",
+  RESTART_UNCERTAIN: "重启后发送结果不确定",
+});
+/** Concise Chinese description for a known host code, or null. Unknown codes are
+ * still shown as their machine identifier; no free-form text is ever echoed.
+ */
+export function describeOwnerEventCode(code) {
+  return codeId(code) && Object.hasOwn(OWNER_EVENT_CODES, code) ? OWNER_EVENT_CODES[code] : null;
+}
+/** Host-side mapping from an actually observed failure family to a canonical
+ * ledger code. Absence of a receipt, an unknown receipt and every success are
+ * NOT failures and return null: never record an unproven outcome as a fault.
+ */
+export function ownerFailureEventCode(family, detail) {
+  const table = {
+    model: { failed: "MODEL_CALL_FAILED", timeout: "MODEL_TIMEOUT" },
+    onebot: { unavailable: "ONEBOT_UNAVAILABLE", failed: "ONEBOT_SEND_FAILED" },
+    sticker: { failed: "STICKER_SEND_FAILED" },
+    permission: { denied: "PERMISSION_DENIED" },
+    memory: { failed: "MEMORY_WRITE_FAILED", uncertain: "MEMORY_WRITE_UNCERTAIN" },
+    config: { invalid: "CONFIG_INVALID" },
+    identity: { unverified: "IDENTITY_UNVERIFIED" },
+    protocol: { authRequired: "PROTOCOL_AUTH_REQUIRED" },
+    task: { failed: "TASK_FAILED", interrupted: "TASK_INTERRUPTED" },
+  };
+  if (typeof family !== "string" || !Object.hasOwn(table, family)) return null;
+  if (typeof detail !== "string" || !Object.hasOwn(table[family], detail)) return null;
+  return table[family][detail];
+}
+
 /** Numeric/validated-calendar whitelist only. No task descriptions, model
  * output, errors, raw messages, credentials, URLs, account names or free-form
  * range/basis/pricing prose ever enter the summary/state.
+ *
+ * OPTIONAL trusted inputs (host-computed, never model prose) may be supplied
+ * for a richer deterministic summary: period ("morning"/"evening"), lastNight
+ * activity counters, people:{new}, blockers (operational events or already
+ * folded {code,state} rows) and pendingOperations. Every one of them is
+ * re-validated and re-projectable, so sanitize(safe) === safe still holds.
  */
 export function sanitizeOwnerNotificationFacts(raw = {}) {
   const safeCounts = (value, keys) => Object.fromEntries(keys.map(key => [key, count(value?.[key])]));
@@ -152,7 +208,38 @@ export function sanitizeOwnerNotificationFacts(raw = {}) {
     offlineAccounts: count(raw?.operational?.offlineAccounts) ?? (accounts ? accounts.filter(account => account?.status === "offline").length : null),
     pendingOperations: count(raw?.operational?.pendingOperations) ?? count(raw?.pendingOperations)
       ?? (array(raw?.pendingOperations)?.length ?? null) },
-  interactions: { ...safeCounts(interactionPartial ? null : interaction, interactionKeys), observed, complete: interactionComplete } };
+  interactions: { ...safeCounts(interactionPartial ? null : interaction, interactionKeys), observed, complete: interactionComplete },
+  period: raw?.period === "morning" || raw?.period === "evening" ? raw.period : null,
+  lastNight: sanitizeLastNight(raw?.lastNight ?? raw?.sinceLastWindow),
+  people: { new: count(raw?.people?.new ?? raw?.newPeople ?? raw?.operational?.newPeople) },
+  blockers: sanitizeBlockers(raw?.blockers ?? events) };
+}
+const LAST_NIGHT_KEYS = ["modelCalls", "failedCalls", "received", "sent", "newPeople", "unresolvedEvents", "restoredEvents"];
+function sanitizeLastNight(raw) {
+  if (!object(raw)) return null;
+  const safe = Object.fromEntries(LAST_NIGHT_KEYS.map(key => [key, count(raw[key])]));
+  return LAST_NIGHT_KEYS.some(key => safe[key] !== null) ? safe : null;
+}
+const blockerState = value => value === "unresolved" || value === "restored" ? value
+  : value === true ? "restored" : value === false ? "unresolved" : null;
+/** Fold retained operational events (or already-folded rows) into per-code
+ * current state. Unresolved wins: a later resolution must arrive as the SAME
+ * single row (queryOperationalEvents currentOnly:true) to be reported restored,
+ * so a pruned or reordered history can never silently look resolved.
+ */
+function sanitizeBlockers(raw) {
+  const list = Array.isArray(raw) && raw.length <= 1024 ? raw : null;
+  if (!list) return null;
+  const folded = new Map();
+  for (const item of list) {
+    if (!object(item) || !codeId(item.code) || !Object.hasOwn(OWNER_EVENT_CODES, item.code)) continue;
+    const state = blockerState(item.state ?? item.resolved);
+    if (state === null) continue;
+    if (folded.get(item.code) !== "unresolved") folded.set(item.code, state);
+  }
+  return folded.size ? [...folded.entries()]
+    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+    .map(([code, state]) => ({ code, state })) : null;
 }
 export function formatOwnerNotificationSummary(facts, { criticalCode } = {}) {
   const safe = sanitizeOwnerNotificationFacts(facts);
@@ -170,6 +257,18 @@ export function formatOwnerNotificationSummary(facts, { criticalCode } = {}) {
   lines.push("价格/费用：未知（未核实价格，不估算）。");
   lines.push(safe.interactions.complete ? `完整交互计数：收到 ${show(safe.interactions.received)}；发出 ${show(safe.interactions.sent)}`
     : `交互计数：已观测收到 ${show(safe.interactions.observed.received)}；发出 ${show(safe.interactions.observed.sent)}，完整总数未知。`);
+  lines.push(safe.people.new !== null ? `新联系人计数：${show(safe.people.new)}` : "新联系人计数：未知（未提供有效计数）");
+  if (safe.lastNight) {
+    const morning = safe.period !== "evening";
+    const part = key => safe.lastNight[key] === null ? "未知" : show(safe.lastNight[key]);
+    lines.push(`${morning ? "昨夜活动" : "本时段活动"}：模型调用 ${part("modelCalls")}（失败 ${part("failedCalls")}）；收到消息 ${part("received")}；发出消息 ${part("sent")}；新增联系人 ${part("newPeople")}`);
+    lines.push(`${morning ? "昨夜事件" : "本时段事件"}：未解决 ${part("unresolvedEvents")}；已恢复 ${part("restoredEvents")}`);
+  }
+  lines.push(safe.blockers ? `当前未解决事件：${safe.blockers.filter(item => item.state === "unresolved")
+    .map(item => `${item.code}（${OWNER_EVENT_CODES[item.code]}）`).join("；") || "无"}`
+    : "当前未解决事件：未知（未提供有效事件计数）");
+  const restored = safe.blockers?.filter(item => item.state === "restored") ?? [];
+  if (restored.length) lines.push(`已恢复事件：${restored.map(item => `${item.code}（${OWNER_EVENT_CODES[item.code]}）`).join("；")}`);
   lines.push("仅含计数；运行问题未解决时不会据此标记完成。详情请在本机控制台查看。");
   return lines.join("\n");
 }
