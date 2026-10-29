@@ -119,8 +119,9 @@ function count(stats, reason) {
 function scanOrder(root) {
   const groups = own(root, "groups");
   if (!plain(groups)) return null;
-  const keys = Object.keys(groups).filter(key => legacyJobScope(key) !== null).sort()
-    .slice(0, PEOPLE_MIGRATION_LIMITS.scanGroups);
+  // Limit the traversal, not the address space. Slicing before applying the
+  // resume cursor permanently hid later groups/people and could report DONE.
+  const keys = Object.keys(groups).filter(key => legacyJobScope(key) !== null).sort();
   return keys.map(jobKey => ({ jobKey, group: own(groups, jobKey), job: legacyJobScope(jobKey) }));
 }
 
@@ -175,23 +176,24 @@ export function migrateLegacyCanonicalPeople(root, args = {}) {
   const reject = (entry, reason, logicalBotId) => {
     count(stats, reason);
     if (output.rejected.length < PEOPLE_MIGRATION_LIMITS.appliedPerCall) output.rejected.push({
-      jobKey: entry.jobKey, subjectUserId: entry.subjectUserId, kind: entry.canonical.kind,
+      jobKey: entry.jobKey, subjectUserId: entry.subjectUserId, kind: entry.canonical?.kind || "unknown",
       reason, ...(logicalBotId === undefined ? {} : { logicalBotId }) });
   };
   for (const { jobKey, group, job } of order) {
     // Resume: skip whole job keys strictly before the persisted cursor.
     if (cursor.jobKey !== null && jobKey < cursor.jobKey) continue;
+    if (stats.groups >= PEOPLE_MIGRATION_LIMITS.scanGroups) { next = { jobKey, userId: null, entryIndex: 0, done: false }; break; }
     stats.groups += 1;
     const users = group === null || typeof group !== "object" ? null : own(group, "users");
     const index = group === null || typeof group !== "object" ? null : own(group, "peopleSourceIndex");
-    const people = plain(users) ? Object.keys(users).filter(key => qq(key) !== null).sort()
-      .slice(0, PEOPLE_MIGRATION_LIMITS.scanPeople) : [];
+    const people = plain(users) ? Object.keys(users).filter(key => qq(key) !== null).sort() : [];
     for (const userId of people) {
       if (cursor.jobKey === jobKey && cursor.userId !== null && userId < cursor.userId) continue;
+      if (stats.people >= PEOPLE_MIGRATION_LIMITS.scanPeople) { next = { jobKey, userId, entryIndex: 0, done: false }; break; }
       stats.people += 1;
       const holder = own(users, userId), canonical = plain(holder) ? own(holder, "canonicalMemory") : null;
-      if (!plain(canonical) || qq(canonical.subjectUserId) !== userId
-        || !list(canonical.entries, PEOPLE_MIGRATION_LIMITS.scanEntries)) continue;
+      if (!plain(canonical) || qq(canonical.subjectUserId) !== userId) continue;
+      if (!list(canonical.entries, 4096)) { count(stats, "CANONICAL_CONTAINER_INVALID_OR_CAPACITY"); continue; }
       for (let entryIndex = 0; entryIndex < canonical.entries.length; entryIndex++) {
         if (cursor.jobKey === jobKey && cursor.userId === userId && entryIndex < cursor.entryIndex) continue;
         if (scanned >= scanEntries || writes >= limit) { next = { jobKey, userId, entryIndex, done: false }; break; }
@@ -309,20 +311,23 @@ export function peopleMigrationStats(root, args = {}) {
   const order = scanOrder(root);
   if (order === null) return { ...output, reason: "INVALID_STATE" };
   const stats = output.stats;
-  for (const { jobKey, group } of order) {
+  let pending = null;
+  scan: for (const { jobKey, group } of order) {
     if (cursor.jobKey !== null && jobKey < cursor.jobKey) continue;
+    if (stats.groups >= PEOPLE_MIGRATION_LIMITS.scanGroups) { pending = { jobKey, userId: null, entryIndex: 0, done: false }; break; }
     stats.groups += 1;
     const users = group === null || typeof group !== "object" ? null : own(group, "users");
     if (!plain(users)) continue;
-    for (const userId of Object.keys(users).filter(key => qq(key) !== null).sort()
-      .slice(0, PEOPLE_MIGRATION_LIMITS.scanPeople)) {
+    for (const userId of Object.keys(users).filter(key => qq(key) !== null).sort()) {
       if (cursor.jobKey === jobKey && cursor.userId !== null && userId < cursor.userId) continue;
+      if (stats.people >= PEOPLE_MIGRATION_LIMITS.scanPeople) { pending = { jobKey, userId, entryIndex: 0, done: false }; break scan; }
       stats.people += 1;
       const holder = own(users, userId), canonical = plain(holder) ? own(holder, "canonicalMemory") : null;
-      if (!plain(canonical) || qq(canonical.subjectUserId) !== userId
-        || !list(canonical.entries, PEOPLE_MIGRATION_LIMITS.scanEntries)) continue;
+      if (!plain(canonical) || qq(canonical.subjectUserId) !== userId) continue;
+      if (!list(canonical.entries, 4096)) { count(stats, "CANONICAL_CONTAINER_INVALID_OR_CAPACITY"); continue; }
       for (let entryIndex = 0; entryIndex < canonical.entries.length; entryIndex++) {
         if (cursor.jobKey === jobKey && cursor.userId === userId && entryIndex < cursor.entryIndex) continue;
+        if (stats.entries >= PEOPLE_MIGRATION_LIMITS.scanEntries) { pending = { jobKey, userId, entryIndex, done: false }; break scan; }
         stats.entries += 1;
         const canonicalEntry = canonical.entries[entryIndex];
         if (!plain(canonicalEntry)) { count(stats, "MALFORMED_CANONICAL"); continue; }
@@ -347,7 +352,8 @@ export function peopleMigrationStats(root, args = {}) {
       }
     }
   }
-  output.cursor = { ...cursor };
+  output.cursor = pending ?? { jobKey: null, userId: null, entryIndex: 0, done: true };
+  output.stats.truncated = Boolean(pending);
   output.ok = true;
   output.reason = "STATS";
   return output;

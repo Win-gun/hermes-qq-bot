@@ -2,7 +2,7 @@ import { createOwnerCommandRouter, ownerOperationHistory, putOwnerDirective, rev
   ownerAddressFor, ownerAddressAvoided, ownerGroupParticipationReduced, ownerDirectiveById,
   ownerActiveDirectives } from './owner-authority.js';
 import { buildOwnerIntentContext, resolveOwnerUtterance, parseOwnerQueryUtterance } from './owner-intent.js';
-import { normalizeOwnerNotifications, getOwnerNotificationStatus } from './owner-notifications.js';
+import { normalizeOwnerNotifications, getOwnerNotificationStatus, describeOwnerEventCode } from './owner-notifications.js';
 import { queryModelUsage, queryOperationalEvents } from './operational-ledger.js';
 import { queryOwnerInteractions } from './owner-interactions.js';
 import { queryPersonMemory, administerPersonMemory } from './people-memory.js';
@@ -23,15 +23,28 @@ export function formatOwnerQueryResult(action, data) {
   if(action==='tokens'){
     const s=data?.stats,t=s?.tokens?.totalTokens;
     lines.push(`已记录调用尝试 ${count(s?.callCount)} 次：已确认 ${count(s?.confirmedCallCount)}，失败 ${count(s?.failedCallCount)}，不确定 ${count(s?.uncertainCallCount)}，待结算 ${count(s?.pendingCallCount)}。`,
+      `已知输入 Token ${count(s?.tokens?.inputTokens?.knownTokens)}；已知输出 Token ${count(s?.tokens?.outputTokens?.knownTokens)}。`,
       `已知 Token ${count(t?.knownTokens)}；缺失用量 ${count(s?.unknownCallCount)} 次；完整 Token 总量 ${count(t?.total)}。`,
       data?.coverage?.complete===true?'查询时段已覆盖；缺失字段仍为未知。':'存在未覆盖时段；已记录值只是下界，不能把缺失历史算作零。',
       '费用未知：未配置独立核实的价格，联网插件另计费；调用尝试不等于供应商计费请求。');
+    const models=new Map();
+    for(const row of Array.isArray(data?.days)?data.days:[]){
+      if(typeof row.model!=='string'||!row.stats)continue;
+      const totals=models.get(row.model)||{calls:0,input:0,output:0,unknown:0};
+      for(const [key,value] of Object.entries({calls:row.stats.callCount,input:row.stats.tokens?.inputTokens?.knownTokens,
+        output:row.stats.tokens?.outputTokens?.knownTokens,unknown:row.stats.unknownCallCount}))
+        if(Number.isSafeInteger(value)&&value>=0)totals[key]+=value;
+      models.set(row.model,totals);
+    }
+    for(const [model,totals]of [...models].slice(0,5))lines.push(`${brief(model)}：已记录 ${count(totals.calls)} 次；已知输入/输出 ${count(totals.input)}/${count(totals.output)}；用量缺失 ${count(totals.unknown)} 次。`);
   }else if(action==='status'){
     lines.push(...(data?.accounts||[]).slice(0,16).map(a=>`${brief(a.id)}：${brief(a.status)}`),
       `全局主人通知：${data?.notifications?.enabled?'开启':'关闭'}；${(data?.notifications?.times||[]).map(brief).join('、')}；${brief(data?.notifications?.timezone)}。`);
   }else if(action==='blockers'){
     lines.push(`已记录当前阻碍 ${count(data?.count)} 项；${data?.coverage?.complete===true?'时段已覆盖':'覆盖不完整，不能推断其余时段无故障'}。`,
-      ...(data?.events||[]).slice(0,10).map(e=>`${brief(e.code)} · ${brief(e.accountId)} · ${brief(e.severity)} · ${stamp(e.time)}`));
+      ...(data?.events||[]).slice(0,10).map(e=>`${describeOwnerEventCode(e.code)||brief(e.code)} · ${brief(e.accountId)} · 尚未核实恢复 · ${stamp(e.time)}`),
+      ...(data?.recovered||[]).slice(0,4).map(e=>`${describeOwnerEventCode(e.code)||brief(e.code)} · ${brief(e.accountId)} · 已有恢复证据 · ${stamp(e.time)}`),
+      '只有明确提示需要登录、配置或权限处理时才需要人工介入；未恢复不等于已经定位根因。');
   }else if(action==='history'||action==='tasks'){
     if(action==='tasks')lines.push(`当前任务：运行 ${count(data?.running)}，排队 ${count(data?.queued)}。`);
     lines.push(...(data?.operations||[]).slice(0,10).map(op=>`${brief(op.id)} · ${brief(op.accountId)} · ${brief(op.action)} · ${brief(op.status)} · ${brief(op.code)}`));
@@ -177,7 +190,9 @@ export function createOwnerServices(host) {
     const range=ownerQueryRange(now(),intent.days||1,notificationPolicy().timezone);
     const filters=intent.accountId?{accountId:intent.accountId}:{};
     if(intent.action==='tokens')return{...queryModelUsage(read(),{from:range.from,to:range.to,...filters}),range,prices:'unknown unless independently verified host pricing is available'};
-    if(intent.action==='blockers')return{...queryOperationalEvents(read(),{from:range.from,to:range.to,resolved:false,currentOnly:true,...filters}),range,basis:'latest unresolved host events only; not model speculation'};
+    if(intent.action==='blockers')return{...queryOperationalEvents(read(),{from:range.from,to:range.to,resolved:false,currentOnly:true,...filters}),
+      recovered:queryOperationalEvents(read(),{from:range.from,to:range.to,resolved:true,currentOnly:true,...filters}).events,
+      range,basis:'latest host states in range; recovery requires an actual host receipt, not model speculation'};
     if(intent.action==='status')return{accounts:accounts().filter(x=>!intent.accountId||x.id===intent.accountId),notifications:notificationPolicy(),notificationScope:'global',range};
     if(intent.action==='activity')return{...queryOwnerInteractions(read(),{from:range.from,to:range.to,
       logicalBotId:intent.accountId?logicalId(intent.accountId):undefined,accountId:intent.accountId}),range,

@@ -8508,8 +8508,12 @@
       function acceptOwner(result, edit, saving = false) {
         const o = views.owner; state.owner = ownerResult(result); o.fields.disabled = false;
         const targets = result.control.allowedTargets;
+        const inherited = result.control.targetMode === "inherited", migration = result.people.migration;
+        const scope = inherited ? `自动继承当前已加入且允许处理的群（已核实 ${count(result.targetScope?.knownTargets)} 个账号/群组合）${targets.length ? `；另有限制 ${targets.length} 项` : ""}`
+          : `${targets.length} 个明确目标${targets.length ? `（${targets.slice(0, 2).map(target => `${brief(target.accountId)}:${brief(target.groupId)}`).join("、")}${targets.length > 2 ? " 等" : ""}）` : "（未授权任何目标）"}`;
         summary(o.output, [notificationSummary(result.notifications),
-          `主人命令：${toggle(result.control.enabled)} · 范围：${targets.length} 个明确目标${targets.length ? `（${targets.slice(0, 2).map(target => `${brief(target.accountId)}:${brief(target.groupId)}`).join("、")}${targets.length > 2 ? " 等" : ""}）` : "（未授权任何目标）"} · 人物档案：${toggle(result.people.enabled)}`,
+          `主人命令：${toggle(result.control.enabled)} · 范围：${scope} · 人物档案：${toggle(result.people.enabled)}`,
+          ...(migration ? [`旧人物资料迁移：${({ not_started: "等待分批检查", in_progress: "正在分批核验", completed: "核验完成", source_verification_required: "部分历史缺少可验证来源，保留原群资料", uncertain_no_retry: "写入未核实，已停止自动重试" })[migration.status] || "状态未知"}；扫描 ${count(migration.scanned)}，导入 ${count(migration.imported)}，待核实 ${count(migration.unverifiable)}。`] : []),
           ...usageSummary(result.usage), `${blockerSummary(result.events)} ${taskSummary(result.tasks)}`, operationSummary(result.operations)]);
         o.json.textContent = JSON.stringify(result, null, 2);
         if (state.ownerEdit === edit && (!state.ownerDirty || saving)) {
@@ -8539,7 +8543,7 @@
         if (lanes.query) return; syncAccounts(); const o = views.owner, epoch = state.queryEpoch, signature = state.signature;
         const account = o.account.value, kind = o.kind.value, days = o.days.value;
         try { validAccount(account, true); } catch { message(o, "查询账号不可用。", true); return; }
-        if (!["tokens", "status", "blockers", "tasks", "history"].includes(kind) || !["1", "7"].includes(days)) return;
+        if (!["tokens", "status", "blockers", "tasks", "history", "activity", "why"].includes(kind) || !["1", "7"].includes(days)) return;
         clearQuery("正在查询…");
         try {
           const params = new URLSearchParams({ kind, days }); if (account) params.set("account_id", account);
@@ -8548,6 +8552,8 @@
           if (!result?.ok) throw new Error("invalid_query");
           const lines = kind === "tokens" ? usageSummary(result) : kind === "blockers" ? [blockerSummary(result)]
             : kind === "history" ? [operationSummary(result.operations)] : kind === "tasks" ? [taskSummary(result), operationSummary(result.operations)]
+            : kind === "activity" ? [`已观测收到 ${count(result.observed?.received)}，发出 ${count(result.observed?.sent)}；完整统计 ${result.coverage === "complete" ? "已覆盖" : "未知或不完整"}。`]
+            : kind === "why" ? [`基于真实账号状态、quiet、主人限制和账本说明；已观测收到 ${count(result.observed?.received)}，发出 ${count(result.observed?.sent)}。`, blockerSummary(result.blockers)]
             : [notificationSummary(result.notifications), `当前返回账号：${Array.isArray(result.accounts) ? result.accounts.length : "未知"} 个。`];
           summary(o.queryOutput, [`查询范围：${account ? brief(account) : "全部账号"} · 最近 ${days} 天（服务端时间范围与覆盖信息见详情）。`, ...lines]);
           o.queryJson.textContent = JSON.stringify(result, null, 2);
@@ -8575,13 +8581,13 @@
         const of = node("div", undefined, "form-grid"); o.fields.append(of);
         o.times = field(of, "ownerTimes", "汇报时间（逐行 HH:MM）", "textarea");
         o.timezone = field(of, "ownerTimezone", "时区"); o.timezone.placeholder = "Asia/Shanghai";
-        o.targets = field(of, "ownerAllowedTargets", "允许目标（每行 accountId:groupId，最多 100 行）", "textarea");
+        o.targets = field(of, "ownerAllowedTargets", "群范围限制（每行 accountId:groupId，最多 100 行；自动继承模式留空不必逐群填写）", "textarea");
         for (const el of [o.notifications, o.times, o.timezone, o.control, o.people, o.targets]) el.addEventListener("input", () => { state.ownerDirty = true; state.ownerEdit++; message(o, "有未保存草稿；刷新状态不会覆盖。仅点击保存才提交。"); });
         o.save = button(o.host, "ownerSave", "保存主人控制与汇报设置", saveOwner, ""); o.output = node("div", "尚未读取服务端状态。"); o.output.id = "ownerResult"; o.host.append(o.output);
         ({ details: o.details, json: o.json } = jsonDetails(o.host, "ownerResult", "查看状态详细 JSON 与统计元数据（只读）"));
         const qf = node("div", undefined, "form-grid"); o.host.append(qf);
         o.account = field(qf, "ownerQueryAccount", "查询账号（可选）", "text", []);
-        o.kind = field(qf, "ownerQueryKind", "查询内容", "text", [["status", "运行状态"], ["tokens", "Token 用量"], ["blockers", "阻塞事项"], ["tasks", "任务"], ["history", "历史"]]);
+        o.kind = field(qf, "ownerQueryKind", "查询内容", "text", [["status", "运行状态"], ["tokens", "Token 用量"], ["blockers", "阻塞事项"], ["tasks", "任务"], ["history", "历史"], ["activity", "实际互动"], ["why", "未回复原因依据"]]);
         o.days = field(qf, "ownerQueryDays", "时间范围", "text", [["1", "最近 1 天"], ["7", "最近 7 天"]]);
         for (const el of [o.account, o.kind, o.days]) el.addEventListener("change", invalidateQuery);
         o.query = button(o.host, "ownerQuery", "查询（只读）", queryOwner); o.queryOutput = node("div", "尚未查询。"); o.queryOutput.id = "ownerQueryResult"; o.host.append(o.queryOutput);

@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import * as tar from "tar";
 
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-export const releaseFiles = Object.freeze([
+
+const requiredReleaseFiles = [
   "README.md",
   "LICENSE",
   "config.example.json",
@@ -142,7 +143,33 @@ export const releaseFiles = Object.freeze([
   "src/voice-secret-store.js",
   "src/voice-service.js",
   "src/web-host.js"
-]);
+];
+
+// Owner First 3.4 runtime modules. App packaging copies the whole src directory,
+// but the Web release is an explicit archive, so any module src/bridge.js imports
+// and this list omits is a runtime crash in the distributed build only.
+requiredReleaseFiles.push(
+  "src/owner-intent.js",
+  "src/owner-first-migration.js",
+  "src/people-memory-migration.js"
+);
+
+// Beta 30 SOCIAL-FREEDOM surface. src/bridge.js imports these four modules, so a
+// Web build without them fails to load even though the App build works.
+requiredReleaseFiles.push(
+  "src/qzone-owner-review.js",
+  "src/memecub-search.js",
+  "src/public-illustration.js",
+  "src/vision-completion.js"
+);
+
+requiredReleaseFiles.push(
+  "docs/SOCIAL-FREEDOM.md",
+  "docs/SOCIAL-AGENCY-3.2.md",
+  "docs/OWNER-FIRST-3.4.md"
+);
+
+export const releaseFiles = Object.freeze(requiredReleaseFiles);
 
 const allowed = new Set(releaseFiles);
 const secretRules = [
@@ -217,6 +244,40 @@ export function checkSource() {
     } catch { /* A tracked deletion cannot enter the explicit release whitelist. */ }
   }
   issues.push(...checkFiles(releaseFiles));
+  issues.push(...checkImportClosure());
+  return issues;
+}
+
+// Local `./x.js` / `../x.js` specifiers only. Bare specifiers are dependencies
+// resolved from node_modules, which the archive does not carry.
+const localImport = /(?:^|[\s;{(])(?:import|export)\b[^'"]*?from\s*['"](\.[^'"]+)['"]|(?:^|[\s;{(])import\s*\(\s*['"](\.[^'"]+)['"]/g;
+
+/**
+ * Walk the real import graph from each entry point that a Web install starts.
+ * The App build copies all of `src/`, so a module missing from this whitelist is
+ * invisible there and only breaks the Web archive — exactly the failure this
+ * check exists to catch. Reports the missing module, not the whole chain.
+ */
+export function checkImportClosure(entries = ["src/web-host.js", "src/bridge.js"], wl = allowed) {
+  const issues = [];
+  const seen = new Set();
+  const stack = [...entries];
+  while (stack.length) {
+    const file = stack.pop();
+    if (seen.has(file)) continue;
+    seen.add(file);
+    let source;
+    try { source = fs.readFileSync(path.join(root, file), "utf8"); } catch { continue; }
+    localImport.lastIndex = 0;
+    let match;
+    while ((match = localImport.exec(source))) {
+      const specifier = match[1] || match[2];
+      const resolved = path.normalize(path.join(path.dirname(file), specifier)).split(path.sep).join("/");
+      if (!fs.existsSync(path.join(root, resolved))) { issue(issues, resolved, "IMPORT_TARGET_MISSING"); continue; }
+      if (!wl.has(resolved)) { issue(issues, resolved, "IMPORT_NOT_WHITELISTED"); continue; }
+      stack.push(resolved);
+    }
+  }
   return issues;
 }
 

@@ -732,6 +732,39 @@ test("bounded migration imports a provable old durable trait without refreshing 
   assert.deepEqual(coerced, {});
 });
 
+test("migration paginates past group, person and entry scan windows without false completion", () => {
+  const entry = { kind: "preference", value: SELF_PREF, status: "active", confidence: 0.7 };
+  const holder = entries => ({ canonicalMemory: { subjectUserId: USER, entries } });
+  const drain = root => {
+    let cursor, entries = 0, iterations = 0;
+    do {
+      const result = migrateLegacyCanonicalPeople(root, { now: NOW, cursor, eligible: () => true });
+      assert.equal(result.ok, true);
+      assert(result.stats.entries <= MIGRATION.scanEntries);
+      assert(result.stats.people <= MIGRATION.scanPeople);
+      assert(result.stats.groups <= MIGRATION.scanGroups);
+      entries += result.stats.entries; cursor = result.cursor;
+      assert(++iterations < 20, "scan cursor must make progress");
+    } while (!cursor.done);
+    return { entries, iterations };
+  };
+  const groups = {};
+  for (let i = 0; i < MIGRATION.scanGroups + 1; i++) groups[String(10000000 + i)] = { users: {} };
+  groups[String(10000000 + MIGRATION.scanGroups)].users[USER] = holder([entry]);
+  assert.deepEqual(drain({ groups }), { entries: 1, iterations: 2 });
+  const users = {};
+  for (let i = 0; i < MIGRATION.scanPeople + 1; i++) users[String(20000000 + i)] = {};
+  const last = String(20000000 + MIGRATION.scanPeople);
+  users[last] = { canonicalMemory: { subjectUserId: last, entries: [entry] } };
+  assert.deepEqual(drain({ groups: { "31001": { users } } }), { entries: 1, iterations: 2 });
+  const many = { groups: { "31001": { users: { [USER]: holder(Array.from({ length: MIGRATION.scanEntries + 1 }, () => null)) } } } };
+  assert.deepEqual(drain(many), { entries: 513, iterations: 2 });
+  const stats = peopleMigrationStats(many);
+  assert.equal(stats.stats.entries, MIGRATION.scanEntries);
+  assert.equal(stats.stats.truncated, true);
+  assert.equal(stats.cursor.done, false);
+});
+
 let passed = 0;
 for (const { name, run } of tests) {
   try { await run(); passed++; }

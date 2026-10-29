@@ -8,7 +8,7 @@
 // { verifiedGroupsByAccount, ownerIds })`, shows `report`, and persists the
 // returned `config` through its own guarded config writer.
 //
-// Non-negotiable rules encoded here (see outputs/owner34-D-interface.md):
+// Non-negotiable rules encoded here (see docs/OWNER-FIRST-3.4.md):
 //
 // 1. Owner identity comes ONLY from the existing real `privateChats.ownerUserIds`
 //    (legacy spelling `instructionUserIds`, the same slot bridge.js reads). Group
@@ -27,9 +27,8 @@
 //    notification center is actually taking over. Group morning greetings,
 //    evening summaries, automation rules/scopes, models, prompts, persona,
 //    budgets and keys are never touched.
-// 6. Fields today's schema does not accept yet (`ownerControl.lowRiskDirect`,
-//    `ownerControl.targetMode`) are NOT written silently. They are recorded as
-//    pending intent for worker A's normalization and reported to the parent.
+// 6. Every emitted owner-control field is accepted by the current normalizer;
+//    no pending metadata is interpreted as a permission grant.
 //
 // Determinism/idempotency: calling this on its own output returns
 // `{ changed: false }` with a deep-equal config. No timestamp is generated; the
@@ -37,10 +36,6 @@
 
 export const OWNER_FIRST_VERSION = 1;
 
-/** Schema fields this upgrade needs but that `normalizeOwnerControl()` in
- *  src/owner-services.js does not accept yet (worker A owns that normalization).
- *  They stay out of the live config unless the host opts in explicitly, because
- *  an unknown key makes the whole policy fail validation at runtime. */
 /** Kept as a compatibility export only. The coordination it described is over:
  *  `normalizeOwnerControl()` now accepts every field the migration writes, so
  *  nothing is deferred and `report.pendingSchemaFields` is always empty. */

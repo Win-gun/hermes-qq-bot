@@ -588,7 +588,7 @@ const single = { recipients: ["10001"] };
     { code: "ONEBOT_UNAVAILABLE", state: "restored" }]), "7.blockersFolded");
   check(() => assert.ok(text.includes("昨夜活动：模型调用 12（失败 1）")), "7.lastNightLine");
   check(() => assert.ok(text.includes("昨夜事件：未解决 1；已恢复 1")), "7.lastNightEvents");
-  check(() => assert.ok(text.includes("新联系人计数：2")), "7.newPeopleLine");
+  check(() => assert.ok(text.includes("新增长期人物记忆：2")), "7.newPeopleLine");
   check(() => assert.ok(text.includes("当前未解决事件：MODEL_CALL_FAILED（模型调用失败）")), "7.unresolvedLine");
   check(() => assert.ok(text.includes("已恢复事件：ONEBOT_UNAVAILABLE（OneBot 连接不可用）")), "7.restoredLine");
   check(() => assert.ok(!/UNLISTED|PRIVATE_PROSE/.test(text)), "7.unknownCodesDropped");
@@ -601,7 +601,7 @@ const single = { recipients: ["10001"] };
   check(() => assert.equal(bare.people.new, null), "7.noNewPeople");
   check(() => assert.equal(bare.blockers, null), "7.noBlockers");
   const bareText = formatOwnerNotificationSummary({});
-  check(() => assert.ok(bareText.includes("新联系人计数：未知")), "7.unknownNewPeople");
+  check(() => assert.ok(bareText.includes("新增长期人物记忆：未知")), "7.unknownNewPeople");
   check(() => assert.ok(bareText.includes("当前未解决事件：未知")), "7.unknownBlockers");
   check(() => assert.ok(!bareText.includes("已恢复事件：")), "7.noEmptyRestoredLine");
 

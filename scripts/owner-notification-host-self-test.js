@@ -5,7 +5,7 @@ import { registryConfig, accountItems, accountScopeAllows, effectiveAccount } fr
 import { accountDeliveryDecision } from "../src/account-delivery.js";
 import { createOwnerServices } from "../src/owner-services.js";
 import { createOwnerNotificationCenter } from "../src/owner-notifications.js";
-import { recordModelCall } from "../src/operational-ledger.js";
+import { recordModelCall, queryModelUsage } from "../src/operational-ledger.js";
 import { recordOwnerInteraction, queryOwnerInteractions } from "../src/owner-interactions.js";
 
 // Read SOURCE only: never import/run bridge startup, load live config, create
@@ -95,6 +95,7 @@ function fixture({ root = seededRoot(), at = MORNING, privateAlpha = true, recei
     // this data-only callback boundary so the real module's plain-JSON guard
     // sees the SAME shape it receives in the single-realm production bridge.
     queryOwnerInteractions: (memory, args) => queryOwnerInteractions(memory, structuredClone(args)),
+    queryModelUsage: (memory, args) => queryModelUsage(memory, structuredClone(args)),
     oneBotRequest: async (ws, action, params, requestOptions) => {
       requests.push({ ws, action, params, options: requestOptions });
       assert.equal(action, "send_private_msg"); assert.equal(requestOptions.timeoutMs, 20000);
@@ -234,6 +235,50 @@ await test("select-send-capable-carrier-before-consuming-slot", async () => {
   check(() => assert.equal(f.wires.length, 1, "first healthy carrier forbids private sends; eligible beta must receive the slot"));
   check(() => assert.equal(f.wires[0].carrier, "beta"));
   check(() => assert.equal(f.published().ownerNotifications.windows[0].status, "confirmed"));
+});
+
+await test("owner task heartbeats and process notices never pretend to be sent", async () => {
+  let attempts = 0;
+  const config = { ownerNotifications: { enabled: true } };
+  const context = vm.createContext({ config, isPrivateOwner: user => user === "21001",
+    operationalEventPublisher: () => {}, taskDeliveryAccount: () => { attempts++; return null; } });
+  new vm.Script(extract("  async function notifyTask(", "  const taskRuntime =")).runInContext(context);
+  const own = { messageType: "private", userId: "21001" };
+  for (const type of ["started", "progress", "heartbeat"]) {
+    check(() => assert.equal(attempts, 0));
+    assert.equal(await context.notifyTask(own, { type }), false);
+    check(() => assert.equal(attempts, 0));
+  }
+  await context.notifyTask({ ...own, userId: "22001" }, { type: "heartbeat" });
+  check(() => assert.equal(attempts, 1, "non-owner route is unchanged"));
+  await context.notifyTask(own, { type: "completed" });
+  check(() => assert.equal(attempts, 2, "explicit requested task result is not a routine report"));
+  config.ownerNotifications.enabled = false;
+  await context.notifyTask(own, { type: "heartbeat" });
+  check(() => assert.equal(attempts, 3, "center-off compatibility keeps the original path"));
+});
+
+await test("search acknowledgement rechecks owner participation at the wire gate", async () => {
+  const from = source.indexOf("                const preConfig = { ...replyDeliveryConfig(replyConfig, job, signal, revision,");
+  const to = source.indexOf("                archiveBotReply(", from);
+  assert(from >= 0 && to > from, "actual search acknowledgement guard must remain identifiable");
+  let reduced = false, currentRevision = 1, sent = 0;
+  const job = { direct: false, logicalBotId: "account:alpha" };
+  const context = vm.createContext({ job, signal: null, revision: 1, memory: {},
+    generationAccountId: "alpha", groupId: "31001", generationConfigRevision: 1,
+    sendWs: {}, effectiveEvent: {}, preReply: "fixture search acknowledgement", replyConfig: {},
+    accountExecutionRevision: () => currentRevision,
+    ownerGroupParticipationReduced: () => reduced,
+    replyDeliveryConfig: (_cfg, _job, _signal, _revision, guard) => ({ __deliveryGuard: guard }),
+    sendGroupMessage: async (_ws, _event, _text, config) => {
+      if (!config.__deliveryGuard()) return false;
+      sent++; return true;
+    } });
+  new vm.Script(`async function attempt(){${source.slice(from, to)}}`).runInContext(context);
+  await context.attempt(); check(() => assert.equal(sent, 1));
+  reduced = true; await context.attempt(); check(() => assert.equal(sent, 1));
+  job.direct = true; await context.attempt(); check(() => assert.equal(sent, 2, "direct help remains available"));
+  currentRevision = 2; await context.attempt(); check(() => assert.equal(sent, 2, "stale configuration cannot send even a direct pre-reply"));
 });
 
 console.log(JSON.stringify({ ok: failures.length === 0, checks, passedCases: results.length, totalCases: results.length + failures.length,

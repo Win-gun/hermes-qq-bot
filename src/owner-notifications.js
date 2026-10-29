@@ -119,11 +119,14 @@ export const OWNER_EVENT_CODES = Object.freeze({
   MODEL_TIMEOUT: "模型调用超时",
   ONEBOT_UNAVAILABLE: "OneBot 连接不可用",
   ONEBOT_SEND_FAILED: "OneBot 发送失败",
+  ONEBOT_SEND_UNCERTAIN: "OneBot 发送结果不确定",
   STICKER_SEND_FAILED: "表情发送失败",
   PERMISSION_DENIED: "权限校验未通过",
   MEMORY_WRITE_FAILED: "记忆写入失败",
   MEMORY_WRITE_UNCERTAIN: "记忆写入结果不确定",
+  MEMORY_EXTRACTION_FAILED: "记忆提取未能完成",
   CONFIG_INVALID: "配置校验失败",
+  CONFIG_SAVE_FAILED: "配置保存未能完成",
   IDENTITY_UNVERIFIED: "身份核验未通过",
   PROTOCOL_AUTH_REQUIRED: "协议端需要重新登录",
   TASK_FAILED: "后台任务失败",
@@ -257,7 +260,7 @@ export function formatOwnerNotificationSummary(facts, { criticalCode } = {}) {
   lines.push("价格/费用：未知（未核实价格，不估算）。");
   lines.push(safe.interactions.complete ? `完整交互计数：收到 ${show(safe.interactions.received)}；发出 ${show(safe.interactions.sent)}`
     : `交互计数：已观测收到 ${show(safe.interactions.observed.received)}；发出 ${show(safe.interactions.observed.sent)}，完整总数未知。`);
-  lines.push(safe.people.new !== null ? `新联系人计数：${show(safe.people.new)}` : "新联系人计数：未知（未提供有效计数）");
+  lines.push(safe.people.new !== null ? `新增长期人物记忆：${show(safe.people.new)}` : "新增长期人物记忆：未知（未提供有效计数）");
   if (safe.lastNight) {
     const morning = safe.period !== "evening";
     const part = key => safe.lastNight[key] === null ? "未知" : show(safe.lastNight[key]);
