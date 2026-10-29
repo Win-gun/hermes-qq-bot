@@ -508,6 +508,7 @@ function proxy(req, res) {
     || /^(?:\/send|\/api\/send_private)(?:\?|$)/.test(req.url || "")
     || /^\/api\/api-center(?:\/|\?|$)/.test(req.url || "")
     || /^\/api\/social-agent(?:\/|\?|$)/.test(req.url || "")
+    || /^\/api\/(?:owner|people)(?:\/|\?|$)/.test(req.url || "")
     || /^\/api\/(?:accounts|account-groups|tasks)(?:\/|\?|$)/.test(req.url || "")
     || /^\/api\/config(?:\?|$)/.test(req.url || "")
     || /^\/api\/memory\/verification(?:\/|\?|$)/.test(req.url || "")
@@ -544,7 +545,8 @@ async function route(req, res) {
     return res.end(req.method === "HEAD" ? undefined : body);
   }
   if (req.method === "GET" && pathname === "/health" && !child) return reply(res, 503, { ok: false, running: false, bridgeStopped: true });
-  if (!new Set(["GET", "HEAD"]).has(req.method) && !validOrigin(req)) return reply(res, 403, { ok: false, error: "invalid_origin" });
+  if ((!new Set(["GET", "HEAD"]).has(req.method) || /^\/api\/(?:owner|people)(?:\/|\?|$)/.test(req.url || ""))
+    && !validOrigin(req)) return reply(res, 403, { ok: false, error: "invalid_origin" });
   if (!pathname.startsWith("/api/host/")) return proxy(req, res);
   try {
     if (req.method === "GET" && pathname === "/api/host/status") {

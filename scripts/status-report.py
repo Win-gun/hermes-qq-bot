@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-每 2 分钟向已配置的主人私聊推送 bot 状态报备。
-由 launchd 定时调用。
+旧版状态报备，由 launchd 调用（频率以实际 plist 为准）。
+通知中心启用或策略不可确认时不发送；--dry-run 仅输出安全健康摘要。
 内容：bot在线状态 + 群聊活跃情况
 """
 
@@ -15,6 +15,37 @@ from datetime import datetime
 BRIDGE_URL = "http://127.0.0.1:6200"
 STATE_ROOT = os.environ.get("HERMES_QQ_HOME", os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 CONFIG_PATH = os.path.join(STATE_ROOT, "config.json")
+POLICY_PATH = "/api/owner/notification-policy"
+
+
+def legacy_status(state, delivery_allowed=False, **summary):
+    print(json.dumps({"source": "legacy-status-report", "script": "python",
+                      "state": state, "deliveryAllowed": delivery_allowed,
+                      **summary}, ensure_ascii=False))
+
+
+def legacy_delivery_allowed():
+    # Missing/old endpoints and malformed responses are NOT permission to send.
+    # Never fetch an admin session or fall back to local config for this decision.
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    try:
+        req = urllib.request.Request(f"{BRIDGE_URL}{POLICY_PATH}",
+                                     headers={"Accept": "application/json"})
+        with urllib.request.build_opener(NoRedirect()).open(req, timeout=5) as resp:
+            raw = resp.read(4097)
+            policy = json.loads(raw) if resp.status == 200 and len(raw) <= 4096 else None
+        if not isinstance(policy, dict) or type(policy.get("centralized")) is not bool:
+            raise ValueError("invalid notification policy")
+    except Exception:
+        legacy_status("policy_unavailable")
+        return False
+    if policy["centralized"]:
+        legacy_status("centralized")
+        return False
+    return True
 
 
 def owner_user_id():
@@ -41,12 +72,17 @@ def http_get(path):
 
 
 def http_post(path, data):
+    if not legacy_delivery_allowed():
+        return {"error": "legacy delivery blocked by notification policy"}
     url = f"{BRIDGE_URL}{path}"
-    body = json.dumps(data).encode()
+    body = json.dumps({**data, "source": "legacy-status-report"}).encode()
     try:
         token = http_get("/api/admin/session").get("token")
         if not token:
             return {"error": "admin session unavailable"}
+        # Recheck after the auth await; the center may have been enabled meanwhile.
+        if not legacy_delivery_allowed():
+            return {"error": "legacy delivery blocked by notification policy"}
         req = urllib.request.Request(
             url,
             data=body,
@@ -83,6 +119,15 @@ def extract_group_activity(health):
 
 
 def main():
+    if not legacy_delivery_allowed():
+        return
+    if "--dry-run" in sys.argv[1:]:
+        health = http_get("/health")
+        legacy_status("dry_run", bridgeReachable="error" not in health,
+                      onebotConnected=health.get("onebotConnected") is True,
+                      healthy=health.get("ok") is True)
+        return
+    legacy_status("legacy_allowed", delivery_allowed=True)
     owner_id = owner_user_id()
     if not owner_id:
         print("No owner QQ configured; skipping status report", file=sys.stderr)

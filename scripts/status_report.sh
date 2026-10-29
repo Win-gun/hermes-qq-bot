@@ -2,26 +2,77 @@
 # Hermes QQ bot 状态报备脚本
 # 每5分钟由 launchd 触发，采集在线状态和群聊活跃情况后私聊发给主人
 # 异常情况（连接断开、发送失败、假在线）立刻单独告警
+# 通知中心启用或策略不可确认时不发送；--dry-run 不读收件人、不写状态。
+
+set -o pipefail
 
 API_BASE="http://127.0.0.1:6200"
 STATE_ROOT="${HERMES_QQ_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
-OWNER_ID="${HERMES_QQ_OWNER_ID:-$(jq -r '.privateChats.ownerUserIds[0] // empty' "$STATE_ROOT/config.json" 2>/dev/null)}"
 STATE_FILE="$STATE_ROOT/data/.last_status_state"
 
-if [ -z "$OWNER_ID" ]; then
-  echo "No owner QQ configured; skipping status report" >&2
-  exit 0
-fi
+legacy_status() {
+  printf '{"source":"legacy-status-report","script":"shell","state":"%s","deliveryAllowed":%s}\n' "$1" "${2:-false}"
+}
+
+legacy_delivery_allowed() {
+  local policy centralized status
+  # No redirects, auth fallback or local-config inference: an old/missing host
+  # policy cannot authorize a direct QQ send.
+  policy=$(curl -sf --connect-timeout 2 --max-time 5 --max-filesize 4096 \
+    -w '\n%{http_code}' "$API_BASE/api/owner/notification-policy" 2>/dev/null) || {
+    legacy_status policy_unavailable
+    return 1
+  }
+  status=${policy##*$'\n'}
+  policy=${policy%$'\n'*}
+  if [ "$status" != "200" ] || [ "${#policy}" -gt 4096 ]; then
+    legacy_status policy_unavailable
+    return 1
+  fi
+  centralized=$(printf '%s' "$policy" | jq -esr '
+    if length == 1 and (.[0] | type) == "object" and (.[0].centralized | type) == "boolean"
+    then .[0].centralized | tostring else error("invalid policy") end' 2>/dev/null) || {
+    legacy_status policy_unavailable
+    return 1
+  }
+  if [ "$centralized" = "true" ]; then
+    legacy_status centralized
+    return 1
+  fi
+  return 0
+}
+
+legacy_delivery_allowed || exit 0
 
 send_msg() {
   local msg="$1"
   local session
+  legacy_delivery_allowed || return 1
   session=$(curl -sf --max-time 10 "$API_BASE/api/admin/session" | jq -er '.token') || return 1
-  curl -sf -X POST "$API_BASE/api/send_private" \
+  legacy_delivery_allowed || return 1
+  curl -sf --max-time 15 -X POST "$API_BASE/api/send_private" \
     -H "Content-Type: application/json" \
     -H "Origin: $API_BASE" -H "x-hermes-qq-admin: $session" \
-    -d "$(jq -n --arg user_id "$OWNER_ID" --arg msg "$msg" '{user_id: $user_id, message: $msg}')" >/dev/null 2>&1
+    -d "$(jq -n --arg user_id "$OWNER_ID" --arg msg "$msg" '{user_id: $user_id, message: $msg, source: "legacy-status-report"}')" >/dev/null 2>&1
 }
+
+# Dry runs never resolve recipients, acquire auth, update state or send messages.
+if [ "${1:-}" = "--dry-run" ]; then
+  if curl -sf --max-time 10 "$API_BASE/health" 2>/dev/null | jq -ce '
+    if type == "object" then {source:"legacy-status-report",script:"shell",state:"dry_run",deliveryAllowed:false,
+      healthy:(.ok == true),onebotConnected:(.onebotConnected == true)} else error("invalid health") end'; then
+    exit 0
+  fi
+  legacy_status health_unavailable
+  exit 1
+fi
+
+legacy_status legacy_allowed true
+OWNER_ID="${HERMES_QQ_OWNER_ID:-$(jq -r '.privateChats.ownerUserIds[0] // empty' "$STATE_ROOT/config.json" 2>/dev/null)}"
+if [ -z "$OWNER_ID" ]; then
+  echo "No owner QQ configured; skipping status report" >&2
+  exit 0
+fi
 
 # 采集状态
 RESPONSE=$(curl -sf --max-time 10 "$API_BASE/api/status" 2>/dev/null)

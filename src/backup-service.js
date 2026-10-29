@@ -1138,6 +1138,19 @@ function pauseStagedSocialWork(payloadDir) {
   if (changed || JSON.stringify(social) !== beforeDiscovery) writeJson(file, memory);
 }
 
+// Restored policy is data, not renewed authority on this host. Preserve every
+// target/time/scope and the durable claim journals; require explicit re-enable.
+// Apply only to the private staged config, never to the source or live writer.
+function disableRestoredOwnerAutomation(config) {
+  for (const key of ["ownerControl", "ownerNotifications"]) {
+    if (config[key] === undefined) continue; // Old backups acquire no defaults.
+    if (!config[key] || typeof config[key] !== "object" || Array.isArray(config[key]))
+      throw new Error("备份中的主人控制配置格式无效，恢复已停止");
+    config[key].enabled = false;
+  }
+  return config;
+}
+
 export async function restoreBackup(options = {}) {
   const stateRoot = path.resolve(options.stateRoot);
   const extracted = await extractContainer({ file: path.resolve(options.path), password: options.password || "" });
@@ -1155,6 +1168,7 @@ export async function restoreBackup(options = {}) {
     pauseStagedSocialWork(extracted.payloadDir);
     const stagedConfigPath = path.join(extracted.payloadDir, "state", "config.json");
     const config = registryConfig(localConfig(readJson(stagedConfigPath, {}), stateRoot, options.hermesHome ? path.resolve(options.hermesHome) : ""));
+    disableRestoredOwnerAutomation(config);
     let voiceCredentialRequired = extracted.manifest.voiceCredentialRequired === true;
     let apiCredentialReconfigurationRequired = extracted.manifest.apiCredentialReconfigurationRequired === true;
     // Older ordinary backups may still say "keychain" despite not carrying its
@@ -1278,6 +1292,7 @@ export async function migrateLegacyProject({ projectRoot, stateRoot, legacyHerme
     return migrated;
   };
   try {
+    disableRestoredOwnerAutomation(config);
     copyPath(legacy.configPath, path.join(payloadDir, "state", "config.json"));
     copyPath(path.join(legacy.root, "data"), path.join(payloadDir, "state", "data"));
     for (const name of legacy.protocolDirectories) copyPath(path.join(legacy.root, name), path.join(payloadDir, "protocol-host", name));

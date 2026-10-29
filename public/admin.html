@@ -1410,14 +1410,17 @@
       const configAdmin = method === "PATCH" && /^\/api\/config(?:[?]|$)/.test(path);
       const socialAdmin = /^\/api\/social-agent(?:[/?]|$)/.test(path);
       const tasksAdmin = /^\/api\/tasks(?:[/?]|$)/.test(path);
-      if (socialAdmin || tasksAdmin) opts = { ...opts, cache: "no-store" };
-      const sessionAdmin = accountAdmin || configAdmin || socialAdmin || tasksAdmin || ["/send", "/api/send_private"].includes(path);
+      const peopleOwnerAdmin = /^\/api\/(?:people|owner)(?:[/?]|$)/.test(path);
+      if (socialAdmin || tasksAdmin || peopleOwnerAdmin) opts = { ...opts, cache: "no-store" };
+      const sessionAdmin = accountAdmin || configAdmin || socialAdmin || tasksAdmin || peopleOwnerAdmin || ["/send", "/api/send_private"].includes(path);
       if (sessionAdmin) {
         const headers = new Headers(opts.headers || {});
         if (!headers.has("x-hermes-qq-admin")) headers.set("x-hermes-qq-admin", await ensureAdminSession());
         if (!["GET", "HEAD"].includes(method) && !headers.has("content-type")) headers.set("content-type", "application/json");
         opts = { ...opts, headers, ...(!["GET", "HEAD"].includes(method) && opts.body === undefined ? { body: "{}" } : {}) };
       }
+      // An expired people/owner request must not reach the wire after session bootstrap.
+      if (peopleOwnerAdmin && opts.signal?.aborted) throw new Error("请求已取消，请重新读取状态");
       const res = await fetch(path, { ...opts, credentials: "same-origin", redirect: "error" });
       if (sessionAdmin && res.status === 403) adminSessionToken = ""; // Never replay a mutation or an uncertain download.
       if (responseType === "blob") {
@@ -7094,6 +7097,7 @@
     function renderRegistryContexts(force = false) {
       if (typeof socialUi !== "undefined") socialUi.sync();
       if (typeof discoveryUi !== "undefined") discoveryUi.sync();
+      if (typeof peopleOwnerUi !== "undefined") peopleOwnerUi.syncAccounts();
       for (const page of ["qa", "vision", "voice"]) {
         const host = document.querySelector(`[data-registry-context="${page}"]`); if (!host) continue;
         if (page === "qa") host.hidden = activeTabs.qa !== "persona";
@@ -8303,6 +8307,262 @@
     })();
     // SOCIAL_DISCOVERY_UI_END
 
+    // PEOPLE_OWNER_UI_START — explicit actions only; no polling or config projection.
+    function createPeopleOwnerController({ document, api, accounts, contextEpoch, confirm, beforeUnload }) {
+      const views = {}, lanes = {}, state = { owner: null, person: null, ownerDirty: false, ownerEdit: 0, ownerBase: null, peopleEpoch: 0, queryEpoch: 0, signature: "" };
+      const revision = value => (Number.isSafeInteger(value) && value >= 0) || (typeof value === "string" && !!value.trim());
+      const node = (tag, text, className) => { const el = document.createElement(tag); if (text !== undefined) el.textContent = text; if (className) el.className = className; return el; };
+      function field(host, id, label, type = "text", choices) {
+        const wrap = node("div", undefined, "field"), caption = node("label", label);
+        const el = node(choices ? "select" : type === "textarea" ? "textarea" : "input"); el.id = id; caption.htmlFor = id;
+        if (!choices && type !== "textarea") el.type = type;
+        if (type === "checkbox") wrap.className = "switch-row";
+        for (const [value, text] of choices || []) { const option = node("option", text); option.value = value; el.append(option); }
+        wrap.append(caption, el); host.append(wrap); return el;
+      }
+      function button(host, id, text, action, className = "secondary") {
+        const el = node("button", text, className); el.id = id; el.type = "button"; el.addEventListener("click", action); host.append(el); return el;
+      }
+      function card(page, id, title, hint) {
+        const host = node("section", undefined, "card settings-block"); host.id = id;
+        const heading = node("h3", title); heading.id = `${id}Heading`; host.setAttribute("aria-labelledby", heading.id);
+        host.append(heading, node("p", hint, "hint")); document.getElementById(`page-${page}`).append(host); return host;
+      }
+      function feedback(host, id) { const el = node("p", "尚未加载。仅点击按钮读取。", "hint"); el.id = id; el.setAttribute("role", "status"); el.setAttribute("aria-live", "polite"); host.append(el); return el; }
+      function message(view, text, error = false) { view.status.textContent = text; view.status.className = error ? "warning" : "hint"; }
+      function failure(error) { return error?.status ? `请求失败（HTTP ${error.status}）` : error?.message === "deadline" ? "请求超时" : "请求失败或返回格式无效"; }
+      function cancel(lane) { lanes[lane]?.controller.abort(); }
+      async function request(lane, path, options = {}) {
+        if (lanes[lane]) throw new Error("busy");
+        const controller = new AbortController(), ticket = { controller }; lanes[lane] = ticket; syncButtons();
+        let timer;
+        try {
+          return await Promise.race([
+            api(path, { ...options, signal: controller.signal }),
+            new Promise((_, reject) => controller.signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true })),
+            new Promise((_, reject) => { timer = setTimeout(() => { reject(new Error("deadline")); controller.abort(); }, 20000); })
+          ]);
+        } finally { clearTimeout(timer); if (lanes[lane] === ticket) delete lanes[lane]; syncButtons(); }
+      }
+      function syncButtons() {
+        const p = views.people, o = views.owner; if (!p || !o) return;
+        p.load.disabled = !!lanes.people;
+        p.apply.disabled = !!lanes.people || !state.person;
+        o.load.disabled = !!lanes.owner; o.save.disabled = !!lanes.owner || !state.owner;
+        o.query.disabled = !!lanes.query;
+      }
+      function personKey() { const p = views.people; return JSON.stringify([p.account.value, p.user.value.trim(), p.conversation.value.trim()]); }
+      function invalidatePerson() {
+        state.peopleEpoch++; state.person = null; cancel("people"); views.people.output.textContent = "选择已变化，请重新加载档案；操作草稿保留。";
+        message(views.people, "请加载当前账号、QQ 与明确会话的档案后再操作。"); syncButtons();
+      }
+      function clearQuery(text) { const o = views.owner; o.queryOutput.textContent = text; o.queryJson.textContent = "尚无当前查询数据。"; o.queryDetails.open = false; }
+      function invalidateQuery() { state.queryEpoch++; cancel("query"); clearQuery("查询条件已变化，请点击查询。"); }
+      function syncAccounts() {
+        if (!views.people) return;
+        const rows = accounts().filter(item => item?.id && !item.archived);
+        const signature = JSON.stringify([contextEpoch(), rows.map(item => [item.id, item.displayName])]);
+        if (signature === state.signature) return; state.signature = signature;
+        for (const [select, blank] of [[views.people.account, "请选择账号"], [views.owner.account, "全部账号（查询）"]]) {
+          const selected = select.value; select.replaceChildren();
+          for (const item of [{ id: "", displayName: blank }, ...rows]) { const option = node("option", item.displayName || item.id); option.value = item.id; select.append(option); }
+          // Keep the explicit choice, even if it has become unavailable; validation will refuse it.
+          if (selected && !rows.some(item => item.id === selected)) { const option = node("option", `${selected}（已不可用）`); option.value = selected; select.append(option); }
+          select.value = selected;
+        }
+        invalidatePerson(); invalidateQuery();
+        if (state.owner || lanes.owner) { state.owner = null; cancel("owner"); message(views.owner, "账号或配置版本已变化，请重新读取状态；设置草稿保留。", true); syncButtons(); }
+      }
+      function validAccount(id, optional = false) { if ((!id && !optional) || (id && !accounts().some(item => item.id === id && !item.archived))) throw new Error("invalid_account"); }
+      function readPerson() {
+        const p = views.people, accountId = p.account.value, userId = p.user.value.trim(), conversationId = p.conversation.value.trim();
+        validAccount(accountId);
+        if (!/^[1-9]\d{4,19}$/.test(userId) || !/^(group|private):[1-9]\d{4,19}$/.test(conversationId)) throw new Error("invalid_person");
+        return { accountId, userId, conversationId };
+      }
+      function personResult(result) {
+        if (!result?.ok || !Number.isSafeInteger(result.revision) || result.revision < 0 || !Number.isSafeInteger(result.personRevision) || result.personRevision < 0 || !Array.isArray(result.entries)
+          || result.entries.some(entry => !entry || typeof entry.id !== "string" || !entry.id)) throw new Error("invalid_profile");
+        return result;
+      }
+      function personEnvelope(result) {
+        if (!result?.ok || !revision(result.revision)) throw new Error("invalid_profile");
+        personResult(result.profile); return result;
+      }
+      async function loadPerson() {
+        if (lanes.people) return;
+        syncAccounts(); const p = views.people; let target;
+        try { target = readPerson(); } catch { message(p, "请选择可用账号，填写 QQ 与 group:群号 或 private:QQ；不推测会话。", true); return; }
+        const key = personKey(), epoch = state.peopleEpoch, signature = state.signature;
+        state.person = null; message(p, "正在读取档案…");
+        try {
+          const params = new URLSearchParams({ account_id: target.accountId, user_id: target.userId, conversation_id: target.conversationId });
+          const result = personEnvelope(await request("people", `/api/people?${params}`)); syncAccounts();
+          if (key !== personKey() || epoch !== state.peopleEpoch || signature !== state.signature) return;
+          state.person = { key, revision: result.revision, result: result.profile, signature }; p.output.textContent = JSON.stringify(result.profile, null, 2); message(p, "已读取档案。写操作须再次确认精确目标。");
+        } catch (error) { if (epoch === state.peopleEpoch) { p.output.textContent = "档案读取失败；旧结果不可用于操作。"; message(p, `${failure(error)}。可点击重新加载，草稿保留。`, true); } }
+        finally { syncButtons(); }
+      }
+      async function applyPerson() {
+        syncAccounts(); if (lanes.people || !state.person) return;
+        const p = views.people, snapshot = state.person, key = personKey(), epoch = state.peopleEpoch; let target;
+        try { target = readPerson(); } catch { invalidatePerson(); return; }
+        if (snapshot.key !== key || snapshot.signature !== state.signature) { invalidatePerson(); return; }
+        const operation = p.operation.value, entryId = p.entry.value.trim(), value = p.value.value.trim();
+        if (!["freeze", "unfreeze", "correct", "revoke", "delete"].includes(operation)) return;
+        if (["correct", "revoke"].includes(operation) && (!entryId || !snapshot.result.entries.some(entry => entry.id === entryId))) { message(p, "请输入已加载档案中的精确条目 ID，不接受模糊匹配。", true); return; }
+        if (operation === "correct" && (!value || value.length > 240)) { message(p, "纠正内容须为 1–240 字。", true); return; }
+        // Wire personRevision is the GLOBAL people CAS, not the per-person informational revision.
+        const body = { expectedRevision: snapshot.revision, personRevision: snapshot.result.revision, accountId: target.accountId, userId: target.userId, operation,
+          ...(["correct", "revoke"].includes(operation) ? { entryId } : {}), ...(operation === "correct" ? { value } : {}) };
+        if (!confirm(`确认 ${p.operation.options[p.operation.selectedIndex].textContent}？\n账号：${target.accountId}\nQQ：${target.userId}\n会话：${target.conversationId}\n${entryId && ["correct", "revoke"].includes(operation) ? `条目 ID：${entryId}` : "作用于此人物整份档案"}\n不隐式授予发送或生产权限。`)) return;
+        state.person = null; message(p, "正在提交；不自动重试…");
+        try {
+          const result = await request("people", "/api/people/admin", { method: "POST", body: JSON.stringify(body) }); syncAccounts();
+          if (key !== personKey() || epoch !== state.peopleEpoch || snapshot.signature !== state.signature) return;
+          personEnvelope(result); const profile = result.profile;
+          state.person = { key, revision: result.revision, result: profile, signature: state.signature }; p.output.textContent = JSON.stringify(profile, null, 2);
+          message(p, "服务端已确认操作。操作草稿保留，再次提交仍须确认。");
+        } catch (error) { if (epoch === state.peopleEpoch) message(p, `${failure(error)}；结果可能未确认，草稿保留。请显式加载核对后再操作，不自动重放。`, true); }
+        finally { syncButtons(); }
+      }
+      function settings() {
+        const o = views.owner, times = o.times.value.split(/[\s,，]+/).filter(Boolean), timezone = o.timezone.value.trim();
+        if (times.some(time => !/^([01]\d|2[0-3]):[0-5]\d$/.test(time))) throw new Error("时间须逐行填写 HH:MM。");
+        if (!timezone) throw new Error("请填写明确时区。");
+        try { new Intl.DateTimeFormat("zh-CN", { timeZone: timezone }); } catch { throw new Error("时区无效。"); }
+        const lines = o.targets.value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+        if (lines.length > 100) throw new Error("允许目标最多 100 行。");
+        const allowedTargets = lines.map(line => { const match = /^([^\s:]+):([1-9]\d{4,19})$/.exec(line); if (!match) throw new Error("目标须逐行填写 accountId:groupId。"); validAccount(match[1]); return { accountId: match[1], groupId: match[2] }; });
+        return { notifications: { enabled: o.notifications.checked, times, timezone }, control: { enabled: o.control.checked, allowedTargets }, people: { enabled: o.people.checked } };
+      }
+      function ownerResult(result) {
+        if (!result?.ok || !revision(result.revision) || typeof result.notifications?.enabled !== "boolean" || !Array.isArray(result.notifications.times)
+          || result.notifications.times.some(time => typeof time !== "string") || typeof result.notifications.timezone !== "string"
+          || typeof result.control?.enabled !== "boolean" || !Array.isArray(result.control.allowedTargets) || typeof result.people?.enabled !== "boolean"
+          || result.control.allowedTargets.some(target => typeof target.accountId !== "string" || typeof target.groupId !== "string")) throw new Error("invalid_status");
+        return result;
+      }
+      const count = value => Number.isSafeInteger(value) && value >= 0 ? String(value) : "未知";
+      const brief = value => typeof value === "string" ? value.replace(/\s+/g, " ").slice(0, 64) : "未知";
+      const toggle = value => value === true ? "开启" : value === false ? "关闭" : "未知";
+      function notificationSummary(value) {
+        const times = Array.isArray(value?.times) ? value.times : [];
+        return `通知：${toggle(value?.enabled)} · 时点：${times.length ? times.slice(0, 3).map(brief).join("、") + (times.length > 3 ? ` 等 ${times.length} 个` : "") : "未设置"} · 时区：${brief(value?.timezone)}`;
+      }
+      function usageSummary(value) {
+        const stats = value?.stats, tokens = stats?.tokens?.totalTokens;
+        return [`已记录调用：${count(stats?.callCount)} 次 · 已知 Token：${count(tokens?.knownTokens)} · 完整调用 / Token 总量：${count(stats?.totalCallCount)} / ${count(tokens?.total)}`,
+          `用量未知的调用：${count(stats?.unknownCallCount)} 次。仅统计已落盘记录；未覆盖历史与缺失用量不按零计算，费用未知。`];
+      }
+      function operationSummary(value) {
+        if (!Array.isArray(value)) return "操作状态：未知（未提供记录）。";
+        if (!value.length) return "操作状态：当前返回无操作记录（不代表历史从未执行）。";
+        const labels = { confirmed: "已确认", accepted: "已受理", awaiting_confirmation: "待确认", pending: "待处理", claimed: "结果不明", uncertain: "结果不明", blocked: "受阻", failed: "失败", cancelled: "已取消" };
+        const totals = new Map();
+        for (const item of value) { const label = labels[item?.status] || "其他 / 未知"; totals.set(label, (totals.get(label) || 0) + 1); }
+        return `操作状态（当前返回 ${value.length} 条）：${[...totals].map(([label, total]) => `${label} ${total}`).join("、")}。`;
+      }
+      function blockerSummary(value) {
+        const known = Number.isSafeInteger(value?.count) && value.count >= 0 ? value.count : Array.isArray(value?.events) ? value.events.length : null;
+        return `当前阻碍：已记录 ${count(known)} 项${value?.coverage?.complete === true ? "" : "（覆盖不完整或未知，不代表全部）"}。`;
+      }
+      function taskSummary(value) { return `任务：运行 ${count(value?.running)} · 排队 ${count(value?.queued)}。`; }
+      function summary(host, lines) { host.replaceChildren(...lines.map(line => node("p", line, "hint"))); }
+      function jsonDetails(host, id, label) {
+        const details = node("details", undefined, "panel-details"); details.id = `${id}Details`; details.open = false;
+        const json = node("pre", "尚无数据。"); json.id = `${id}Json`;
+        // Reuse console.css pre: max-height: 360px; overflow: auto, even when expanded.
+        details.append(node("summary", label), json); host.append(details); return { details, json };
+      }
+      function acceptOwner(result, edit, saving = false) {
+        const o = views.owner; state.owner = ownerResult(result); o.fields.disabled = false;
+        const targets = result.control.allowedTargets;
+        summary(o.output, [notificationSummary(result.notifications),
+          `主人命令：${toggle(result.control.enabled)} · 范围：${targets.length} 个明确目标${targets.length ? `（${targets.slice(0, 2).map(target => `${brief(target.accountId)}:${brief(target.groupId)}`).join("、")}${targets.length > 2 ? " 等" : ""}）` : "（未授权任何目标）"} · 人物档案：${toggle(result.people.enabled)}`,
+          ...usageSummary(result.usage), `${blockerSummary(result.events)} ${taskSummary(result.tasks)}`, operationSummary(result.operations)]);
+        o.json.textContent = JSON.stringify(result, null, 2);
+        if (state.ownerEdit === edit && (!state.ownerDirty || saving)) {
+          o.notifications.checked = result.notifications.enabled; o.times.value = result.notifications.times.join("\n"); o.timezone.value = result.notifications.timezone;
+          o.control.checked = result.control.enabled; o.targets.value = result.control.allowedTargets.map(target => `${target.accountId}:${target.groupId}`).join("\n"); o.people.checked = result.people.enabled;
+          state.ownerDirty = false; state.ownerBase = result.revision;
+        }
+        message(o, state.ownerDirty ? "已读取远端状态；本地草稿保留。保存时须核对版本。" : "已读取服务端状态；保存不代表生产授权或已发送汇报。");
+      }
+      async function loadOwner() {
+        if (lanes.owner) return; syncAccounts(); const edit = state.ownerEdit, signature = state.signature; state.owner = null; message(views.owner, "正在读取主人控制状态…");
+        try { const result = await request("owner", "/api/owner/status"); syncAccounts(); if (signature !== state.signature) return; acceptOwner(result, edit); }
+        catch (error) { message(views.owner, `${failure(error)}。草稿保留，请点击重新加载。`, true); }
+        finally { syncButtons(); }
+      }
+      async function saveOwner() {
+        syncAccounts(); if (lanes.owner || !state.owner) return;
+        let patch; try { patch = settings(); } catch (error) { message(views.owner, error.message === "invalid_account" ? "目标账号不可用，请核对账号 ID。" : error.message, true); return; }
+        const snapshot = state.owner, edit = state.ownerEdit, signature = state.signature;
+        if (!confirm(`确认保存主人控制与汇报设置（全局）？\n${state.ownerBase !== snapshot.revision ? "远端版本已变化，请对照下方状态核对本地草稿。\n" : ""}基于版本：${snapshot.revision}\n将修改当前实例的开关、时段和列出的控制范围；不会发送测试消息。账号本身的权限仍须满足。`)) return;
+        state.owner = null; message(views.owner, "正在保存；不自动重试…");
+        try { const result = await request("owner", "/api/owner/settings", { method: "PATCH", body: JSON.stringify({ expectedRevision: snapshot.revision, ...patch }) }); syncAccounts(); if (signature !== state.signature) return; acceptOwner(result, edit, true); }
+        catch (error) { message(views.owner, `${failure(error)}；保存结果未确认，草稿保留。请显式读取核对后再保存。`, true); }
+        finally { syncButtons(); }
+      }
+      async function queryOwner() {
+        if (lanes.query) return; syncAccounts(); const o = views.owner, epoch = state.queryEpoch, signature = state.signature;
+        const account = o.account.value, kind = o.kind.value, days = o.days.value;
+        try { validAccount(account, true); } catch { message(o, "查询账号不可用。", true); return; }
+        if (!["tokens", "status", "blockers", "tasks", "history"].includes(kind) || !["1", "7"].includes(days)) return;
+        clearQuery("正在查询…");
+        try {
+          const params = new URLSearchParams({ kind, days }); if (account) params.set("account_id", account);
+          const result = await request("query", `/api/owner/query?${params}`); syncAccounts();
+          if (epoch !== state.queryEpoch || signature !== state.signature) return;
+          if (!result?.ok) throw new Error("invalid_query");
+          const lines = kind === "tokens" ? usageSummary(result) : kind === "blockers" ? [blockerSummary(result)]
+            : kind === "history" ? [operationSummary(result.operations)] : kind === "tasks" ? [taskSummary(result), operationSummary(result.operations)]
+            : [notificationSummary(result.notifications), `当前返回账号：${Array.isArray(result.accounts) ? result.accounts.length : "未知"} 个。`];
+          summary(o.queryOutput, [`查询范围：${account ? brief(account) : "全部账号"} · 最近 ${days} 天（服务端时间范围与覆盖信息见详情）。`, ...lines]);
+          o.queryJson.textContent = JSON.stringify(result, null, 2);
+        } catch (error) { if (epoch === state.queryEpoch) clearQuery(`${failure(error)}。请点击查询重试。`); }
+      }
+      function mount() {
+        const p = views.people = {}, o = views.owner = {};
+        p.host = card("memory", "peopleProfileCard", "人物长期档案", "档案归属明确账号和 QQ。必须指定 group:群号 或 private:QQ；删除作用于整份人物档案，纠正与撤销只接受精确条目 ID。不会自动读取或写入。");
+        const pf = node("div", undefined, "form-grid"); p.host.append(pf);
+        p.account = field(pf, "peopleAccount", "档案账号", "text", []); p.user = field(pf, "peopleUser", "人物 QQ"); p.user.inputMode = "numeric";
+        p.conversation = field(pf, "peopleConversation", "明确会话 ID"); p.conversation.placeholder = "group:123456 或 private:123456";
+        for (const el of [p.account, p.user, p.conversation]) for (const event of ["input", "change"]) el.addEventListener(event, invalidatePerson);
+        const pa = node("div", undefined, "row"); p.host.append(pa); p.load = button(pa, "peopleLoad", "加载档案（保留操作草稿）", loadPerson);
+        p.status = feedback(p.host, "peopleState"); p.output = node("pre", "尚未加载。"); p.output.id = "peopleResult"; p.host.append(p.output);
+        const pe = node("div", undefined, "form-grid"); p.host.append(pe);
+        p.operation = field(pe, "peopleOperation", "管理操作", "text", [["freeze", "冻结档案"], ["unfreeze", "解除冻结"], ["correct", "纠正条目"], ["revoke", "撤销条目"], ["delete", "删除人物档案"]]);
+        p.entry = field(pe, "peopleEntryId", "精确条目 ID（纠正 / 撤销必填）"); p.value = field(pe, "peopleValue", "纠正内容", "textarea"); p.value.maxLength = 240;
+        p.apply = button(p.host, "peopleApply", "确认并执行管理操作", applyPerson, "danger");
+        o.host = card("automation", "ownerControlCard", "主人控制与汇报", "保存会修改当前实例的开关、时段和列出的控制范围，不会发送测试消息。通知与主人命令分别受开关及账号权限约束；不会自动扩大群、私聊或任务权限。不自动加载、不自动保存。");
+        const oa = node("div", undefined, "row"); o.host.append(oa); o.load = button(oa, "ownerLoad", "读取状态（保留草稿）", loadOwner);
+        o.status = feedback(o.host, "ownerState"); o.fields = node("fieldset", undefined, "verification-settings"); o.fields.disabled = true; o.fields.append(node("legend", "独立设置 · 一次保存", "sr-only")); o.host.append(o.fields);
+        const switches = node("div", undefined, "grid three"); o.fields.append(switches);
+        o.notifications = field(switches, "ownerNotificationsEnabled", "启用汇报通知", "checkbox");
+        o.control = field(switches, "ownerCommandEnabled", "启用主人命令", "checkbox"); o.people = field(switches, "ownerPeopleEnabled", "启用人物长期档案", "checkbox");
+        const of = node("div", undefined, "form-grid"); o.fields.append(of);
+        o.times = field(of, "ownerTimes", "汇报时间（逐行 HH:MM）", "textarea");
+        o.timezone = field(of, "ownerTimezone", "时区"); o.timezone.placeholder = "Asia/Shanghai";
+        o.targets = field(of, "ownerAllowedTargets", "允许目标（每行 accountId:groupId，最多 100 行）", "textarea");
+        for (const el of [o.notifications, o.times, o.timezone, o.control, o.people, o.targets]) el.addEventListener("input", () => { state.ownerDirty = true; state.ownerEdit++; message(o, "有未保存草稿；刷新状态不会覆盖。仅点击保存才提交。"); });
+        o.save = button(o.host, "ownerSave", "保存主人控制与汇报设置", saveOwner, ""); o.output = node("div", "尚未读取服务端状态。"); o.output.id = "ownerResult"; o.host.append(o.output);
+        ({ details: o.details, json: o.json } = jsonDetails(o.host, "ownerResult", "查看状态详细 JSON 与统计元数据（只读）"));
+        const qf = node("div", undefined, "form-grid"); o.host.append(qf);
+        o.account = field(qf, "ownerQueryAccount", "查询账号（可选）", "text", []);
+        o.kind = field(qf, "ownerQueryKind", "查询内容", "text", [["status", "运行状态"], ["tokens", "Token 用量"], ["blockers", "阻塞事项"], ["tasks", "任务"], ["history", "历史"]]);
+        o.days = field(qf, "ownerQueryDays", "时间范围", "text", [["1", "最近 1 天"], ["7", "最近 7 天"]]);
+        for (const el of [o.account, o.kind, o.days]) el.addEventListener("change", invalidateQuery);
+        o.query = button(o.host, "ownerQuery", "查询（只读）", queryOwner); o.queryOutput = node("div", "尚未查询。"); o.queryOutput.id = "ownerQueryResult"; o.host.append(o.queryOutput);
+        ({ details: o.queryDetails, json: o.queryJson } = jsonDetails(o.host, "ownerQueryResult", "查看查询详细 JSON 与真实元数据（只读）"));
+        beforeUnload(event => { if (state.ownerDirty || p.entry.value || p.value.value) { event.preventDefault(); event.returnValue = ""; } }); syncAccounts(); syncButtons();
+      }
+      return { mount, syncAccounts, loadPerson, applyPerson, loadOwner, saveOwner, queryOwner, views, state };
+    }
+    const peopleOwnerUi = createPeopleOwnerController({ document, api, accounts: promptAccountRows, contextEpoch: () => registryState.epoch, confirm: text => confirm(text), beforeUnload: handler => window.addEventListener("beforeunload", handler) });
+    // PEOPLE_OWNER_UI_END
+
     mountAdminPanels();
     wireEvents();
     wireAgentLife();
@@ -8310,6 +8570,7 @@
     mountAccountRegistry();
     socialUi.mount();
     discoveryUi.mount();
+    peopleOwnerUi.mount();
     refreshAll().catch(async (error) => {
       showFatalError(`桥接暂不可用：${error.message}。备份与迁移页仍可用于启动或恢复服务。`);
       await refreshDesktopBackup();

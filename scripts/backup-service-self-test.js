@@ -13,6 +13,11 @@ import vm from "node:vm";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { accountItems, registryConfig } from "../src/account-registry.js";
+import { recordPersonEvidence, administerPersonMemory, queryPersonMemory, personMemoryControl } from "../src/people-memory.js";
+import { createOwnerNotificationCenter, getOwnerNotificationStatus } from "../src/owner-notifications.js";
+import { createOwnerCommandRouter, ownerOperationHistory, putOwnerDirective, ownerDirectiveAllows } from "../src/owner-authority.js";
+import { claimModelCall, recordModelCall, recordOperationalEvent, queryModelUsage } from "../src/operational-ledger.js";
+import { recordOwnerInteraction, queryOwnerInteractions } from "../src/owner-interactions.js";
 import {
   BACKUP_MAGIC,
   createBackup,
@@ -96,6 +101,143 @@ memoryFixture.qzoneSocial = { version: 1, bots: { "account:fixture": { owners: {
 assert.equal(beginDiscoveryRound(memoryFixture, { logicalId: "account:fixture", roundId: "backup-discovery",
   now: Date.parse("2026-10-24T04:00:00Z"), policy: { enabled: true, shadowMode: true, conversationIds: ["group:123"] } }).ok, true);
 
+// Valid 3.3 roots produced by their public mutators, not marker-shaped JSON.
+// These adapters are fixture-only draft callbacks. No production writer,
+// current config/state, QQ, Docker, Keychain or model is consulted.
+const ownerAt = Date.parse("2026-10-28T01:00:00Z"), ownerBot = "account:backup33";
+const ownerPolicy = { enabled: true, naturalLanguage: true, usageEnabled: true,
+  allowedTargets: [{ accountId: "primary", groupId: "23456789" }] };
+const notificationPolicy = { enabled: true, timezone: "Asia/Shanghai", times: ["09:00", "21:00"],
+  recipients: ["21001"], dueGraceMs: 600000, maxPerLocalDay: 2,
+  critical: { enabled: true, codes: ["ACCOUNT_OFFLINE"], cooldownMs: 3600000 } };
+const automationPolicy = { enabled: true, ownershipVersion: 1, accounts: { primary: {
+  rules: [], legacyRuleIds: [], legacyRoutineLedger: {}, routines: { version: 1,
+    daily: { enabled: true, checkIntervalMs: 60000, schedules: [
+      { name: "fixture-window", mode: "custom", time: "08:30", enabled: true, prompt: "fixture routine" }] },
+    hourly: { enabled: true, checkIntervalMs: 60000, ownerUserIds: ["21001"] } }
+} }, groups: {}, unassigned: [], rules: [], routines: { version: 1 } };
+const personEvidence = (userId, patch = {}) => ({ logicalBotId: ownerBot, userId, verifiedSenderId: userId,
+  accountId: "primary", conversationId: "group:23456789", messageId: `person-${userId}`,
+  time: ownerAt / 1000, now: ownerAt, kind: "preference", value: "偏好简短回复",
+  confidence: 0.9, sourceType: "message", privacy: "public", ...patch });
+for (const userId of ["12345678", "12345679", "12345680"])
+  assert.equal(recordPersonEvidence(memoryFixture, personEvidence(userId)).ok, true);
+assert.equal(recordPersonEvidence(memoryFixture, personEvidence("12345678", { messageId: "private-person",
+  conversationId: "private:12345678", privacy: "private", value: "喜欢安静交流" })).ok, true);
+for (const [userId, operation] of [["12345679", "freeze"], ["12345680", "delete"]])
+  assert.equal(administerPersonMemory(memoryFixture, { logicalBotId: ownerBot, userId, operation,
+    actorUserId: "21001", authorized: true, expectedRevision: memoryFixture.peopleMemory.revision, now: ownerAt }).ok, true);
+const pendingModel = { callId: "backup-model-pending", logicalBotId: ownerBot, accountId: "primary",
+  conversationId: "group:23456789", kind: "chat", model: "fixture/model", startedAt: ownerAt };
+assert.equal(claimModelCall(memoryFixture, pendingModel).shouldCall, true);
+assert.equal(recordModelCall(memoryFixture, { ...pendingModel, callId: "backup-model-confirmed", startedAt: ownerAt + 1,
+  endedAt: ownerAt + 2, status: "confirmed", usage: { inputTokens: 12, outputTokens: 4, totalTokens: 16,
+    cachedInputTokens: 0, reasoningTokens: 0 } }).ok, true);
+assert.equal(recordOperationalEvent(memoryFixture, { eventId: "backup-unresolved", code: "ACCOUNT_OFFLINE", severity: "warning",
+  accountId: "primary", logicalBotId: ownerBot, feature: "chat", time: ownerAt + 2, resolved: false }).ok, true);
+for (const direction of ["received", "sent"])
+  assert.equal(recordOwnerInteraction(memoryFixture, { logicalBotId: ownerBot, accountId: "primary",
+    conversationId: "private:21001", messageId: `interaction-${direction}`, direction, at: ownerAt, now: ownerAt }).recorded, true);
+const ownerEnvelope = { private: true, verified: true, ownerUserId: "21001", accountId: "primary", logicalBotId: ownerBot };
+const ownerSource = { revision: "backup-source-r1", carrier: "primary", session: "fixture-session" };
+let fixtureWireCalls = 0;
+let owner33RoundTrips = 0;
+const forbiddenFixtureWire = () => { fixtureWireCalls++; throw new Error("fixture wire must never run"); };
+const routerHost = (read, transact, authorize = () => true) => ({ read, transact, authorize,
+  isOwner: envelope => envelope.ownerUserId === "21001", capture: () => ownerSource, isCurrent: () => true,
+  execute: forbiddenFixtureWire, query: forbiddenFixtureWire, now: () => ownerAt });
+const ownerRouter = createOwnerCommandRouter(routerHost(() => memoryFixture, async build => build(memoryFixture)));
+const ownerPending = await ownerRouter.handle({ ...ownerEnvelope, messageId: "owner-pending" },
+  "/owner notifications on 09:00,21:00 Asia/Shanghai");
+assert.equal(ownerPending.code, "OWNER_CONFIRM_REQUIRED");
+// Simulate a crash AFTER durable claim publication but BEFORE any execution.
+const claimedRouter = createOwnerCommandRouter(routerHost(() => memoryFixture, async build => {
+  build(memoryFixture); throw new Error("fixture publication outcome uncertain");
+}));
+await assert.rejects(() => claimedRouter.handle({ ...ownerEnvelope, messageId: "owner-claimed" },
+  "/owner send primary 23456789 fixture"), /fixture publication outcome uncertain/);
+assert.equal(putOwnerDirective(memoryFixture, { actorUserId: "21001", logicalBotId: ownerBot, accountId: "primary",
+  groupId: "23456789", userId: "12345678", messageId: "directive-source", authorized: true, now: ownerAt }).ok, true);
+const claimedNotification = createOwnerNotificationCenter({ read: () => memoryFixture,
+  transact: async build => { build(memoryFixture); throw new Error("fixture publication outcome uncertain"); },
+  now: () => ownerAt, policy: () => notificationPolicy,
+  eligible: () => ({ allowed: true, ownerVerified: true, private: true, online: true, revision: "backup-route-r1" }),
+  snapshot: forbiddenFixtureWire, send: forbiddenFixtureWire });
+assert.equal((await claimedNotification.tick()).code, "OWNER_NOTIFICATIONS_PERSISTENCE_UNCERTAIN");
+assert.equal(memoryFixture.ownerNotifications.windows.length, 1);
+assert.equal(memoryFixture.ownerNotifications.windows[0].status, "claimed");
+assert.equal(fixtureWireCalls, 0);
+
+async function checkOwner33Restore(target) {
+  const restoredMemoryBefore = fs.readFileSync(path.join(target, "data", "memory.json"), "utf8");
+  const actual = JSON.parse(restoredMemoryBefore);
+  const config = JSON.parse(fs.readFileSync(path.join(target, "config.json"), "utf8"));
+  assert.deepEqual(config.ownerControl, { ...ownerPolicy, enabled: false });
+  assert.deepEqual(config.ownerNotifications, { ...notificationPolicy, enabled: false });
+  assert.deepEqual(config.automation, automationPolicy);
+  assert.deepEqual(config.targetGroups, ["23456789"]);
+  check(true, "restore disables only owner execution/summary enablement and preserves all targets/times/scopes");
+  for (const key of ["peopleMemory", "ownerAuthority", "ownerNotifications", "operationalLedger", "ownerInteractions"])
+    assert.deepEqual(actual[key], memoryFixture[key], `3.3 ${key} evidence/claims/fences must survive unchanged`);
+  check(true, "all real 3.3 memory roots survive safe/full restoration without fabricated receipts");
+  assert.equal(personMemoryControl(actual, { logicalBotId: ownerBot, userId: "12345679" }).frozen, true);
+  const deleted = personMemoryControl(actual, { logicalBotId: ownerBot, userId: "12345680" });
+  assert.equal(deleted.deleted, true); assert.equal(deleted.suppressesLegacy, true);
+  assert.equal(queryPersonMemory(actual, { logicalBotId: ownerBot, userId: "12345678",
+    conversationId: "group:23456789", now: ownerAt }).entries.length, 1);
+  assert.equal(queryPersonMemory(actual, { logicalBotId: ownerBot, userId: "12345678",
+    conversationId: "private:12345678", now: ownerAt }).entries.length, 1);
+  const fenceBefore = structuredClone(actual.peopleMemory);
+  assert.equal(recordPersonEvidence(actual, personEvidence("12345680")).ok, false);
+  assert.equal(recordPersonEvidence(actual, personEvidence("12345679")).ok, false);
+  assert.deepEqual(actual.peopleMemory, fenceBefore);
+  check(true, "public/private person evidence, admin freeze and deletion fallback fences survive");
+  const usageRange = { from: ownerAt, to: ownerAt + 3 };
+  assert.deepEqual(queryModelUsage(actual, usageRange), queryModelUsage(memoryFixture, usageRange));
+  const modelRetry = claimModelCall(actual, pendingModel);
+  assert.equal(modelRetry.ok, true); assert.equal(modelRetry.shouldCall, false);
+  assert.equal(modelRetry.duplicate, true);
+  assert.equal(queryOwnerInteractions(actual, { from: ownerAt, to: ownerAt + 1 }).sent, 1);
+  assert.equal(recordOwnerInteraction(actual, { logicalBotId: ownerBot, accountId: "primary", conversationId: "private:21001",
+    messageId: "interaction-received", direction: "received", at: ownerAt, now: ownerAt }).duplicate, true);
+  check(true, "known/unknown usage, pending model claims and confirmed interaction dedup survive restart");
+  const authorityBefore = structuredClone(actual.ownerAuthority);
+  const history = ownerOperationHistory(actual);
+  assert(history.some(row => row.status === "uncertain") && history.some(row => row.status === "awaiting_confirmation"));
+  const router = createOwnerCommandRouter(routerHost(() => actual, async build => build(actual), () => config.ownerControl.enabled));
+  assert.equal((await router.handle({ ...ownerEnvelope, messageId: "owner-claimed" },
+    "/owner send primary 23456789 fixture")).status, "blocked");
+  // Even explicit re-enable cannot replay a persisted claim or silently confirm
+  // a pending proposal. Only a separate current explicit confirmation may act.
+  config.ownerControl.enabled = true;
+  assert.equal((await router.handle({ ...ownerEnvelope, messageId: "owner-claimed" },
+    "/owner send primary 23456789 fixture")).status, "uncertain");
+  assert.equal((await router.handle({ ...ownerEnvelope, messageId: "owner-pending" },
+    "/owner notifications on 09:00,21:00 Asia/Shanghai")).status, "uncertain");
+  assert.deepEqual(actual.ownerAuthority, authorityBefore);
+  assert.equal(ownerDirectiveAllows(actual, { logicalBotId: ownerBot, groupId: "23456789",
+    userId: "12345678", action: "group_poke" }), false);
+  check(true, "restored owner commands never execute automatically and restrictions remain effective");
+  const notificationBefore = structuredClone(actual.ownerNotifications);
+  assert.equal(getOwnerNotificationStatus(actual, { now: ownerAt }).recent[0].status, "uncertain");
+  assert.deepEqual(actual.ownerNotifications, notificationBefore, "read-only status does not recover state");
+  const center = createOwnerNotificationCenter({ read: () => actual, transact: async build => build(actual),
+    now: () => ownerAt, policy: () => config.ownerNotifications,
+    eligible: () => ({ allowed: true, ownerVerified: true, private: true, online: true, revision: "backup-route-r1" }),
+    snapshot: forbiddenFixtureWire, send: forbiddenFixtureWire });
+  assert.equal((await center.tick()).code, "DISABLED");
+  assert.equal(actual.ownerNotifications.windows[0].status, "uncertain");
+  config.ownerNotifications.enabled = true;
+  await center.tick(); // Original claimed occurrence is consumed, never replayed.
+  assert.equal(actual.ownerNotifications.windows.length, 1);
+  assert.equal(actual.ownerNotifications.windows[0].status, "uncertain");
+  assert.equal(fixtureWireCalls, 0);
+  check(true, "recovery marks orphan notification claims uncertain without summary/model/wire replay");
+  assert.equal(fs.readFileSync(path.join(target, "data", "memory.json"), "utf8"), restoredMemoryBefore,
+    "fixture runtime checks are memory-only, never a second disk writer");
+  owner33RoundTrips++;
+}
+
 function checkSocialRestore(target) {
   const actual = JSON.parse(fs.readFileSync(path.join(target, "data", "memory.json"), "utf8"));
   let expected = structuredClone(memoryFixture);
@@ -175,9 +317,12 @@ try {
     ai: { command: "hermesqq2", args: ["-m", "deepseek-v4-flash", "--provider", "deepseek", "-z"], provider: "deepseek", model: "deepseek-v4-flash", apiKeyEnv: "DEEPSEEK_API_KEY", directApiKey: "FAKE_CREDENTIAL_FOR_TESTS" },
     prompt: { system: "保持原有风格" },
     taskMode: { workspaceBaseDir: path.join(state, "data", "tasks") },
+    ownerControl: structuredClone(ownerPolicy), ownerNotifications: structuredClone(notificationPolicy),
+    automation: structuredClone(automationPolicy), targetGroups: ["23456789"],
     accounts: { primary: { id: "primary", protocol: "napcat", token: "sensitive-token-value-abcdefghijklmnopqrstuvwxyz" }, standbys: [] }
   };
   fs.writeFileSync(path.join(state, "config.json"), JSON.stringify(config));
+  const sourceConfigBytes = fs.readFileSync(path.join(state, "config.json"), "utf8");
   const sourceMemoryBytes = JSON.stringify(memoryFixture);
   fs.writeFileSync(path.join(state, "data", "memory.json"), sourceMemoryBytes);
   fs.writeFileSync(path.join(state, "data", "chat-archive", "groups", "123", "messages.jsonl"), '{"text":"hello"}\n');
@@ -217,6 +362,9 @@ try {
   check(restoredSafeConfig.taskMode.workspaceBaseDir === path.join(safeRestore, "data", "tasks"), `safe restore must rewrite state paths for the new computer (got ${restoredSafeConfig.taskMode.workspaceBaseDir})`);
   check(fs.existsSync(path.join(safeRestore, "data", "memory.json")), "safe restore must include memory");
   checkSocialRestore(safeRestore);
+  await checkOwner33Restore(safeRestore);
+  check(fs.readFileSync(path.join(state, "config.json"), "utf8") === sourceConfigBytes,
+    "restoration disables staged owner policy only; source config stays byte-for-byte unchanged");
   check(fs.readFileSync(path.join(state, "data", "memory.json"), "utf8") === sourceMemoryBytes,
     "source memory must remain byte-for-byte unchanged");
   // Restoring the same archive again still pauses only its staged work, without
@@ -225,12 +373,14 @@ try {
   const socialRepeat = path.join(root, "social-repeat-restore");
   await restoreBackup({ path: safe.path, stateRoot: socialRepeat });
   checkSocialRestore(socialRepeat);
+  await checkOwner33Restore(socialRepeat);
   check(crypto.createHash("sha256").update(fs.readFileSync(safe.path)).digest("hex") === archiveHash,
     "restore must never rewrite the checksummed backup container");
   const pausedBackup = await createBackup({ type: "safe", stateRoot: socialRepeat, destinationDir: backups });
   const pausedRoundtrip = path.join(root, "social-paused-roundtrip");
   await restoreBackup({ path: pausedBackup.path, stateRoot: pausedRoundtrip });
   checkSocialRestore(pausedRoundtrip); // no repeated revision bump or previousStatus loss
+  await checkOwner33Restore(pausedRoundtrip);
   // Pre-social memory remains compatible and does not acquire social defaults.
   const oldMemorySource = path.join(root, "old-memory-source");
   fs.mkdirSync(path.join(oldMemorySource, "data"), { recursive: true });
@@ -242,6 +392,30 @@ try {
   await restoreBackup({ path: preSocialBackup.path, stateRoot: oldMemoryTarget });
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(oldMemoryTarget, "data", "memory.json"), "utf8")), oldMemory);
   check(true, "pre-social backup restore must preserve legacy memory without adding fields");
+  const preOwnerConfig = JSON.parse(fs.readFileSync(path.join(oldMemoryTarget, "config.json"), "utf8"));
+  check(!Object.hasOwn(preOwnerConfig, "ownerControl") && !Object.hasOwn(preOwnerConfig, "ownerNotifications"),
+    "old config restore must not create 3.3 policy defaults");
+  // Malformed owner policies fail BEFORE replacing an existing target or
+  // touching credentials. No live user config/Keychain participates.
+  const invalidOwnerSource = path.join(root, "invalid-owner-source");
+  fs.mkdirSync(path.join(invalidOwnerSource, "data"), { recursive: true });
+  fs.writeFileSync(path.join(invalidOwnerSource, "data", "memory.json"), JSON.stringify({ groups: {} }));
+  const ownerTargetConfigBefore = fs.readFileSync(path.join(oldMemoryTarget, "config.json"));
+  const ownerTargetMemoryBefore = fs.readFileSync(path.join(oldMemoryTarget, "data", "memory.json"));
+  const ownerCredentialUntouched = () => { throw new Error("owner staging unexpectedly reached credentials"); };
+  for (const policies of [{ ownerControl: [], ownerNotifications: notificationPolicy },
+    { ownerControl: ownerPolicy, ownerNotifications: null }]) {
+    fs.writeFileSync(path.join(invalidOwnerSource, "config.json"), JSON.stringify({ ...policies,
+      accounts: { version: 2, items: [], failoverGroups: [] } }));
+    const invalidOwnerBackup = await createBackup({ type: "safe", stateRoot: invalidOwnerSource, destinationDir: backups });
+    await assert.rejects(() => restoreBackup({ path: invalidOwnerBackup.path, stateRoot: oldMemoryTarget,
+      voiceSecretStore: { getVoiceSecret: ownerCredentialUntouched, setVoiceSecret: ownerCredentialUntouched, deleteVoiceSecret: ownerCredentialUntouched },
+      apiSecretStore: { getApiSecret: ownerCredentialUntouched, setApiSecret: ownerCredentialUntouched, deleteApiSecret: ownerCredentialUntouched },
+    }), /主人控制配置格式无效/);
+    assert.deepEqual(fs.readFileSync(path.join(oldMemoryTarget, "config.json")), ownerTargetConfigBefore);
+    assert.deepEqual(fs.readFileSync(path.join(oldMemoryTarget, "data", "memory.json")), ownerTargetMemoryBefore);
+    check(true, "malformed owner policy rejects in staging with existing target and credentials untouched");
+  }
   // Malformed executable social state fails closed in staging BEFORE existing
   // target files or fake Keychain handles can be touched.
   fs.writeFileSync(path.join(oldMemorySource, "data", "memory.json"), JSON.stringify({ groups: {},
@@ -277,8 +451,12 @@ try {
     const fullInfo = await inspectBackup({ path: full.path, password: "correct horse battery staple" });
     check(fullInfo.manifest.type === "full" && fullInfo.header.encrypted, "full backup must be encrypted");
     check(fullInfo.manifest.components.includes("diagnostic-logs") && fullInfo.manifest.files.some((item) => item.path === "diagnostic-logs/bridge.log"), "encrypted full backup must include optional logs");
+    const fullArchiveHash = crypto.createHash("sha256").update(fs.readFileSync(full.path)).digest("hex");
     await restoreBackup({ path: full.path, password: "correct horse battery staple", stateRoot: fullRestore, hermesHome: path.join(fullRestore, "hermes") });
     checkSocialRestore(fullRestore);
+    await checkOwner33Restore(fullRestore);
+    check(crypto.createHash("sha256").update(fs.readFileSync(full.path)).digest("hex") === fullArchiveHash,
+      "3.3 restore gates must never rewrite the encrypted full archive");
     const restoredFullConfig = JSON.parse(fs.readFileSync(path.join(fullRestore, "config.json"), "utf8"));
     check(restoredFullConfig.ai.directApiKey === config.ai.directApiKey, "full restore must retain secrets inside encrypted package");
     check(fs.readFileSync(path.join(fullRestore, "hermes", ".env"), "utf8").includes("DEEPSEEK_API_KEY"), "full restore must include app Hermes credentials");
@@ -505,6 +683,7 @@ try {
   check(migrated.ok && migrated.migratedDockerVolumes === 0, "legacy migration without SnowLuma must succeed");
   check(JSON.parse(fs.readFileSync(path.join(legacyTarget, "config.json"), "utf8")).prompt.system === "保持原有风格", "migration must preserve prompt");
   const migratedConfig = JSON.parse(fs.readFileSync(path.join(legacyTarget, "config.json"), "utf8"));
+  await checkOwner33Restore(legacyTarget);
   check(migratedConfig.ai.command === "hermes" && migratedConfig.ai.args[0] === "-p" && migratedConfig.ai.args[1] === "hermesqq2", "migration must preserve the legacy Hermes profile");
   check(fs.existsSync(path.join(legacyTarget, "data", "chat-archive", "groups", "123", "messages.jsonl")), "migration must preserve chat archive");
   check(migrated.hermesProfileMigrated && fs.existsSync(path.join(legacyTarget, "hermes", ".env")), "migration must copy Hermes profile into app state");
@@ -629,7 +808,8 @@ try {
   check(!Object.hasOwn(qzoneOnlyRestored, "socialAgents") && qzoneOnlyOwner.drafts.terminal.status === "confirmed",
     "QZone-only restore does not invent social state or erase confirmed evidence");
 
-  console.log(JSON.stringify({ ok: true, tests, safe: path.basename(safe.path), full: path.basename(full.path) }, null, 2));
+  console.log(JSON.stringify({ ok: true, tests, owner33RoundTrips, fixtureWireCalls,
+    safe: path.basename(safe.path), full: path.basename(full.path) }, null, 2));
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

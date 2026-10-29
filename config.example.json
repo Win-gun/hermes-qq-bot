@@ -10,6 +10,17 @@
     "port": 6200,
     "maxBodyBytes": 65536
   },
+  "ownerNotifications": {
+    "enabled": false,
+    "timezone": "Asia/Shanghai",
+    "times": ["09:00", "21:00"]
+  },
+  "ownerControl": {
+    "enabled": false,
+    "naturalLanguage": false,
+    "usageEnabled": true,
+    "allowedTargets": []
+  },
   "status": {
     "onebotStaleMs": 90000
   },
@@ -356,6 +367,7 @@
     ]
   },
   "memory": {
+    "people": { "enabled": false },
     "enabled": true,
     "maxNamesPerUser": 5,
     "maxItemsPerUser": 24,

@@ -1,3 +1,5 @@
+import { normalizeModelUsage } from './operational-ledger.js';
+
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 class CompletionError extends Error {}
 
@@ -53,13 +55,28 @@ async function boundedResponse(response, wait) {
   return new TextDecoder().decode(bytes);
 }
 
-/** A single, stateless OpenAI-compatible text completion. */
-export async function completeText({ prompt, baseUrl, model, apiKey, reasoningEffort = 'low', timeoutMs = 60_000, signal, fetchImpl = fetch }) {
+function responseMetadata(data, apiKey, prompt) {
+  const reported = data?.model;
+  // Report only a bounded machine model identifier, not URLs, arbitrary provider
+  // fields, response IDs, error text or a credential echoed by the upstream.
+  const model = typeof reported === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:@/+\-]{0,159}$/.test(reported)
+    && !reported.includes('://') && !/^(?:sk-|Bearer|password|secret|cookie|authorization|api[_-]?key)/i.test(reported)
+    && !reported.includes(apiKey) && !reported.includes(prompt) ? reported : null;
+  return { usage: normalizeModelUsage(data?.usage), model, provider: 'openai-compatible' };
+}
+
+/** A single, stateless OpenAI-compatible text completion. Default: string.
+ * returnMetadata:true: {text,usage,model,provider}; model is the HTTP JSON's
+ * reported model or null (never inferred from answer text/request settings).
+ * Unknown usage fields are null, not zero or token estimates. Safe errors may
+ * carry .metadata = {usage,model,provider,httpStatus}, never raw response data.
+ */
+export async function completeText({ prompt, baseUrl, model, apiKey, reasoningEffort = 'low', timeoutMs = 60_000, signal, fetchImpl = fetch, returnMetadata = false }) {
   const endpoint = endpointFor(baseUrl);
   if (typeof prompt !== 'string' || !prompt.trim() || typeof model !== 'string' || !model.trim() || typeof apiKey !== 'string' || !apiKey || typeof fetchImpl !== 'function') {
     throw new Error('Invalid text completion arguments');
   }
-  if (!['none', 'low', 'medium', 'high'].includes(reasoningEffort) || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+  if (!['none', 'low', 'medium', 'high'].includes(reasoningEffort) || !Number.isFinite(timeoutMs) || timeoutMs <= 0 || typeof returnMetadata !== 'boolean') {
     throw new Error('Invalid text completion options');
   }
   if (signal?.aborted) throw abortError();
@@ -80,6 +97,7 @@ export async function completeText({ prompt, baseUrl, model, apiKey, reasoningEf
     ],
   };
   if (reasoningEffort !== 'none') payload.reasoning_effort = reasoningEffort;
+  let metadata;
   try {
     const response = await wait(fetchImpl(endpoint, {
       method: 'POST',
@@ -94,12 +112,19 @@ export async function completeText({ prompt, baseUrl, model, apiKey, reasoningEf
       throw new CompletionError(`Text completion redirect refused (HTTP ${response.status})`);
     }
     if (!response.ok) {
-      cancelBody(response);
+      // Upstreams can report real billable usage even on HTTP errors. Inspect a
+      // bounded JSON body, but preserve the sanitized HTTP error on parse/read
+      // failures; never propagate upstream error strings or headers.
+      try {
+        const data = JSON.parse(await boundedResponse(response, wait));
+        metadata = { ...responseMetadata(data, apiKey, prompt), httpStatus: response.status };
+      } catch {} finally { cancelBody(response); }
       throw new CompletionError(`Text completion failed (HTTP ${response.status})`);
     }
     const raw = await boundedResponse(response, wait);
     let data;
     try { data = JSON.parse(raw); } catch { throw new CompletionError('Invalid text completion JSON'); }
+    metadata = { ...responseMetadata(data, apiKey, prompt), httpStatus: response.status };
     const choice = data?.choices?.[0];
     if (choice?.finish_reason === 'length') throw new CompletionError('Text completion output truncated');
     if (choice?.message?.tool_calls?.length) throw new CompletionError('Text completion returned tool calls');
@@ -108,11 +133,12 @@ export async function completeText({ prompt, baseUrl, model, apiKey, reasoningEf
       ? content
       : Array.isArray(content) ? content.filter((part) => part?.type === 'text' && typeof part.text === 'string').map((part) => part.text).join('') : '';
     if (!answer.trim()) throw new CompletionError('Text completion returned no text');
-    return answer;
+    return returnMetadata ? { text: answer, usage: metadata.usage, model: metadata.model, provider: metadata.provider } : answer;
   } catch (error) {
-    if (controller.signal.aborted) throw abortError(timeoutFired);
-    if (error instanceof CompletionError) throw error;
-    throw new Error('Text completion request failed');
+    const safeError = controller.signal.aborted ? abortError(timeoutFired)
+      : error instanceof CompletionError ? error : new Error('Text completion request failed');
+    if (metadata) safeError.metadata = metadata;
+    throw safeError;
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', onAbort);

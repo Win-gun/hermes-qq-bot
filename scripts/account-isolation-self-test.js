@@ -24,6 +24,7 @@ import { executeReplyPlan } from "../src/expression-renderer.js";
 import { ExpressionDiagnostics } from "../src/social-expression-diagnostics.js";
 import { isQzoneAction, qzoneActionKind, isUnmanagedFavoriteWrite } from "../src/qzone-delivery.js";
 import { recordSocialEpisode } from "../src/social-episodes.js";
+import { recordOwnerInteraction } from "../src/owner-interactions.js";
 
 // Read source only. Never import/start main(), open sockets, spawn a service,
 // read live config/state, or persist anything. The complete real message callback
@@ -94,14 +95,14 @@ const realFunctions = [
   "asStringId", "asArray", "clampText", "safePathSegment", "now", "canonicalSocialConversation", "accountProtocol", "oneBotBinding", "oneBotBindingCurrent", "clearOneBotActionsForSocket",
   "groupMemory", "groupSettings", "normalizeBehaviorMode", "behaviorMode", "behaviorModeLabel", "behaviorModeDescription", "applyBehaviorMode", "socialPlannerConfig",
   "configuredAccountDefinitions", "accountFailoverConfig", "accountById", "configForReplyAccount", "configForGroupAccount",
-  "syncAccountKernel", "accountExecutionRevision", "accountRuntimeContext", "accountRuntimeContextCurrent", "accountRuntimeIdentityCurrent", "botStateKey",
+  "syncAccountKernel", "accountExecutionRevision", "accountMemoryControlRevision", "accountRuntimeContext", "accountRuntimeContextCurrent", "accountRuntimeIdentityCurrent", "botStateKey",
   "setDefaultTransport", "selectLogicalCarrier",
   "oneBotAccountState", "accountStateById", "configuredAccountBySelfId", "chooseUnboundStandbyAccount", "identifyOneBotAccount", "accountConnected",
   "accountIsSelected", "accountSelectedSnapshot", "connectedAccountForRole", "dispatchAccountAction",
   "parsePeerPingMessage", "accountActualQq", "acceptPeerPing", "sendPeerPing", "botAccountUserIds", "probeOneBotAccount",
   "accountSendState", "recordAccountSend", "abilityItem", "abilityFresh", "accountStateLabel", "routingActionForState", "diagnoseAccount", "oneBotStatusValue", "oneBotStatusFlagIsFalse",
   "conversationIdFromEvent", "conversationLabelFromEvent", "oneBotMessageToText", "messageMentionsSelf", "stripSelfMention", "stripBotAddressing", "escapeRegExp", "hasKeyword",
-  "stableMessageFingerprint", "accountScopedInboundKey", "claimConversationMessage", "messageTiming", "extractReplyMessageIds",
+  "stableMessageFingerprint", "accountScopedInboundKey", "claimConversationMessage", "messageTiming", "extractReplyMessageIds", "recordPeopleSourceObservation",
   "messageDebounceConfig", "isLikelyIncompleteInput", "shouldWaitForMoreInput", "flushDebouncedMessage", "enqueueDebouncedMessage", "pendingDebouncedContext", "orderedHistory", "mergeReplyCurrents",
   "quietUntil", "isQuiet", "repairInvalidQuietUntil", "parseDurationMs", "formatDuration", "isGroupAdmin", "handleBotCommand", "handleMemoryVerificationCommand",
   "sameLogicalAccount", "recordBotMessage", "lastBotMessageForAccount", "sendGroupMessage", "aiVoicePlanAllowed", "deliverChatExpression", "lastNonBotMessage", "lastNonBotMessagesSince", "scoreImplicitReplyAgainstBotMessage", "isMediaOnlyText"
@@ -126,6 +127,8 @@ function harness(config = fixtureConfig(), mutation = {}) {
     nativePokeBindings: new WeakMap(),
     isQzoneAction, qzoneActionKind, isUnmanagedFavoriteWrite,
     recordSocialEpisode, socialEpisodeDeliveredProvider: async () => {},
+    recordOwnerInteraction: (root, args) => recordOwnerInteraction(root, structuredClone(args)),
+    ownerServices: { router: { handle: async () => ({ matched: true, status: "blocked", code: "OWNER_IDENTITY_REQUIRED" }) } },
     expressionDiagnostics: new ExpressionDiagnostics(),
     logicalBotId, botConversationKey, botControlRevision, replyDeliveryConfig,
     accountKernel: new AccountRuntime(config), kernelConfigRevision: 1, pendingReplyHandoffs: [],
@@ -493,6 +496,22 @@ await test("4 actual enqueue gate: disabled/shadow planner, direct/implicit/acti
     check.equal(h.jobs[0].mode, kind);
     check.equal(h.jobs[0].accountId, B);
   }
+});
+
+await test("person controls fence prior account drafts without cancelling peer or identity evidence", async () => {
+  const h = harness(), a = h.connect(A).ws, b = h.connect(B).ws;
+  const owner = logicalBotId(h.config, A);
+  const oldA = h.c.accountRuntimeContext(A, a, G), oldB = h.c.accountRuntimeContext(B, b, G);
+  const blank = h.c.accountRuntimeContext(A, a), revision = h.c.accountExecutionRevision(A, G);
+  h.c.memory.peopleMemory = { bots: { [owner]: { controlRevision: 1 } } };
+  check.equal(h.c.accountRuntimeContextCurrent(oldA, a), false);
+  check.equal(h.c.accountRuntimeContextCurrent(blank, a), false);
+  check.equal(h.c.accountRuntimeContextCurrent(oldB, b), true);
+  check.equal(h.c.accountRuntimeIdentityCurrent(oldA, a), true, "person controls do not erase verified carrier identity");
+  check.notEqual(h.c.accountExecutionRevision(A, G), revision);
+  const current = h.c.accountRuntimeContext(A, a, G);
+  h.c.memory.peopleMemory.bots[owner].people = { fixture: { revision: 12 } };
+  check.equal(h.c.accountRuntimeContextCurrent(current, a), true, "ordinary evidence updates do not cause regeneration loops");
 });
 
 await test("real inbound names address only their independent logical bot", async () => {

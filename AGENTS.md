@@ -281,6 +281,15 @@ images into memory. Message reactions are external writes even without a
 checks. An accepted reaction is not a new QQ message or a spoken experience.
 
 Social Agency 3.2 contracts and unrun effect gates are in `docs/SOCIAL-AGENCY-3.2.md`.
+People Memory / Owner Authority 3.3 contracts are in
+`docs/PEOPLE-MEMORY-OWNER-AUTHORITY-3.3.md`. Person ownership is logical Bot +
+verified QQ, never nickname or a concatenated legacy group portrait. Preserve
+person-control tombstones even when disabling the new projection. Owner command
+and notification claims use the same MemoryRuntime writer and final delivery
+gate; model JSON is not authorization or a successful receipt. Missing provider
+usage and uncovered history remain unknown. New notification/command scopes
+default off; source completion does not authorize production rollout.
+Run `npm run test:people-owner` after relevant changes.
 `socialAgent.agency` defaults off. Self/Group/Member preferences are separate;
 only actual eligible own ACKs plus cross-date evidence and current core hash may
 support automatic self growth. The bounded intent journal is passive semantic
