@@ -730,6 +730,10 @@
               <input id="vision.enabled" type="checkbox" />
             </div>
             <div class="switch-row">
+              <div><strong>优先用对话模型直接识图</strong><span>勾选表示管理员确认当前问答方案支持图像输入；更换绑定后须重新确认。能力未知时沿用独立识图方案；调用失败不偷偷切换重试。</span></div>
+              <input id="vision.preferChatModel" type="checkbox" />
+            </div>
+            <div class="switch-row">
               <div><strong>仅明确需要时识图</strong><span>避免每张闲图都消耗模型调用。</span></div>
               <input id="vision.onlyWhenMentionedOrAsked" type="checkbox" />
             </div>
@@ -2283,7 +2287,7 @@
         proxy: { urls: String(getVal("webSearch.proxy.urls") || "").split(/\r?\n+/).map((x) => x.trim()).filter(Boolean) }
       } };
       if (scope === "vision") return { vision: {
-        enabled: getVal("vision.enabled"), onlyWhenMentionedOrAsked: getVal("vision.onlyWhenMentionedOrAsked"), includeQuotedImages: getVal("vision.includeQuotedImages"), includeImageEmojis: getVal("vision.includeImageEmojis"),
+        enabled: getVal("vision.enabled"), preferChatModel: getVal("vision.preferChatModel"), onlyWhenMentionedOrAsked: getVal("vision.onlyWhenMentionedOrAsked"), includeQuotedImages: getVal("vision.includeQuotedImages"), includeImageEmojis: getVal("vision.includeImageEmojis"),
         aggressiveFollowup: getVal("vision.aggressiveFollowup"), contextAssist: getVal("vision.contextAssist"), describeWhenUncertain: getVal("vision.describeWhenUncertain"),
         followupWindowMs: getVal("vision.followupWindowMs"), followupMaxMessagesAfterBot: getVal("vision.followupMaxMessagesAfterBot"), contextAssistWindowMs: getVal("vision.contextAssistWindowMs"),
         contextAssistRecentMessages: getVal("vision.contextAssistRecentMessages"), contextAssistMaxMessagesAfterBot: getVal("vision.contextAssistMaxMessagesAfterBot"), contextAssistShortTextMaxLength: getVal("vision.contextAssistShortTextMaxLength"), maxQuotedMessages: getVal("vision.maxQuotedMessages"),
@@ -2382,6 +2386,7 @@
       renderAutomationAccountState(); renderRoutineState();
 
       setVal("vision.enabled", cfg.vision?.enabled);
+      setVal("vision.preferChatModel", cfg.vision?.preferChatModel === true);
       setVal("vision.onlyWhenMentionedOrAsked", cfg.vision?.onlyWhenMentionedOrAsked);
       setVal("vision.includeQuotedImages", cfg.vision?.includeQuotedImages);
       setVal("vision.includeImageEmojis", cfg.vision?.includeImageEmojis);
@@ -3443,7 +3448,9 @@
       await refreshAccountRegistry({ configSnapshot: config, selfSavedScope });
       await refreshRoutines();
       $("qaModelSummary").textContent = `问答：${cfg.ai?.model || "未指定模型"}`;
-      $("visionModelSummary").textContent = `识图：${cfg.vision?.model || "未指定模型"}`;
+      $("visionModelSummary").textContent = cfg.vision?.preferChatModel
+        ? `识图策略：优先已确认的问答方案；独立方案：${cfg.vision?.model || "未指定"}`
+        : `识图：${cfg.vision?.model || "未指定模型"}`;
       $("voiceModelSummary").textContent = `ASR：${cfg.voice?.asr?.model || "mimo-v2.5-asr"} · TTS：${cfg.voice?.tts?.model || "未指定模型"}`;
       memoryData = memory;
       archiveStatusData = archiveStatus;
@@ -5896,6 +5903,7 @@
         turn: { enabled: true, minWaitMs: 150, maxWaitMs: 4500, ordinaryWaitMs: 700, incompleteWaitMs: 2500, maxTurnMs: 8000, ...result.socialExperience?.turn },
         expression: { enabled: true, maxMessages: 2, minIntervalMs: 200, maxIntervalMs: 800, allowQuotes: true, ...result.socialExperience?.expression },
         stickers: { enabled: false, autoSend: false, interactionEnabled: false, visionLearning: false, groupLearning: false, autonomousEligibility: false,
+          autonomousSelection: false, webSearch: false, maxDailySearches: 12,
           maxDailyVisionCalls: 8, maxDailyDownloads: 16, cooldownMs: 60000, ...result.socialExperience?.stickers },
         reactions: { enabled: false, cooldownMs: 60000, maxDaily: 30, emojiIds: ["76"], ...result.socialExperience?.reactions },
         language: { enabled: false, autoCandidates: true, implicitLearning: false, ...result.socialExperience?.language },
@@ -6490,7 +6498,10 @@
           body.id = current.id; body.draftRevision = current.revision;
           // This first editor is text-only. Unknown media must never gain
           // publishing authority from a path, URL or an opaque attachment.
-          if (["submit-review", "approve", "publish"].includes(op) && (["media", "images"].some(key => current[key] !== undefined && (!Array.isArray(current[key]) || current[key].length)) || !["publish", "like", "comment"].includes(current.kind))) throw new Error("unknown_media");
+          const qqImagePreview = op === "submit-review" && data.policy?.reviewTransport === "qq_owner" && data.images?.supported === true
+            && current.kind === "publish" && Array.isArray(current.images) && current.images.length <= 9
+            && current.images.every(image => typeof image === "string" && /^public_[a-f0-9]{64}$/.test(image));
+          if (!qqImagePreview && ["submit-review", "approve", "publish"].includes(op) && (["media", "images"].some(key => current[key] !== undefined && (!Array.isArray(current[key]) || current[key].length)) || !["publish", "like", "comment"].includes(current.kind))) throw new Error("unknown_media");
         }
         if (op === "create-draft") {
           const editor = state.editor;
@@ -6579,12 +6590,23 @@
         row.append(socialLifeNode("p", `创作依据：${socialLifeText(item.creationReason || "管理员提交", 120)} · 来源：${socialLifeText(item.source?.kind || "待核对", 50)} · ${item.containsPrivateContent === true ? "含私人空间内容，仅限本地审核" : "不以此字段代替人工隐私核对"}`, "hint"));
         row.append(socialLifeNode("p", `审核：${item.status === "approved" ? "此版本已批准；发布仍需有效主机会话授权" : item.status === "review" ? "待批准" : "不代表当前可发布批准"}`, "hint"));
         row.append(socialLifeNode("p", `实际回执：${item.clientVerified === true ? "已提供客户端可见证据" : item.protocolAccepted === true ? "接口已受理，客户端可见性未证实" : "未提供已受理或客户端可见证据"}`, "hint"));
+        if (data.policy?.reviewTransport === "qq_owner") {
+          const review = data.ownerReviews?.filter(entry => entry.draftId === item.id).at(-1);
+          const state = { claimed: "预览发送中", awaiting_owner: "预览已发送，等待管理员 QQ 回复", publishing: "管理员已确认，执行中",
+            accepted: "发布接口已受理", confirmed: "已确认完成", rejected: "管理员已拒绝", uncertain: "结果不确定，不自动重试", failed: "失败", blocked: "已阻止" }[review?.status];
+          row.append(socialLifeNode("p", `管理员 QQ 确认：${["claimed", "awaiting_owner"].includes(review?.status) && review?.expiresAt < Date.now() ? "原确认已过期" : state || "尚未发送预览"}；不在控制台批准。`, "hint"));
+        }
         const actions = socialLifeNode("div", undefined, "row");
         const textOnly = ["publish", "like", "comment"].includes(item.kind) && ["media", "images"].every(key => item[key] === undefined || Array.isArray(item[key]) && !item[key].length);
         const permits = data.policy?.enabled === true && data.policy?.mode !== "draft_only" && data.policy?.[{ publish: "publish", like: "likes", comment: "comments" }[item.kind]]?.enabled === true;
         for (const [op, label, eligible] of [["submit-review", "提交审核", item.status === "draft" && textOnly], ["approve", item.status === "approved" ? "重新批准此版本（不发布）" : "批准此版本（不发布）", ["review", "approved"].includes(item.status) && textOnly], ["publish", `执行已批准${{ publish: "发表", like: "点赞", comment: "评论" }[item.kind] || "操作"}`, item.status === "approved" && textOnly && permits && (item.kind !== "publish" || data.policy?.allowedAudiences?.includes(item.audience))], ["verify", "读取自己空间并核验回执", item.kind === "publish" && item.protocolAccepted === true && ["publishing", "uncertain"].includes(item.status) && data.policy?.reads?.own === true], ["cancel", "取消草稿", ["draft", "review", "approved"].includes(item.status)]]) {
           const button = registryButton(label, () => qzoneOperation(id, op, item), op === "publish" ? "danger" : "secondary");
-          button.disabled = locked || !eligible || typeof item.id !== "string" || !Number.isSafeInteger(item.revision); actions.append(button);
+          if (data.policy?.reviewTransport === "qq_owner" && ["approve", "publish"].includes(op)) continue;
+          if (data.policy?.reviewTransport === "qq_owner" && op === "submit-review") button.textContent = "发送管理员 QQ 预览";
+          const qqImages = op === "submit-review" && item.status === "draft" && data.policy?.reviewTransport === "qq_owner" && data.images?.supported === true
+            && item.kind === "publish" && Array.isArray(item.images) && item.images.length <= 9
+            && item.images.every(image => typeof image === "string" && /^public_[a-f0-9]{64}$/.test(image));
+          button.disabled = locked || (!eligible && !qqImages) || typeof item.id !== "string" || !Number.isSafeInteger(item.revision); actions.append(button);
         }
         if (!textOnly) row.append(socialLifeNode("p", "未知媒体：当前文本编辑器不允许送审、批准或发布此条。", "warning"));
         row.append(actions); drafts.append(row);
@@ -6680,6 +6702,9 @@
         const mediaTitle = document.createElement("h4"); mediaTitle.className = "settings-block"; mediaTitle.textContent = "表情与群语感设置 · 随当前账号保存";
         const media = document.createElement("div"); media.className = "form-grid";
         add(media, "启用表情库", "stickers.enabled", { type: "checkbox" });
+        add(media, "由 AI 选择表情，无需逐张人工确认", "stickers.autonomousSelection", { type: "checkbox", hint: "保留自动识图、隐私检查和明确拒绝；不需要在控制台逐张批准。" });
+        add(media, "允许搜索公开表情（Memecub）", "stickers.webSearch", { type: "checkbox", hint: "仅发送公开短关键词，不上传聊天记录；使用现有电脑联网下载和缓存，不读取私人磁盘文件。" });
+        add(media, "每日公开表情搜索上限", "stickers.maxDailySearches", { type: "number" });
         add(media, "允许自动发表情", "stickers.autoSend", { type: "checkbox", hint: "默认关闭；确认标注不等于授权自动发送，仍受观察模式、范围及发送权限约束。" });
         add(media, "允许有界回图/斗图", "stickers.interactionEnabled", { type: "checkbox", hint: "默认关闭；仅响应当前人类输入，受宿主轮次、冷却和停止规则约束。不打开自动发表情，不授予素材、范围或发送权限。" });
         add(media, "允许视觉学习（可能收费）", "stickers.visionLearning", { type: "checkbox", hint: "手动标注逐项确认；开启群表情学习后，后台分析计入下方每日预算，不阻塞聊天。" });
@@ -6743,6 +6768,9 @@
         const edit = (path, next) => { value.qzone = registryEditable(value).qzone; change(path, next); };
         for (const [key, label] of [["enabled", "启用空间策略"], ["reads.feeds", "允许显式读取远端私人动态"], ["reads.own", "允许读取自己的空间（含回执核验）"], ["publish.enabled", "允许发布已批准版本"], ["likes.enabled", "允许点赞提案及已批准点赞"], ["comments.enabled", "允许评论提案及已批准评论"]]) registryField(fields, label, `qzone.${key}`, registryGet(settings, key), edit, { type: "checkbox" });
         registryField(fields, "运行模式", "qzone.mode", settings.mode, edit, { options: [["draft_only", "仅草稿（不执行写入）"], ["reviewed", "逐条审核后执行"]], hint: "已有其他模式原样保留；此页不配置或授予自主发帖权限。" });
+        registryField(fields, "发布确认位置", "qzone.reviewTransport", settings.reviewTransport || "console", edit,
+          { options: [["qq_owner", "管理员 QQ 私聊：正文与配图一起确认"], ["console", "原控制台流程（兼容）"]],
+            hint: "QQ 私聊模式下，AI 自行拟稿；管理员收到精确正文与配图后回复确认，控制台不再批准或发布。" });
         const audienceControl = registryField(fields, "默认受众", "qzone.ugcRight", String(settings.ugcRight), (path, next) => edit(path, Number(next)), { options: (settings.allowedAudiences || [64]).filter(n => [1, 4, 64].includes(n)).map(n => [String(n), `${n} · ${{ 1: "公开", 4: "好友可见", 64: "仅自己" }[n]}`]), hint: "只提供服务器策略允许的受众；保存默认值不会修改已有草稿的受众。" });
         section.append(fields);
         const advanced = document.createElement("details"); advanced.className = "panel-details settings-block";
@@ -6809,6 +6837,8 @@
         if (t.minWaitMs > t.maxWaitMs || t.maxWaitMs > t.maxTurnMs || [t.ordinaryWaitMs, t.incompleteWaitMs].some(n => n < t.minWaitMs || n > t.maxWaitMs)) throw new Error("等待参数须满足：最短等待 ≤ 普通 / 未完等待 ≤ 等待上限 ≤ 整轮最长等待");
         if (e.minIntervalMs > e.maxIntervalMs) throw new Error("气泡最短间隔不能大于最长间隔");
         if (p.stickers !== undefined) {
+          for (const flag of [p.stickers.autonomousSelection, p.stickers.webSearch]) if (flag !== undefined && typeof flag !== "boolean") throw new Error("自主表情与公开检索须为开关");
+          if (p.stickers.maxDailySearches !== undefined && (!Number.isSafeInteger(p.stickers.maxDailySearches) || p.stickers.maxDailySearches < 0 || p.stickers.maxDailySearches > 100)) throw new Error("每日表情搜索上限须为 0–100 整数（匿名服务另有每IP上限）");
           for (const flag of [p.stickers?.enabled, p.stickers?.autoSend, p.stickers?.interactionEnabled, p.stickers?.visionLearning, p.stickers?.groupLearning, p.stickers?.autonomousEligibility]) if (typeof flag !== "boolean") throw new Error("表情库开关须为布尔值");
           if (!Number.isSafeInteger(p.stickers.maxDailyVisionCalls) || p.stickers.maxDailyVisionCalls < 0 || p.stickers.maxDailyVisionCalls > 100) throw new Error("每日视觉调用上限须为 0–100 的整数");
           if (!Number.isSafeInteger(p.stickers.maxDailyDownloads) || p.stickers.maxDailyDownloads < 0 || p.stickers.maxDailyDownloads > 100) throw new Error("每日学习下载上限须为 0–100 的整数");

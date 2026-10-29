@@ -319,5 +319,13 @@ export function createExpressionLibrary({ readState, transact, capture, isCurren
   }
   const learning = createGroupStickerLearning({ readState, transact, guard, clock: now, resolveImage, mediaCache,
     ...(downloadImage ? { downloadImage } : {}), describeImage: (ctx, media, options) => describe(ctx, media, options) });
-  return Object.freeze({ open, snapshot, operate, candidates, prepare, markSent, ...learning });
+  async function importPublic(ctx, metadata, { signal } = {}) {
+    const c = guard(ctx, signal);
+    if (!c.policy.stickers.webSearch || !c.policy.stickers.autonomousSelection || annotating.has(c.logicalId)) throw fail("EXPRESSION_DISABLED");
+    annotating.add(c.logicalId);
+    try { return await service(ctx, { signal,
+      description: (host, media, opts) => describe(host, media, opts) }).importPublic(ctx, metadata, { signal }); }
+    finally { annotating.delete(c.logicalId); }
+  }
+  return Object.freeze({ open, snapshot, operate, candidates, prepare, markSent, importPublic, ...learning });
 }

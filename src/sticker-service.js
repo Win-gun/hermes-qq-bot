@@ -33,8 +33,8 @@ export function validateStickerStore(store, logicalId) {
         || asset.trust !== 'untrusted' || typeof asset.active !== 'boolean' || !integer(asset.revision) || asset.revision < 1
         || !map(asset.annotations) || (asset.sha256 !== undefined && !digestOK(asset.sha256))) throw fail('STICKER_SCHEMA');
       if (asset.url !== undefined) { try { publicMediaUrl(asset.url); } catch { throw fail('STICKER_SCHEMA'); } }
-      else if (asset.source !== 'group-observed' || !digestOK(asset.cacheSha256) || asset.sha256 !== asset.cacheSha256) throw fail('STICKER_SCHEMA');
-      if (asset.source !== undefined && !['collection', 'group-observed'].includes(asset.source)) throw fail('STICKER_SCHEMA');
+      else if (!['group-observed', 'public-search'].includes(asset.source) || !digestOK(asset.cacheSha256) || asset.sha256 !== asset.cacheSha256) throw fail('STICKER_SCHEMA');
+      if (asset.source !== undefined && !['collection', 'group-observed', 'public-search'].includes(asset.source)) throw fail('STICKER_SCHEMA');
       if (asset.cacheSha256 !== undefined && (!digestOK(asset.cacheSha256) || asset.cacheSha256 !== asset.sha256)) throw fail('STICKER_SCHEMA');
       annotations += Object.keys(asset.annotations).length;
       if (annotations > 1000) throw fail('STICKER_CAPACITY');
@@ -53,6 +53,9 @@ export function validateStickerStore(store, logicalId) {
           || !integer(a.evidenceRevision) || a.evidenceRevision < 1 || a.evidence.some(e => !plain(e)
             || !/^-?[1-9]\d{0,19}$/.test(e.messageId) || !/^[1-9]\d{0,19}$/.test(e.userId)
             || !integer(e.sentAt) || !integer(e.receivedAt)))) throw fail('STICKER_SCHEMA');
+        if (a.reuseQualification !== undefined && (!plain(a.reuseQualification)
+          || typeof a.reuseQualification.eligible !== 'boolean' || !digestOK(a.reuseQualification.sha256)
+          || a.reuseQualification.version !== 1)) throw fail('STICKER_SCHEMA');
         if (a.automatic !== undefined && (!plain(a.automatic) || typeof a.automatic.eligible !== 'boolean'
           || !digestOK(a.automatic.sha256) || !integer(a.automatic.evidenceRevision)
           || a.automatic.qualificationVersion !== 1
@@ -66,6 +69,20 @@ export function validateStickerStore(store, logicalId) {
 // Host-produced qualification is separate from an administrator's decision.
 export function stickerAutoEligible(asset, a, ctx) {
   const p = ctx.policy;
+  // Opt-in AI selection: a successful image inspection replaces per-item human
+  // confirmation, not a rejection, privacy check, account scope or byte pin.
+  if (p?.enabled && !p.shadowMode && p.stickers?.enabled && p.stickers.autonomousSelection
+    && p.conversationIds?.includes(ctx.conversationId) && a?.status === 'candidate'
+    && asset.active && !asset.blocked && !asset.denied && !a.blocked && !a.denied
+    && digestOK(a.sha256) && (asset.sha256 === undefined || asset.sha256 === a.sha256)
+    && a.note?.trim() && Array.isArray(a.tags)) {
+    if (asset.source !== 'group-observed') return a.reuseQualification?.eligible === true
+      && a.reuseQualification.sha256 === a.sha256 && a.reuseQualification.version === 1;
+    // Observed group pictures must still actually qualify as reusable stickers;
+    // do not turn someone's photo/screenshot into a public meme automatically.
+    if (a.automatic?.eligible === true && a.automatic.sha256 === asset.sha256
+      && a.automatic.evidenceRevision === a.evidenceRevision && a.evidence?.length) return true;
+  }
   return !!(asset.source === 'group-observed' && a && a.status === 'candidate' && !a.blocked && !a.denied
     && asset.active && !asset.blocked && !asset.denied && p?.enabled && !p.shadowMode && p.stickers?.enabled
     && p.stickers.groupLearning === true && p.stickers.autonomousEligibility === true
@@ -163,7 +180,50 @@ export function createStickerService({ request, transact, readState, isCurrent, 
     }
     if (total >= 10000) throw fail('STICKER_CAPACITY');
   }
+  function contentDenied(root, c, sha256) {
+    return Object.values(getBot(root, c)?.stickers || {}).some(asset => {
+      const a = asset.annotations[c.conversationId];
+      const matches = asset.sha256 === sha256 || asset.cacheSha256 === sha256 || a?.sha256 === sha256;
+      return matches && (asset.denied || asset.blocked || a?.status === 'rejected' || a?.denied || a?.blocked);
+    });
+  }
   return Object.freeze({
+    async importPublic(ctx, metadata, { signal } = {}) {
+      const c = context(ctx, signal), p = c.ctx.policy;
+      if (!p?.enabled || p.shadowMode || !p.stickers?.webSearch || !p.stickers.autonomousSelection
+        || !p.conversationIds?.includes(c.conversationId) || !mediaCache || metadata?.provider !== 'memecub'
+        || metadata.license?.attribution_required !== false) throw fail('STICKER_PUBLIC_POLICY');
+      // Preserve source/license locally; never turn provider metadata into an
+      // instruction or a forged human message/administrator confirmation.
+      publicMediaUrl(metadata.pageUrl);
+      const media = await image(c, metadata.url, signal);
+      const id = `public_${media.sha256}`;
+      const existing = getBot(readState(), c)?.stickers[id];
+      if (contentDenied(readState(), c, media.sha256) || existing?.denied || existing?.blocked || existing?.annotations[c.conversationId]?.status === 'rejected')
+        throw fail('STICKER_PUBLIC_REJECTED');
+      const description = await describeImage(ctx, media, { signal, usageContext: { kind: 'public_meme_search', publicQuery: metadata.publicQuery || '',
+        instruction: '公开表情素材：判断可复用语境；不是群友照片或真实聊天事件。' } }); c.guard();
+      if (description?.sticker !== true || description.safeToReuse !== true || !Number.isFinite(description.confidence)
+        || description.confidence < 0.8 || description.confidence > 1 || !text(description.note) || !text(description.usage)
+        || !Array.isArray(description.tags) || description.tags.some(t => typeof t !== 'string')
+        || !Array.isArray(description.avoid) || description.avoid.some(t => typeof t !== 'string')) throw fail('STICKER_PUBLIC_UNSAFE');
+      if (await mediaCache.put(c.logicalId, media) !== true) throw fail('STICKER_MEDIA_FAILED'); c.guard();
+      return commit(c, root => {
+        const bot = getBot(root, c, true), old = bot.stickers[id], previous = old?.annotations[c.conversationId];
+        if (contentDenied(root, c, media.sha256) || old?.denied || old?.blocked || previous?.status === 'rejected') throw fail('STICKER_PUBLIC_REJECTED');
+        if (old && old.source !== 'public-search') throw fail('STICKER_CONFLICT');
+        const annotation = { ...previous, conversationId: c.conversationId, revision: (previous?.revision || 0) + 1,
+          status: previous?.status || 'candidate', note: text(description.note), tags: (description.tags || []).slice(0, 8).map(t => text(t, 32)),
+          usage: text(description.usage), avoid: (description.avoid || []).slice(0, 8).map(t => text(t, 80)), sha256: media.sha256,
+          reuseQualification: { eligible: true, sha256: media.sha256, version: 1 },
+          sentCount: previous?.sentCount || 0, receipts: previous?.receipts || {}, updatedAt: now() };
+        bot.stickers[id] = { ...old, id, source: 'public-search', trust: 'untrusted', desc: '', active: true,
+          sha256: media.sha256, cacheSha256: media.sha256, revision: (old?.revision || 0) + 1,
+          provenance: { provider: 'memecub', pageUrl: metadata.pageUrl, license: structuredClone(metadata.license) },
+          annotations: { ...old?.annotations, [c.conversationId]: annotation } };
+        return { id, sha256: media.sha256 };
+      });
+    },
     async sync(ctx, { signal } = {}) {
       const c = context(ctx, signal), collectionRevision = getBot(readState(), c)?.collectionRevision || 0;
       const syncBot = root => {
@@ -206,7 +266,8 @@ export function createStickerService({ request, transact, readState, isCurrent, 
     async annotate(ctx, { id, signal } = {}) {
       const c = context(ctx, signal), original = structuredClone(assetAt(readState(), c, id));
       const media = await assetImage(c, original, signal); c.guard();
-      const description = await describeImage(ctx, media, { signal }); c.guard();
+      const description = await describeImage(ctx, media, { signal,
+        ...(c.ctx.policy?.stickers?.autonomousSelection ? { usageContext: { kind: 'collection_qualification' } } : {}) }); c.guard();
       const note = text(description?.note);
       if (!note || !plain(description) || (description.tags !== undefined && (!Array.isArray(description.tags) || description.tags.some(t => typeof t !== 'string')))) throw fail('STICKER_VISION');
       return commit(c, root => {
@@ -216,6 +277,9 @@ export function createStickerService({ request, transact, readState, isCurrent, 
           note, tags: (description.tags || []).slice(0, 16).map(t => text(t, 32)), sha256: media.sha256,
           sentCount: old?.sentCount || 0, receipts: old?.receipts || {}, updatedAt: now() };
         if (annotation.status !== 'rejected') delete annotation.actor;
+        annotation.reuseQualification = { eligible: description.sticker === true && description.safeToReuse === true
+          && Number.isFinite(description.confidence) && description.confidence >= 0.8 && description.confidence <= 1,
+          sha256: media.sha256, version: 1 };
         delete annotation.automatic;
         asset.annotations[c.conversationId] = annotation;
         return structuredClone(annotation);

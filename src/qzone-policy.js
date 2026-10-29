@@ -37,7 +37,7 @@ export function isQzoneSafeText(value, limit = 1000) {
 /** Both entrypoints are strict. Missing policy means safe defaults; malformed
  * saved policy must not be repaired into an enabled configuration. */
 export function validateQzonePolicy(value = {}) {
-  if (!plain(value) || Object.keys(value).some(k => !Object.hasOwn(defaults, k))) fail();
+  if (!plain(value) || Object.keys(value).some(k => k !== "reviewTransport" && !Object.hasOwn(defaults, k))) fail();
   const result = structuredClone(defaults);
   for (const [key, entry] of Object.entries(value)) {
     if (["reads", "publish", "likes", "comments", "autonomy"].includes(key)) {
@@ -70,6 +70,9 @@ export function validateQzonePolicy(value = {}) {
     } else if (key === "enabled") {
       if (typeof entry !== "boolean") fail();
       result.enabled = entry;
+    } else if (key === "reviewTransport") {
+      if (!["console", "qq_owner"].includes(entry)) fail();
+      result.reviewTransport = entry;
     } else if (key === "mode") {
       if (!["draft_only", "reviewed", "scoped_autonomy"].includes(entry)) fail();
       result.mode = entry;

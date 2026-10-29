@@ -7,9 +7,11 @@ const integer = value => Number.isSafeInteger(value) && value >= 0;
 const fail = code => { throw new Error(code); };
 const dayOf = at => new Date(at + 8 * 3600000).toISOString().slice(0, 10);
 
-/** Explicit administrator operation, NOT a scheduler or model tool. The host
+/** Host invocation for an administrator topic or attested public discovery,
+ * NOT a scheduler or model tool. The host
  * supplies the selected account persona/model, a durable sole-writer transaction
- * and a text-only model adapter. No history, feeds, private memory, files, native
+ * and a text-only model adapter. Optional source/images are host-only references
+ * revalidated by createDraft, not caller/model permission. No history, feeds, private memory, files, native
  * tools or publication callback is available here. Authority stays in createDraft.
  * Reservations use the SAME logical bot runtimeUsage.days ledger as Social Agent
  * and discovery. A failed/aborted attempt is never silently refunded or retried.
@@ -21,7 +23,7 @@ export function createQzoneDraftGenerator({ isCurrent, getPolicy, getPersona, tr
     if (signal?.aborted || isCurrent(ctx) !== true || ctx.policy?.enabled !== true) fail("QZONE_STALE_OR_ABORTED");
   };
   return Object.freeze({
-    async run(ctx, input, { signal, actor } = {}) {
+    async run(ctx, input, { signal, actor, source, images } = {}) {
       guard(ctx, signal);
       if (!plain(input) || Object.keys(input).some(key => !["topic", "audience"].includes(key))
         || !isQzoneSafeText(input.topic, 1000)) fail("QZONE_DRAFT_TOPIC_INVALID");
@@ -64,8 +66,8 @@ export function createQzoneDraftGenerator({ isCurrent, getPolicy, getPersona, tr
         try { result = typeof raw === "string" ? JSON.parse(raw) : null; } catch { fail("QZONE_DRAFT_MODEL_INVALID"); }
         if (!plain(result) || Object.keys(result).sort().join(",") !== "content,reason"
           || !isQzoneSafeText(result.content, 1000) || !isQzoneSafeText(result.reason, 120)) fail("QZONE_DRAFT_MODEL_INVALID");
-        const draft = await createDraft(ctx, { content: result.content, source: { kind: "admin_topic", ref: claim },
-          audience, creationReason: result.reason }, actor);
+        const draft = await createDraft(ctx, { content: result.content, source: source || { kind: "admin_topic", ref: claim },
+          ...(images?.length ? { images } : {}), audience, creationReason: result.reason }, actor);
         guard(ctx, signal);
         return { ...draft, generated: true, reason: result.reason };
       } finally {

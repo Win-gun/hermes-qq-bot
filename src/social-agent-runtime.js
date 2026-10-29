@@ -2,7 +2,7 @@
 import { validateReplyPlan } from "./reply-plan.js";
 import { validateAgencyProposal } from "./social-agency.js";
 
-const TOOL_NAMES = ["read_unread", "read_detail", "read_history", "read_memory", "web_search", "schedule_followup"];
+const TOOL_NAMES = ["read_unread", "read_detail", "read_history", "read_memory", "web_search", "search_stickers", "schedule_followup"];
 const plain = value => value !== null && typeof value === "object" && !Array.isArray(value)
   && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 const fail = code => Object.assign(new Error(code), { code });
@@ -98,11 +98,13 @@ function validateArgs(name, args, seenSeq) {
     case "read_unread": return keys(args, ["limit", "afterSeq"]) && limit()
       && (args.afterSeq === undefined || integer(args.afterSeq, 0, seenSeq));
     case "read_detail": return keys(args, ["seq"]) && integer(args.seq, 1, seenSeq);
-    case "read_history": return keys(args, ["beforeSeq", "limit"]) && limit()
+    case "read_history": return keys(args, ["beforeSeq", "limit", "query"]) && limit()
+      && (args.query === undefined || text(args.query, 160))
       && (args.beforeSeq === undefined || integer(args.beforeSeq, 0, seenSeq));
     case "read_memory": return keys(args, ["query", "limit"]) && limit(20)
       && (args.query === undefined || text(args.query, 500));
     case "web_search": return keys(args, ["query"]) && text(args.query, 500);
+    case "search_stickers": return keys(args, ["query"]) && text(args.query, 80);
     case "schedule_followup": return keys(args, ["delayMs", "userId"]) && integer(args.delayMs, 1000, 86_400_000)
       && (args.userId === undefined || qq(args.userId));
     default: return false;
@@ -219,7 +221,7 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
   const metrics = { completed: 0, failed: 0, cancelled: 0, intents: 0 };
   const allowed = TOOL_NAMES.filter(name => typeof tools[name] === "function");
   const descriptors = allowed.map(name => ({ name, argumentKeys: ({
-    read_unread: ["limit", "afterSeq"], read_detail: ["seq"], read_history: ["beforeSeq", "limit"],
+    read_unread: ["limit", "afterSeq"], read_detail: ["seq"], read_history: ["beforeSeq", "limit", "query"], search_stickers: ["query"],
     read_memory: ["query", "limit"], web_search: ["query"], schedule_followup: ["delayMs", "userId"]
   })[name] }));
   const keyFor = ctx => JSON.stringify([ctx.logicalId, ctx.conversationId]);

@@ -298,6 +298,20 @@ replayed; fresh related events and normal routing/quiet/budget gates still apply
 Public QZone candidates remain review-only drafts. Run `npm run test:social-agency-32`;
 synthetic parity is not model A/B, QQ protocol or human naturalness acceptance.
 
+Autonomous expression and QQ owner preview contracts are in
+`docs/SOCIAL-FREEDOM.md`. Opt-in `stickers.autonomousSelection` replaces per-item
+human approval only after hash-bound automatic reuse/privacy qualification;
+explicit rejection wins across same-content aliases. Public Memecub search is
+bounded, account-scoped and never a local-disk read grant. Person-control fences
+also apply to `read_history` archive retrieval. `qzone.reviewTransport=qq_owner`
+sends the exact body and images to a verified owner private chat for single-use
+confirmation; console approval cannot bypass it. QZone quiet/control revision
+must remain effective through the final queued wire send. Chat-model vision
+requires an administrator capability snapshot pinned to the actual binding;
+unknown capability preserves the independent vision path, failures never retry
+on another model. Run `npm run test:social-freedom` and affected lifecycle,
+expression, memory/owner and vision tests. Source readiness is not deployment.
+
 Core source upgrade contracts and outstanding acceptance gates are tracked in
 `docs/CORE-UPGRADE.md`. The memory repository is the sole cooperating writer;
 read-only tools must not acquire its lock. AI extraction claims each batch

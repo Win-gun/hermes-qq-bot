@@ -47,7 +47,8 @@ export function validateAgencyProposal(value) {
     || !Array.isArray(p.trigger.terms) || !p.trigger.terms.length || p.trigger.terms.length > 6 || p.trigger.terms.some(t => !label(t))
     || (p.evidenceMessageIds !== undefined && !refs(p.evidenceMessageIds)) || (p.materialIds !== undefined && !refs(p.materialIds))
     || !Number.isSafeInteger(p.ttlMs) || p.ttlMs < 1000 || p.ttlMs > 86_400_000))) throw new TypeError("SOCIAL_AGENCY_INVALID_PROPOSAL");
-  if (value.publicDraft !== undefined && (!keys(value.publicDraft, ["materialId", "motive"])
+  if (value.publicDraft !== undefined && (!keys(value.publicDraft, ["materialId", "motive", "imageId"])
+    || value.publicDraft.imageId !== undefined && (typeof value.publicDraft.imageId !== "string" || !/^public_[a-f0-9]{64}$/.test(value.publicDraft.imageId))
     || !refs([value.publicDraft.materialId]) || !["interest", "new_perspective", "useful_public"].includes(value.publicDraft.motive)))
     throw new TypeError("SOCIAL_AGENCY_INVALID_PROPOSAL");
   return structuredClone(value);

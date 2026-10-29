@@ -6,7 +6,8 @@ const defaults = {
   turn: { enabled: true, minWaitMs: 150, maxWaitMs: 4500, ordinaryWaitMs: 700, incompleteWaitMs: 2500, maxTurnMs: 8000 },
   expression: { enabled: true, maxMessages: 2, minIntervalMs: 200, maxIntervalMs: 800, allowQuotes: true },
   stickers: { enabled: false, autoSend: false, visionLearning: false, groupLearning: false,
-    autonomousEligibility: false, interactionEnabled: false, maxDailyVisionCalls: 8, maxDailyDownloads: 16, cooldownMs: 60000 },
+    autonomousEligibility: false, autonomousSelection: false, webSearch: false, maxDailySearches: 12,
+    interactionEnabled: false, maxDailyVisionCalls: 8, maxDailyDownloads: 16, cooldownMs: 60000 },
   reactions: { enabled: false, cooldownMs: 60000, maxDaily: 30, emojiIds: ["76"] },
   language: { enabled: false, autoCandidates: true, implicitLearning: false },
   interestWatch: { enabled: false, maxDurationMs: 300000, maxActive: 4 },
@@ -46,7 +47,7 @@ export function validateSocialExperiencePolicy(value = {}) {
         if (typeof entry !== "boolean") throw new Error(`${key} 必须是开关`);
       } else if (!Number.isSafeInteger(entry) || entry < (key === "maxDurationMs" ? 1000 : ["maxMessages", "maxTurnMs", "maxActive"].includes(key) ? 1 : 0)
         || entry > (key === "maxMessages" || key === "maxActive" ? 4 : key === "maxDurationMs" ? 600000 : key === "maxTurnMs" ? 15000
-          : ["maxDailyVisionCalls", "maxDailyDownloads"].includes(key) ? 100 : key === "maxDaily" ? 200
+            : ["maxDailyVisionCalls", "maxDailyDownloads", "maxDailySearches"].includes(key) ? 100 : key === "maxDaily" ? 200
             : key === "cooldownMs" ? 86400000 : 6000)) throw new Error(`${key} 超出有效范围`);
       result[section][key] = entry;
     }

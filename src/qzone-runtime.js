@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
+import { types } from "node:util";
 import { QZONE_READ_ACTIONS, QZONE_WRITE_ACTIONS, validateQzonePolicy, isQzoneSafeText } from "./qzone-policy.js";
 
 const DAY = 86400000, MAX_DRAFTS = 128, MAX_CLAIMS = 4096, MAX_BOTS = 32;
+const MAX_IMAGES = 9, MAX_IMAGE_BYTES = 5 * 1024 * 1024, MAX_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024;
 const plain = v => v !== null && typeof v === "object" && !Array.isArray(v)
   && [Object.prototype, null].includes(Object.getPrototypeOf(v));
 const fail = code => { throw new Error(code); };
@@ -95,17 +97,31 @@ export function recoverQzoneState(memory, { reason, now: at } = {}) {
  * synchronous, throws on reuse/revocation, and is required even for reads.
  * Read raw OneBot envelopes, not unwrapped data. A thrown request is uncertain.
  *
+ * Optional resolveImage(ctx, id) is a synchronous HOST cache lookup, never IO or
+ * a model tool. It receives only a runtime-validated opaque ID and must return
+ * {id, sha256, provenance:"public", containsPrivateMaterial:false, immutable:true,
+ * wireReference:"base64://<canonical base64 of cached image bytes>"}.
+ * The host attests public provenance AND no private material (including embedded
+ * metadata), pins immutable bytes to the ID/hash, and enforces account scope and
+ * revocation on EVERY lookup. Cache/download/inspection happen before runtime
+ * calls, outside the repository transaction. Runtime verifies the byte hash;
+ * URLs/files are intentionally unsupported to avoid fetch/path TOCTOU and SSRF.
+ * Limit: 9 unique IDs/byte hashes, 5 MiB/image, 20 MiB total. Throws, promises,
+ * missing cache entries or changed attestations fail closed. No wire references
+ * or bytes are persisted/exposed in draft views; preview resolves the same IDs
+ * separately and must match stored hashes. Reads/status never invoke resolver.
+ *
  * Only publish/like/comment are implemented. Other protected QZone writes have
- * no dispatch API. Images fail closed until a separate secure host resolver is
- * designed. Feed/cursor handles live only in this context, expire and never get
+ * no dispatch API. Feed/cursor handles live only in this context, expire and never get
  * persisted. No private_qzone text is passed to onEpisode or any group projector.
  * All returned drafts/status are detached views. Recover never sends or resumes.
  */
 export function createQzoneRuntime({ capture, isCurrent, readState, transact, request,
-  clock = Date.now, isAdministrator, peerQqs, onEpisode, isSourceAllowed = () => false } = {}) {
+  clock = Date.now, isAdministrator, peerQqs, onEpisode, isSourceAllowed = () => false, resolveImage } = {}) {
   for (const dep of [capture, isCurrent, readState, transact, request, clock, isAdministrator, peerQqs])
     if (typeof dep !== "function") fail("QZONE_HOST_CONTRACT");
   if (typeof isSourceAllowed !== "function" || onEpisode !== undefined && typeof onEpisode !== "function") fail("QZONE_HOST_CONTRACT");
+  if (resolveImage !== undefined && typeof resolveImage !== "function") fail("QZONE_HOST_CONTRACT");
   const contexts = new WeakMap(), leases = new Map(), targets = new Map(), attempted = new Set(), freshDrafts = new Map();
   const poisoned = new Set(); // Uncertain repository failures cannot be retried in this instance.
   const now = () => {
@@ -171,7 +187,7 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
   function draftView(row) {
     return structuredClone({ id: row.id, kind: row.kind, revision: row.revision, status: row.status,
       content: row.content, source: row.source, audience: row.audience,
-      images: [], containsPrivateContent: row.source?.kind === "private_qzone" ? true : null,
+      images: imageRecords(row).map(image => image.id), containsPrivateContent: row.source?.kind === "private_qzone" ? true : null,
       creationReason: row.creationReason || (row.kind === "publish" ? "管理员创建的文字草稿" : "管理员提交的互动提案"),
       protocolAccepted: row.protocolAccepted, clientVerified: row.clientVerified,
       ...(row.reason ? { reason: row.reason } : {}) });
@@ -183,7 +199,8 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
       capabilities: Object.fromEntries(actions.map(a => [a, cap(b, c, a)])),
       daily: { reads: counts.reads || 0, publish: counts.publish || 0, likes: counts.likes || 0, comments: counts.comments || 0 },
       drafts: Object.values(b?.drafts || {}).map(draftView),
-      images: { supported: false, reason: "QZONE_HOST_IMAGE_RESOLVER_REQUIRED" },
+      images: resolveImage ? { supported: true, maxCount: MAX_IMAGES }
+        : { supported: false, reason: "QZONE_HOST_IMAGE_RESOLVER_REQUIRED" },
       destructive: { supported: false, reason: "QZONE_DESTRUCTIVE_NOT_IMPLEMENTED" } };
   }
   function open(accountId) {
@@ -295,6 +312,66 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
       || target.uin === c.qq || peers(ctx).includes(target.uin)) fail("QZONE_TARGET_STALE_OR_SCOPE");
     return target;
   }
+  function imageIds(value = []) {
+    if (!Array.isArray(value) || value.length > MAX_IMAGES
+      || Array.from(value).some(id => !safeId(id)) || new Set(value).size !== value.length) fail("QZONE_IMAGES_INVALID");
+    return [...value];
+  }
+  function imageRecords(row) {
+    if (row.images === undefined) return []; // Legacy text-only drafts.
+    if (!Array.isArray(row.images) || row.images.length > MAX_IMAGES) fail("QZONE_IMAGES_INVALID");
+    for (const image of Array.from(row.images)) {
+      if (!plain(image) || Object.keys(image).sort().join(",") !== "id,sha256"
+        || typeof image.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(image.sha256)) fail("QZONE_IMAGES_INVALID");
+    }
+    imageIds(row.images.map(image => image.id));
+    if (new Set(row.images.map(image => image.sha256)).size !== row.images.length) fail("QZONE_IMAGES_INVALID");
+    return row.images;
+  }
+  // Only called outside transact builders. Base64 is the documented SnowLuma
+  // images:string[] wire shape, not a OneBot image segment or a model URL.
+  function resolveImages(ctx, ids) {
+    imageIds(ids);
+    if (ids.length && !resolveImage) fail("QZONE_HOST_IMAGE_RESOLVER_REQUIRED");
+    let total = 0;
+    return ids.map(id => {
+      let image;
+      try {
+        const result = resolveImage(ctx, id);
+        // Reject asynchronous adapters, also consuming a rejected native Promise
+        // so a bad injection cannot cause an unhandled-rejection process exit.
+        if (types.isPromise(result)) Promise.prototype.then.call(result, undefined, () => {});
+        image = plain(result) && result.then === undefined ? { id: result.id, provenance: result.provenance,
+          containsPrivateMaterial: result.containsPrivateMaterial, immutable: result.immutable,
+          sha256: result.sha256, wireReference: result.wireReference } : null;
+      } catch { fail("QZONE_IMAGE_UNAVAILABLE"); }
+      if (!plain(image) || image.id !== id || image.provenance !== "public"
+        || image.containsPrivateMaterial !== false || image.immutable !== true
+        || typeof image.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(image.sha256)
+        || typeof image.wireReference !== "string" || !image.wireReference.startsWith("base64://")) fail("QZONE_IMAGE_PROOF_REQUIRED");
+      const encoded = image.wireReference.slice(9);
+      if (!encoded.length || encoded.length > 4 * Math.ceil(MAX_IMAGE_BYTES / 3)
+        || encoded.length % 4 || /[^A-Za-z0-9+/=]/.test(encoded)) fail("QZONE_IMAGE_BYTES_INVALID");
+      const bytes = Buffer.from(encoded, "base64");
+      total += bytes.length;
+      if (!bytes.length || bytes.length > MAX_IMAGE_BYTES || total > MAX_TOTAL_IMAGE_BYTES
+        || bytes.toString("base64") !== encoded || hash(bytes) !== image.sha256) fail("QZONE_IMAGE_HASH_OR_SIZE");
+      return { id, sha256: image.sha256, wireReference: image.wireReference };
+    });
+  }
+  function checkImages(ctx, row) {
+    try {
+      const records = imageRecords(row), resolved = resolveImages(ctx, records.map(image => image.id));
+      if (resolved.some((image, i) => image.sha256 !== records[i].sha256)) fail("QZONE_IMAGE_CHANGED");
+      return resolved;
+    } catch (e) { leases.delete(row.id); throw e; }
+  }
+  const fingerprintFor = row => hash(JSON.stringify([row.kind, row.kind === "publish" ? canonical(row.content) : row.eventHash,
+    ...(imageRecords(row).length ? [row.images.map(image => image.sha256)] : [])]));
+  // Dedupe canonicalizes text, but approval binds EXACT text, source, audience
+  // and ordered IDs/hashes, including on every final delivery-gate check.
+  const confirmationFor = row => hash(JSON.stringify([row.kind, row.content, row.source.kind, row.source.ref,
+    row.audience, row.eventHash ?? null, imageRecords(row).map(image => [image.id, image.sha256])]));
   async function makeDraft(ctx, input, actor, kind) {
     const c = guard(ctx);
     exact(input, kind === "publish" ? ["content", "source", "images", "audience", "creationReason"] : ["kind", "feedId", "content"]);
@@ -307,7 +384,7 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
       } else admin(ctx, actor);
     };
     authorize();
-    let source, audience, target;
+    let source, audience, target, images = [];
     const content = kind === "like" ? "" : input.content;
     if (kind !== "like" && !isQzoneSafeText(content)) fail("QZONE_CONTENT_UNSAFE");
     if (input.creationReason !== undefined && !isQzoneSafeText(input.creationReason, 120)) fail("QZONE_CONTENT_UNSAFE");
@@ -316,7 +393,7 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
       exact(input.source, ["kind", "ref"]);
       if (!["admin_topic", "public_information"].includes(input.source.kind) || !safeId(input.source.ref)
         || input.source.ref.length > 96) fail("QZONE_SOURCE");
-      if (input.images !== undefined && (!Array.isArray(input.images) || input.images.length)) fail("QZONE_HOST_IMAGE_RESOLVER_REQUIRED");
+      images = resolveImages(ctx, imageIds(input.images)).map(({ id, sha256 }) => ({ id, sha256 }));
       source = { kind: input.source.kind, ref: input.source.ref };
       audience = input.audience === undefined ? c.policy.ugcRight : input.audience;
       if (!c.policy.allowedAudiences.includes(audience)) fail("QZONE_AUDIENCE");
@@ -330,13 +407,15 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
     const id = `draft_${randomUUID()}`;
     const row = { id, kind, revision: 1, status: "draft", content, source,
       audience: audience ?? null, protocolAccepted: false, clientVerified: false, createdAt: now(),
+      ...(images.length ? { images } : {}),
       ...(input.creationReason ? { creationReason: input.creationReason } : {}),
       ...(target ? { eventHash: target.eventHash } : {}) };
     if (target) {
       targets.set(id, target);
       try { targetFor(ctx, row); } catch (e) { targets.delete(id); throw e; }
     }
-    const fingerprint = hash(JSON.stringify([kind, kind === "publish" ? canonical(content) : row.eventHash]));
+    imageRecords(row);
+    const fingerprint = fingerprintFor(row);
     row.fingerprint = fingerprint;
     try {
       await transact(root => {
@@ -347,7 +426,7 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
           || Object.values(b.drafts).some(r => r.fingerprint === fingerprint) || attempted.has(`${c.logicalId}:${c.qq}:${fingerprint}`)) fail("QZONE_DUPLICATE");
         b.drafts[id] = structuredClone(row);
       });
-      guard(ctx); authorize(); freshDrafts.set(id, { ctx, source: originalSource });
+      guard(ctx); authorize(); checkImages(ctx, row); freshDrafts.set(id, { ctx, source: originalSource });
       return draftView(rowFor(currentBook(ctx), id));
     } catch (e) { targets.delete(id); throw e; }
   }
@@ -359,6 +438,8 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
   async function transition(ctx, id, revision, actor, next) {
     const c = guard(ctx); admin(ctx, actor);
     const original = rowFor(currentBook(ctx), id);
+    const confirmation = next === "approved" ? confirmationFor(original) : null;
+    if (next === "approved") checkImages(ctx, original);
     let sourceProof;
     if (next === "approved" && original.source.kind === "public_information") {
       // Re-approval after recovery may re-attest the stored HOST ref. An
@@ -374,6 +455,7 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
     await transact(root => {
       guard(ctx); admin(ctx, actor);
       const row = rowFor(book(root, c), id); cas(row, revision);
+      if (confirmation !== null && confirmationFor(row) !== confirmation) fail("QZONE_CONFIRMATION_CHANGED");
       checkSource(row);
       if (next === "review" ? row.status !== "draft" : !["review", "approved"].includes(row.status)) fail("QZONE_TRANSITION");
       row.status = next; row.revision++;
@@ -382,8 +464,12 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
     const row = rowFor(currentBook(ctx), id);
     if (row.revision !== revision + 1 || row.status !== next) fail("QZONE_REVISION");
     checkSource(row);
+    if (next === "approved") {
+      if (confirmationFor(row) !== confirmation) fail("QZONE_CONFIRMATION_CHANGED");
+      checkImages(ctx, row);
+    }
     if (sourceProof) freshDrafts.set(id, { ctx, source: sourceProof });
-    if (next === "approved") leases.set(id, { ctx, revision: row.revision, actor });
+    if (next === "approved") leases.set(id, { ctx, revision: row.revision, actor, confirmation });
     return draftView(row);
   }
   const submitReview = (ctx, id, revision, actor) => transition(ctx, id, revision, actor, "review");
@@ -404,6 +490,9 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
     }
     if (row.kind !== "publish") targetFor(ctx, row, signal);
     const lease = leases.get(row.id);
+    if (lease?.ctx === ctx && lease.confirmation !== confirmationFor(row)) {
+      leases.delete(row.id); fail("QZONE_CONFIRMATION_CHANGED");
+    }
     const reviewed = lease?.ctx === ctx && lease.actor === actor
       && lease.revision === row.revision - (claimed ? 1 : 0);
     if (reviewed) {
@@ -412,7 +501,7 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
     }
     const proof = b?.capabilities[action];
     if (c.policy.mode !== "scoped_autonomy" || !c.policy.autonomy.enabled || row.kind !== "publish"
-      || freshDrafts.get(row.id)?.ctx !== ctx || row.audience === 1 || support !== "supported" || proof?.writeSettled !== true
+      || freshDrafts.get(row.id)?.ctx !== ctx || imageRecords(row).length || row.audience === 1 || support !== "supported" || proof?.writeSettled !== true
       || row.content.length > c.policy.autonomy.maxContentLength
       || !c.policy.autonomy.sources.some(s => s.kind === row.source.kind && s.ref === row.source.ref && s.content === row.content))
       fail("QZONE_APPROVAL_REQUIRED");
@@ -421,6 +510,8 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
     exact(options, ["signal", "actor"]);
     const { signal, actor } = options, c = guard(ctx, signal), original = rowFor(currentBook(ctx), id);
     cas(original, expectedRevision); permission(ctx, original, actor, signal);
+    checkImages(ctx, original);
+    const confirmation = confirmationFor(original);
     if (!["approved", "draft"].includes(original.status)) fail("QZONE_TRANSITION");
     const key = `${c.logicalId}:${c.qq}:${original.fingerprint}`;
     if (attempted.has(key)) fail("QZONE_DUPLICATE");
@@ -429,6 +520,7 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
     await transact(root => {
       guard(ctx, signal);
       const b = book(root, c), row = rowFor(b, id); cas(row, expectedRevision);
+      if (confirmationFor(row) !== confirmation || fingerprintFor(row) !== row.fingerprint) fail("QZONE_CONFIRMATION_CHANGED");
       permission(ctx, row, actor, signal);
       if (!["approved", "draft"].includes(row.status) || Object.hasOwn(b.claims, row.fingerprint) || attempted.has(key)) fail("QZONE_DUPLICATE");
       if (Object.keys(b.claims).length >= MAX_CLAIMS || attempted.size >= MAX_CLAIMS) fail("QZONE_CAPACITY");
@@ -447,9 +539,11 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
     const checkClaim = () => {
       const live = rowFor(currentBook(ctx), id);
       if (live.claimId !== claimId || live.status !== "publishing" || live.revision !== claimed.revision) fail("QZONE_CLAIM_REVOKED");
+      if (confirmationFor(live) !== confirmation) fail("QZONE_CONFIRMATION_CHANGED");
       if (now() < claimed.claimedAt || now() - claimed.claimedAt > 60000
         || day(now()) !== day(claimed.claimedAt)) fail("QZONE_CLAIM_EXPIRED");
       permission(ctx, live, actor, signal, true);
+      checkImages(ctx, live);
     };
     const wire = bindingFor(ctx, signal, checkClaim);
     let raw, reason;
@@ -459,6 +553,8 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
       const params = claimed.kind === "publish" ? { content: claimed.content, ugc_right: claimed.audience }
         : claimed.kind === "like" ? { tid: target.tid, target_uin: Number(target.uin), abstime: target.time }
           : { tid: target.tid, content: claimed.content, target_uin: Number(target.uin) };
+      if (claimed.kind === "publish" && imageRecords(claimed).length)
+        params.images = checkImages(ctx, claimed).map(image => image.wireReference);
       raw = await request(ctx, actionFor(claimed.kind), freeze(params), { signal, binding: wire.binding });
       guard(ctx, signal); // Settlement below records facts even after revocation.
     } catch { reason = "QZONE_WIRE_OR_CONTEXT_UNCERTAIN"; }
@@ -499,6 +595,9 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
     const c = guard(ctx, options.signal), before = structuredClone(rowFor(currentBook(ctx), id));
     if (before.kind !== "publish" || !before.protocolAccepted || !before.receiptTidHash
       || !["publishing", "uncertain"].includes(before.status)) fail("QZONE_NOT_VERIFIABLE");
+    // The pinned own-list response does not attest attachment bytes/order. A
+    // text-only match must NEVER certify an image publication as client-verified.
+    if (imageRecords(before).length) return { ...draftView(before), reason: "QZONE_IMAGES_CLIENT_UNVERIFIED" };
     const rows = await read(ctx, true, options);
     guard(ctx, options.signal);
     // Official list response proves only private/self vs non-private. Never

@@ -30,6 +30,13 @@ try {
   model = http.createServer(async (req, res) => {
     let raw = ""; for await (const chunk of req) raw += chunk;
     const payload = JSON.parse(raw), prompt = payload.messages.at(-1).content;
+    if (Array.isArray(prompt)) {
+      check(prompt.some(part => part.type === "image_url" && /^data:image\/png;base64,/.test(part.image_url?.url || "")), "actual image bytes reach bound chat model without CLI");
+      modelPrompts.push("synthetic-multimodal");
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ choices: [{ message: { content: "合成识图成功" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } })); return;
+    }
     modelPrompts.push(prompt);
     check(!payload.tools && !prompt.includes("PRIVATE_FEED_SENTINEL"), "model has no native tools or private feed contents");
     const decision = prompt.includes("你为当前账号起草") ? { content: "合成秋日随笔", reason: "管理员秋日主题" }
@@ -47,6 +54,7 @@ try {
     config[key] = { ...config[key], enabled: false };
   config.memory.aiExtraction.enabled = false; config.memory.learning = { enabled: false };
   config.socialAgent = { enabled: false }; config.dailyMessages = { enabled: false, schedules: [] }; delete config.hourlyChat;
+  config.privateChats = { ...config.privateChats, enabled: true, ownerUserIds: ["93001"], targetUserIds: ["93001"] };
   config.responseQueue = { ...config.responseQueue, minDelayMs: 0 };
   config.accounts = { version: 2, failoverGroups: [], topology: "function_split", diagnostics: { enabled: false, peerPingEnabled: false },
     items: ["alpha", "beta"].map((id, index) => ({ id, qq: String(91001 + index), displayName: `Fixture ${id}`, enabled: true,
@@ -84,6 +92,7 @@ try {
       }
       if (request.action === "get_qzone_msg_list") data = { total: own.length, msglist: own };
       if (request.action === "send_group_msg") data = { message_id: 94001 };
+      if (request.action === "send_private_msg") data = { message_id: 95000 + wire.length };
       ws.send(JSON.stringify({ status: "ok", retcode: 0, echo: request.echo, data }));
     });
     await until(() => ws.readyState === 1);
@@ -175,6 +184,46 @@ try {
   const spoken = wire.filter(x => /send_(?:group|private)_msg/.test(x.action));
   check(spoken.length === 1 && spoken[0].account === 0 && spoken[0].action === "send_group_msg"
     && JSON.stringify(spoken[0].params).includes("合成拍一拍回应"), "only explicit native response enters chat; space never falls back to chat");
+  const beforeReview = (await api("/api/accounts")).data;
+  const enabledReview = await api("/api/accounts/alpha", "PATCH", { expectedRevision: beforeReview.revision,
+    patch: { qzone: { ...initial.policy, enabled: true, reviewTransport: "qq_owner" } } });
+  check(enabledReview.status === 200, "QQ owner review policy saves on one account");
+  const reviewView = (await api(pathA)).data;
+  const createdForOwner = await api(`${pathA}/create-draft`, "POST", { expectedRevision: reviewView.revision,
+    content: "公开素材的独立空间预览", source: { kind: "admin_topic", ref: "owner-qq-topic" } });
+  check(createdForOwner.status === 200, `owner draft creation/preview ${createdForOwner.data.code}`);
+  const previewWire = wire.filter(x => x.action === "send_private_msg").at(-1);
+  const previewText = previewWire?.params.message?.[0]?.data?.text;
+  const reviewToken = previewText?.match(/qzone confirm ([a-f0-9]{32})/)?.[1];
+  check(previewWire?.account === 0 && String(previewWire.params.user_id) === "93001"
+    && previewText.includes("公开素材的独立空间预览") && reviewToken, "exact body and confirmation token reach verified owner private chat");
+  const ownerDraft = createdForOwner.data.result;
+  check((await api(`${pathA}/approve`, "POST", { expectedRevision: reviewView.revision,
+    id: ownerDraft.id, draftRevision: ownerDraft.revision })).data.code === "QZONE_OWNER_QQ_CONFIRM_REQUIRED", "console cannot bypass QQ review");
+  const ownerEvent = (userId, selfId, messageId) => ({ post_type: "message", message_type: "private", sub_type: "friend",
+    self_id: selfId, user_id: userId, message_id: messageId, time: Math.floor(Date.now() / 1000),
+    raw_message: `/bot qzone confirm ${reviewToken}`, message: [{ type: "text", data: { text: `/bot qzone confirm ${reviewToken}` } }],
+    sender: { user_id: userId, nickname: "Fixture owner" } });
+  sockets[1].send(JSON.stringify(ownerEvent(93001, 91002, 96101)));
+  await pause(250);
+  check(wire.filter(x => x.action === "send_qzone_msg").length === 1, "another account cannot consume owner token");
+  sockets[0].send(JSON.stringify(ownerEvent(93001, 91001, 96102)));
+  await until(() => wire.filter(x => x.action === "send_qzone_msg").length === 2);
+  check(wire.filter(x => x.action === "send_qzone_msg").at(-1).params.content === "公开素材的独立空间预览", "owner confirmation executes exact reviewed body once");
+  sockets[0].send(JSON.stringify(ownerEvent(93001, 91001, 96103)));
+  await pause(350);
+  check(wire.filter(x => x.action === "send_qzone_msg").length === 2, "duplicate owner confirmation never republishes");
+  const beforeVision = (await api("/api/config")).data;
+  const visionSave = await api("/api/config", "PATCH", { expectedRevision: beforeVision.revision,
+    vision: { enabled: true, preferChatModel: true } });
+  check(visionSave.status === 200, "administrator pins chat image capability through config CAS");
+  const imageConfig = (await api("/api/config")).data;
+  check(imageConfig.vision.preferChatModel && imageConfig.vision.chatModelCapabilities.default.model === "synthetic-only", "saved capability readback is binding-specific not inferred by model name");
+  const center = (await api("/api/api-center")).data;
+  const messagesBeforeImageTest = wire.filter(x => /^send_/.test(x.action)).length;
+  const imageTest = await api("/api/api-center/test", "POST", { capability: "vision", center: center.center });
+  check(imageTest.status === 200 && imageTest.data.detail === "合成识图成功", `chat multimodal API path returns real fake-provider text ${imageTest.data.error || ""}`);
+  check(wire.filter(x => /^send_/.test(x.action)).length === messagesBeforeImageTest, "vision API test never sends QQ");
   check(!/ReferenceError|TypeError|EPISODE_SOURCE/.test(log), "bridge had no implementation errors");
   console.log(JSON.stringify({ ok: true, checks, fakeOneBots: 2, realQqWrites: 0, fakeModelCalls: modelPrompts.length, realModelCalls: 0, productionTouched: false }));
 } finally {

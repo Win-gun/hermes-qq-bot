@@ -1,8 +1,15 @@
 # Hermes QQ Bot 桌面应用
 
+## beta.30（自主表达与 QQ 空间私聊确认）
+
+当前源码版本为 `1.0.0-beta.30`。普通互动由 AI 选择，公开表情搜索复用原
+素材库和发送器；空间正文与配图经管理员 QQ 私聊确认后才能发表。新增
+绑定当前问答方案的直接多模态识图。配置、兼容和实际验收范围见
+[自主表达说明](SOCIAL-FREEDOM.md)。保留以下 beta.29 升级记录。
+
 ## beta.29（People Memory & Owner Authority 3.3）
 
-当前源码版本为 `1.0.0-beta.29`。增加按逻辑身份隔离的人物长期档案、可撤销
+beta.29 增加按逻辑身份隔离的人物长期档案、可撤销
 人物管理、主人通知中心、受限主人命令及真实用量/故障账本。
 新权限和通知默认关闭，更新沿用安装机器已保存的生产配置，不自动启用或扩大范围。
 验收结果和高容量账本性能、真实 GUI/QQ 等剩余门槛见
@@ -47,7 +54,7 @@ npm run app:package
 npm run app:make
 ```
 
-`app:package` 生成 `out/` 下的应用包；`app:make` 生成 `out/make/` 下的 arm64 ZIP 与 DMG。若已有应用正在从默认 `out/` 运行，先设置 `HERMES_QQ_BUILD_OUT=out/parity-dev`，避免覆盖运行中的应用。打开 DMG 后将 App 拖入“应用程序”，再从该目录启动。当前代码版本是 `1.0.0-beta.29`，包括[人物记忆与主人控制](PEOPLE-MEMORY-OWNER-AUTHORITY-3.3.md)、[自写成长卡](SELF-ROLE-CARDS.md)、[Social Life 3.1](SOCIAL-LIFE-3.1.md)、[Social Experience 2.1](SOCIAL-EXPERIENCE-2.1.md)、[可靠性审查修复](AUDIT-REMEDIATION.md)、[记忆核实及学习升级](MEMORY-VERIFICATION.md)、[按账号自主社交与人格提案](SOCIAL-AGENT.md)、[社交表达及群表情学习](SOCIAL-EXPERIENCE-2.md)、凭据管理及文本调用优化。测试版采用 ad-hoc 签名，未完成 Apple 公证或跨设备验收。首次打开可能需要在 Finder 中右键应用并选择“打开”。
+`app:package` 生成 `out/` 下的应用包；`app:make` 生成 `out/make/` 下的 arm64 ZIP 与 DMG。若已有应用正在从默认 `out/` 运行，先设置 `HERMES_QQ_BUILD_OUT=out/parity-dev`，避免覆盖运行中的应用。打开 DMG 后将 App 拖入“应用程序”，再从该目录启动。当前代码版本是 `1.0.0-beta.30`，新增[自主表达与 QQ 私聊确认](SOCIAL-FREEDOM.md)，并保留[人物记忆与主人控制](PEOPLE-MEMORY-OWNER-AUTHORITY-3.3.md)、[自写成长卡](SELF-ROLE-CARDS.md)、[Social Life 3.1](SOCIAL-LIFE-3.1.md)、[Social Experience 2.1](SOCIAL-EXPERIENCE-2.1.md)、[可靠性审查修复](AUDIT-REMEDIATION.md)、[记忆核实及学习升级](MEMORY-VERIFICATION.md)、[按账号自主社交与人格提案](SOCIAL-AGENT.md)、[社交表达及群表情学习](SOCIAL-EXPERIENCE-2.md)、凭据管理及文本调用优化。测试版采用 ad-hoc 签名，未完成 Apple 公证或跨设备验收。首次打开可能需要在 Finder 中右键应用并选择“打开”。
 
 `beta.15` 修复了其他 API 草稿误拦截密钥保存、Keychain 空值写入及新建模型方案默认关联错误连接的问题。旧版已保存的空凭据需要在本机重新录入；新写入会回读核对，成功后才显示已配置。页面 Keychain 写入支持单行可打印 ASCII，完整转义命令上限为 4000 字节，超出限制应使用环境变量配置；不会截断后写入。新增方案保持为草稿，不会自动切换功能或账号的线上模型绑定。
 
