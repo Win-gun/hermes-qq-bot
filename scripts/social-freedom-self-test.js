@@ -2,6 +2,15 @@ import assert from 'node:assert/strict';
 import { createStickerService } from '../src/sticker-service.js';
 import { validateSocialExperiencePolicy } from '../src/social-experience-policy.js';
 import { validateQzonePolicy } from '../src/qzone-policy.js';
+import { readFileSync } from 'node:fs';
+import { assertPublicIllustration } from '../src/public-illustration.js';
+
+// Test the ACTUAL API fixtures, not only mocked image payloads. Invalid CRC or
+// compressed data must not make a healthy real vision provider appear broken.
+const source = readFileSync(new URL('../src/bridge.js', import.meta.url), 'utf8');
+const samples = [...source.matchAll(/writeFileSync\(sample, Buffer\.from\("([A-Za-z0-9+/=]+)", "base64"\)\)/g)];
+assert.equal(samples.length, 2);
+for (const [, encoded] of samples) assertPublicIllustration(Buffer.from(encoded, 'base64'));
 
 const buffer = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0uoAAAAASUVORK5CYII=', 'base64');
 let root = { memory: {} }, active = true, safe = true, wire = 0;
@@ -55,4 +64,4 @@ await assert.rejects(() => service.importPublic(ctx, { ...metadata, provider: 'm
 assert.equal(validateQzonePolicy({ reviewTransport: 'qq_owner' }).reviewTransport, 'qq_owner');
 assert.throws(() => validateQzonePolicy({ reviewTransport: 'model_auto_approval' }));
 assert.equal(wire, 0);
-console.log(JSON.stringify({ ok: true, checks: 18, realQQCalls: wire, realModelCalls: 0 }));
+console.log(JSON.stringify({ ok: true, checks: 20, realQQCalls: wire, realModelCalls: 0 }));

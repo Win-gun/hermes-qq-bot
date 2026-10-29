@@ -14741,7 +14741,7 @@ async function main() {
               else if (profile.kind === "vision") {
                 temporary = fs.mkdtempSync(path.join(os.tmpdir(), "hermesqq-api-test-"));
                 const sample = path.join(temporary, "sample.png");
-                fs.writeFileSync(sample, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/+tgAAAAASUVORK5CYII=", "base64"));
+                fs.writeFileSync(sample, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAK0lEQVR4nO3OIQEAAAwEoetfeovxBoGnq1tKQEBAQEBAQEBAQEBAQEBgHXhUDfhqRFDd3gAAAABJRU5ErkJggg==", "base64"));
                 await callHermesWithImage("请描述测试图。", sample,
                   { ...candidate, vision: { ...candidate.vision, preferChatModel: false } }, { credentialOverride: override });
               } else {
@@ -14787,7 +14787,7 @@ async function main() {
             } else if (capability === "vision") {
               temporary = fs.mkdtempSync(path.join(os.tmpdir(), "hermesqq-api-test-"));
               const sample = path.join(temporary, "sample.png");
-              fs.writeFileSync(sample, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/+tgAAAAASUVORK5CYII=", "base64"));
+              fs.writeFileSync(sample, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAK0lEQVR4nO3OIQEAAAwEoetfeovxBoGnq1tKQEBAQEBAQEBAQEBAQEBgHXhUDfhqRFDd3gAAAABJRU5ErkJggg==", "base64"));
               detail = clampText(await callHermesWithImage("这张测试图是什么颜色？一句话回答。", sample, candidate), 120);
             } else if (capability === "tts" || capability === "asr") {
               temporary = fs.mkdtempSync(path.join(os.tmpdir(), "hermesqq-api-test-"));
