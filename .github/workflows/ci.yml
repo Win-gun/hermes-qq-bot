@@ -37,6 +37,7 @@ jobs:
       - run: npm run test:social-agency-32
       - run: npm run test:social-freedom
       - run: npm run test:people-owner
+      - run: npm run test:owner-first
       - run: npm run test:text-completion
       - run: npm run test:accounts
         timeout-minutes: 4
