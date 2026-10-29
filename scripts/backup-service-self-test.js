@@ -202,8 +202,14 @@ async function checkOwner33Restore(target) {
     messageId: "interaction-received", direction: "received", at: ownerAt, now: ownerAt }).duplicate, true);
   check(true, "known/unknown usage, pending model claims and confirmed interaction dedup survive restart");
   const authorityBefore = structuredClone(actual.ownerAuthority);
-  const history = ownerOperationHistory(actual);
+  // Use the same fixture clock as command creation. CI wall time may already
+  // be beyond the two-minute approval TTL; that must not change restore QA.
+  const history = ownerOperationHistory(actual, { now: ownerAt });
   assert(history.some(row => row.status === "uncertain") && history.some(row => row.status === "awaiting_confirmation"));
+  const expiredHistory = ownerOperationHistory(actual, { now: ownerAt + 120001 });
+  assert(expiredHistory.some(row => row.status === "blocked" && row.code === "OWNER_APPROVAL_EXPIRED"));
+  assert(expiredHistory.some(row => row.status === "uncertain"));
+  assert.deepEqual(actual.ownerAuthority, authorityBefore, "history projection never changes durable claims");
   const router = createOwnerCommandRouter(routerHost(() => actual, async build => build(actual), () => config.ownerControl.enabled));
   assert.equal((await router.handle({ ...ownerEnvelope, messageId: "owner-claimed" },
     "/owner send primary 23456789 fixture")).status, "blocked");
