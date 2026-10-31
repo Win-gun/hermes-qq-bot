@@ -173,4 +173,8 @@ npm run web:release:check
 - 回滚：旧 App、停止后的配置/记忆和新版前状态已在本机私有回滚目录保留，
   可恢复程序与配置；不会用旧记忆覆盖升级后新收到的聊天与更正。
 
-GitHub 推送和 CI 结果在最终发布后记录，不以本地 commit 代替远端验证。
+源码已推送到现有 GitHub `main`，核心部署提交为
+`f4486c82605510d23f2ca3384fa3c41409fcf61d`，并已回读远端分支核对。
+CI 包含新增 `test:owner-first`；其独立结果以
+[GitHub Actions](https://github.com/Win-gun/hermes-qq-bot/actions/workflows/ci.yml)
+对应提交记录为准，不以本地测试、推送成功或 App 健康替代 CI 结论。
