@@ -16020,9 +16020,16 @@ async function main() {
         if (result.matched) {
           if (oneBotBindingCurrent(ws, inboundBinding) && accountRuntimeIdentityCurrent(inboundIdentity, ws) && isPrivateOwner(senderId, liveConfig)) {
             const labels = { confirmed: "已核实", accepted: "已受理（不代表已完成）", failed: "已确认失败", uncertain: "结果不确定，不会自动重试", blocked: "已阻止", not_supported: "暂不支持" };
+            const explanation = {
+              OWNER_QUALIFIED_STICKER_UNAVAILABLE: "当前账号在目标群没有可用的合格表情，或该群未启用表情能力；没有发送消息。",
+              OWNER_TARGET_UNAVAILABLE: "目标账号当前不可用，没有执行发送。",
+              OWNER_SCOPE_REQUIRED: "这个账号或群不在当前允许范围内，没有执行操作。",
+              OWNER_STICKER_STALE: "准备期间配置、权限或素材发生变化，已停止发送；不会自动重试。"
+            }[result.code] || "";
             const body = result.code === "OWNER_CONFIRM_REQUIRED"
               ? `待确认变更：${JSON.stringify(result.change)}\n两分钟内回复 /owner confirm ${result.id}，才会执行。`
               : `${labels[result.status] || "未核实"}${result.code ? ` · ${result.code}` : ""}${result.clarify ? `\n${result.clarify}` : ""}${result.id ? `\n操作：${result.id}` : ""}${result.data ? `\n${formatOwnerQueryResult(result.action, result.data)}` : ""}`
+                + (explanation ? `\n${explanation}` : "")
                 + (result.code === "OWNER_STICKER_READBACK_VERIFIED" ? "\n已回读到目标群图片消息，尚未验证客户端显示。"
                   : result.code === "OWNER_STICKER_SUBMITTED_NOT_VERIFIED" ? "\n协议已接受，尚未核实消息回读和客户端显示；不会自动重发。" : "");
             await sendPrivateMessageToUser(ws, senderId, body, configForReplyAccount(accountById(liveConfig, accountState.id), liveConfig));

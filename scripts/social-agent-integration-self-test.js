@@ -689,6 +689,16 @@ try {
     assert.equal(receiptIds.length, annotation.sentCount, 'sentCount equals the durable receipt count');
     assert.equal(sentCountBefore + 1, annotation.sentCount, 'this send added exactly one receipt');
     assert.equal(String(wire.params.group_id), '20002', 'the wire target stays inside the allowed pair');
+    // Owner command authority does not override an account's explicit content
+    // scope. An unavailable library reports a useful Chinese reason, never ACK.
+    await expressionPolicy({ enabled:true, shadowMode:false, conversationIds:['group:20001'] });
+    const imagesBeforeUnavailable = imageTo20002().length, repliesBeforeUnavailable = privateReplies.length;
+    ownerMessage(1403, '去20002群发一个开心的表情包。');
+    await until(() => privateReplies.length === repliesBeforeUnavailable + 1, 'unavailable sticker result');
+    const unavailable = replyText(privateReplies.at(-1));
+    assert.match(unavailable, /OWNER_QUALIFIED_STICKER_UNAVAILABLE/);
+    assert.match(unavailable, /没有可用的合格表情.*没有发送消息/u);
+    assert.equal(imageTo20002().length, imagesBeforeUnavailable, 'unavailable sticker never writes or retries');
     console.log('PASS owner-first bridge: authenticated Chinese owner query answered from the durable ledger with 0 model calls; '
       + 'real owner send_sticker -> expressionStickersFor -> prepare -> image wire -> ACK -> get_msg readback -> sentCount=1; no retry');
   }
