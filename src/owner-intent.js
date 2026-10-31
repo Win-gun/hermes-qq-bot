@@ -79,10 +79,10 @@ function matchAccount(token, context) {
 const bare = v => v.replace(/群$/u, '');
 /** Unique-name / QQ resolution. Ambiguity is resolved ONLY by current bot, then recent target. */
 function matchTarget(token, context) {
-  const value = norm(token);
+  const value = norm(token).replace(/^(?:qq群|群号)/u, '');
   if (!value) return { status: 'unknown' };
   // Grammar may consume a trailing 群; a bare 群 suffix is not part of the name.
-  const rows = context.targets.filter(row => row.groupId === value
+  const rows = context.targets.filter(row => row.groupId === value || row.groupId === bare(value)
     || norm(row.name) === value || (norm(row.name) && bare(norm(row.name)) === bare(value)));
   if (rows.length === 1) return { status: 'ok', value: rows[0] };
   if (rows.length === 0) return { status: 'unknown' };
@@ -149,6 +149,11 @@ function pairFromTokens(tokens, context) {
 }
 
 const QUERY_RULES = [
+  [/^(?:你)?(?:今天|今日)(?:一共|总共)?(?:消耗|使用|用了)(?:了)?多少(?:token|令牌)$/iu, { action: 'tokens', days: 1 }],
+  [/^(?:你)?(?:今天|今日)(?:都)?(?:遇到|碰到|有)(?:了)?(?:什么|哪些)(?:主要)?(?:阻碍|问题|故障|报错)$/u, { action: 'blockers' }],
+  [/^(?:你)?(?:今天|今日)(?:都)?(?:干|做)了(?:些什么|什么|哪些事)(?:情)?$/u, { action: 'activity', days: 1 }],
+  [/^(?:刚才|刚刚)(?:我)?(?:让|叫|请)你做的(?:事情|事|操作|任务)(?:现在)?(?:怎么样了|完成了吗|完成了|做完了吗|有结果了吗)$/u, { action: 'history' }],
+  [/^(?:你)?(?:为什么|为啥)(?:没有|没|不)(?:回复|回|理)(?:刚才|刚刚)?(?:那个群|这个群|该群|本群)$/u, { action: 'why' }],
   [/^(?:今天|今日|当天)(?:的)?(?:token|令牌|用量|消耗|调用|调用量|用量情况)(?:是多少|多少|用了多少)?$/iu, { action: 'tokens', days: 1 }],
   [/^(?:今天|今日)?用了多少(?:token|令牌)$/iu, { action: 'tokens', days: 1 }],
   [/^(?:最近|近)(?:七|7)天(?:的)?(?:token|令牌|用量|消耗|调用量)(?:是多少|多少)?$/iu, { action: 'tokens', days: 7 }],
@@ -182,8 +187,9 @@ const ADDRESS_NEUTRAL = /^(?:我)?(?:也)?(?:希望|想|要|请|请你|请都|�
 /** Explicit negative framing: "我不喜欢你总是称呼我主人" — a bounded avoid-preference. */
 const ADDRESS_NEGATIVE = /(?:不喜欢|不希望|不想|不愿意|不要|不用|不必|不许|别|禁止|讨厌|受不了)/u;
 const STICKER_VERB = /^(?:群里?)?(?:发个|发一个|来一个|来个|发|发送|来)?(?:表情|贴纸|表情包)[:：,，]?\s*([\s\S]+)$/u;
+const STICKER_DESCRIPTION = /^(?:群里?)?(?:发|发送|来)(?:一个|一张|个|张)?\s*(.{1,200}?)(?:的)?(?:表情包|表情|贴纸)$/u;
 const TEXT_VERB = /^(?:群里?)?(?:发个|发一条|发|发送|说一句|说|讲|通知|喊)(?:一?句|一下|一个|个|条)?[:：,，]?\s*([\s\S]+)$/u;
-const LEAD = /^(?:给|向|在|对|让|把)/u;
+const LEAD = /^(?:给|向|在|对|让|把|去|到)/u;
 /** The remainder must still look like an owner write; otherwise this is ordinary chat. */
 const VERB_HINT = /(?:发一句|发消息|发个|发一条|发送|说一句|通知|表情|贴纸|安静|静默|闭嘴|恢复|减少|降低|少说话|称呼)/u;
 
@@ -192,6 +198,12 @@ const VERB_HINT = /(?:发一句|发消息|发个|发一条|发送|说一句|通�
  * so ordinary chat cannot be scanned without limit.
  */
 function destinationPrefix(remainder, context) {
+  const relative = /^(?:(?:刚才|刚刚)?(?:那个群|这个群)|该群|当前群|本群)(?:里|中)?/u.exec(remainder);
+  if (relative) {
+    const resolved = implicitTarget(context);
+    return resolved.ok ? { ok: true, target: resolved.target, rest: remainder.slice(relative[0].length).replace(/^\s*先/u, '').trim() }
+      : { ok: false, clarify: resolved.clarify };
+  }
   const maxName = context.targets.reduce((best, row) => Math.max(best, row.name ? norm(row.name).length : 0,
     row.groupId.length), 0);
   const limit = Math.min(remainder.length, Math.max(6, maxName) + 8);
@@ -327,9 +339,21 @@ function groupScopedReduce(body, context) {
 
 /** Bounded write phrasing that needs a resolvable, already-allowed destination. */
 export function parseOwnerWriteUtterance(text, context) {
-  const body = strip(text);
+  // Only a trailing minute duration is normalized. No group/member identity is
+  // inferred from language, and the resulting numeric intent is still bounded
+  // by the capability validator.
+  const body = strip(text).replace(/([一二两三四五六七八九十]{1,3})(?=分钟$)/u, value => {
+    const digit = ch => '零一二三四五六七八九'.indexOf(ch === '两' ? '二' : ch);
+    if (!value.includes('十')) return value.length === 1 ? String(digit(value)) : value;
+    if (!/^[一二三四五六七八九]?十[一二三四五六七八九]?$/u.test(value)) return value;
+    const [tens, ones] = value.split('十'); return String((tens ? digit(tens) : 1) * 10 + (ones ? digit(ones) : 0));
+  });
   if (!body || body.length > OWNER_INTENT_LIMITS.text) return null;
   const done = value => ({ intent: value });
+
+  if (/^(?:以后|今后|之后)?(?:只|就|只要)?(?:在)?(?:每天)?(?:早晚|早上和晚上|早上、晚上)(?:各)?(?:给我)?(?:汇报|报备|报告|发日报|发摘要)(?:一[次份])?(?:就好|即可|就行)?$/u.test(body)
+    || /^(?:以后|今后|之后)?(?:别|不要)(?:再)?频繁(?:地)?给我(?:发消息|汇报|报备|报告)$/u.test(body))
+    return done({ action: 'notifications', enabled: true, times: ['09:00', '21:00'], timezone: 'Asia/Shanghai' });
 
   // Explicit "verb <account> <group> <payload>" form.
   let m = /^(?:发送|发消息|发到|发送到|发)\s+(\S+)\s+(\S+)\s+([\s\S]+)$/u.exec(body);
@@ -418,7 +442,7 @@ export function parseOwnerWriteUtterance(text, context) {
 
   // Destination-first forms: <lead><destination><verb><payload>.
   if (!LEAD.test(body)) return null;
-  const remainder = body.replace(/^(?:给|向|在|对|让|把)/u, '');
+  const remainder = body.replace(/^(?:给|向|在|对|让|把|去|到)/u, '');
   const found = destinationThen(remainder, context);
   if (!found.ok) {
     // A write verb without a resolvable, already-allowed destination must ask.
@@ -429,7 +453,9 @@ export function parseOwnerWriteUtterance(text, context) {
   const base = { accountId: found.target.accountId, groupId: found.target.groupId };
   if (RESUME_VERB.test(rest)) return done({ action: 'resume', ...base });
   if (REDUCE_VERB.test(rest)) return done({ action: 'reduce_participation', ...base });
-  const sticker = STICKER_VERB.exec(rest);
+  if (/^(?:斗个图|斗图|发(?:一个|一张|个|张)?(?:表情包|表情|贴纸))$/u.test(rest))
+    return done({ action: 'send_sticker', ...base, query: '斗图' });
+  const sticker = STICKER_DESCRIPTION.exec(rest) || STICKER_VERB.exec(rest);
   if (sticker && sticker[1].trim()) return done({ action: 'send_sticker', ...base, query: sticker[1].trim() });
   const quiet = QUIET_VERB.exec(rest);
   if (quiet) return done({ action: 'quiet', ...base, minutes: quiet[1] === undefined ? 30 : Number(quiet[1]) });

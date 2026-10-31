@@ -94,11 +94,51 @@ function emit(accountId, text, { userId = OWNER, groupId, messageId = String(++s
     message: [...(mention ? [{ type: "at", data: { qq: String(self) } }] : []), { type: "text", data: { text } }], raw_message: text };
   inbound.push({ accountId, messageId: String(messageId), text }); sockets[i].send(JSON.stringify(event)); return String(messageId);
 }
+// The owner receipt text ends with "\n操作：<durable command id>". Only the reply
+// naming the id of the durable `ownerAuthority.commands` row claimed for THIS
+// message proves which command it answers. "First private reply after the emit"
+// was wrong: a duplicate command's receipt can land after a later emit and be
+// mistaken for the next command's answer (observed as ACK_MISSING accepted /
+// ACK_TIMEOUT blocked while the wire count was still asserted as 0).
+function ackCommandId(row) { const match = /\n操作：([^\n]+)/.exec(messageText(row)); return match ? match[1] : null; }
+const consumedAcks = new Set();
+let lastReadError = null;
 async function command(text, options = {}) {
-  const offset = wire.length, messageId = emit(options.accountId || "alpha", text, options);
-  await until(() => wire.slice(offset).some(row => row.action === "send_private_msg" && String(row.params.user_id) === OWNER), `private acknowledgment: ${text}`);
-  const ack = wire.slice(offset).find(row => row.action === "send_private_msg" && String(row.params.user_id) === OWNER);
-  await pause(60); return { messageId, ack, text: messageText(ack), rows: wire.slice(offset) };
+  lastReadError = null;
+  const offset = wire.length, messageId = emit(options.accountId || "alpha", text, options), deadline = Date.now() + 12000;
+  const unread = () => wire.slice(offset).filter(row => row.action === "send_private_msg"
+    && String(row.params.user_id) === OWNER && !consumedAcks.has(row));
+  let ack = null;
+  while (!ack) {
+    if (!alive()) throw new Error(`BRIDGE_EXITED: private acknowledgment: ${text}; ${childLog.slice(-1200)}`);
+    const rows = unread();
+    let claimed = null;
+    try { claimed = await operationFor(messageId); }
+    catch (e) { claimed = null; lastReadError = e.code || e.message; } // busy read: retry, never assume
+    if (claimed && claimed.status !== "awaiting_confirmation") {
+      // A durable claim exists: only the receipt that names its own id is consumed.
+      ack = rows.find(row => ackCommandId(row) === claimed.id) || null;
+    } else if (claimed) {
+      // The confirmation-required receipt omits 操作： and quotes the id in prose.
+      ack = rows.find(row => messageText(row).startsWith("待确认变更：")
+        && messageText(row).includes(`/owner confirm ${claimed.id}`)) || null;
+    } else {
+      // Queries and pre-claim refusals are never claimed, so their receipts carry
+      // no id and cannot be identified by identity. Accept only a lone id-less
+      // reply that has been quiet for 150ms. Id-bearing receipts are excluded, so
+      // a late command receipt can never satisfy a query.
+      const idless = rows.filter(row => ackCommandId(row) === null);
+      if (idless.length === 1 && Date.now() - idless[0].at > 150) ack = idless[0];
+    }
+    if (!ack) {
+      if (Date.now() > deadline) throw new Error(`TIMEOUT: private acknowledgment: ${text}; claimed=${claimed?.id || "none"}`
+        + `; readError=${lastReadError || "none"}`
+        + `; unread=${JSON.stringify(unread().map(row => ({ id: ackCommandId(row), text: messageText(row).slice(0, 60) })))}`);
+      await pause(35);
+    }
+  }
+  consumedAcks.add(ack); await pause(60);
+  return { messageId, ack, text: messageText(ack), rows: wire.slice(offset) };
 }
 async function groupMemoryCommand(suffix = PERSON) {
   const offset = wire.length;
@@ -294,6 +334,12 @@ try {
   for (const key of ["vision", "voice", "webSearch", "proactive", "socialPlanner", "implicitReply", "discussionParticipation", "automation",
     "dailyMessages", "hourlyChat", "adminNotifications", "loginRecovery", "taskMode", "learningMode", "delayedUnderstanding"]) config[key] = { enabled: false };
   config.ownerControl = { enabled: true, naturalLanguage: false, usageEnabled: true, allowedTargets: [{ accountId: "alpha", groupId: "31001" }] };
+  // This fixture's old assertions assume the shipped pre-3.4 behaviour, so it
+  // declares the 3.4 upgrade as already applied and saves an explicit owner
+  // opt-out for the notification center. That is a real persisted restriction,
+  // not a disabled assertion: the center stays off because the owner said so,
+  // and every other 3.4 surface still has to satisfy the unchanged checks.
+  config.ownerFirst = { version: 1, optOuts: { ownerNotifications: true } };
   config.ownerNotifications = { enabled: false };
   config.privateChats = { enabled: true, targetUsers: ["*"], ownerUserIds: [OWNER] };
   config.memory = { ...config.memory, people: { enabled: true }, verification: { enabled: false },

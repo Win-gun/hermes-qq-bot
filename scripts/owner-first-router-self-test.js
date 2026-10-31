@@ -119,6 +119,11 @@ function makeService(options = {}) {
   fs.writeFileSync(memoryFile, JSON.stringify(seed));
 }
 const queryCases = [
+  ['今天消耗了多少 Token？', 'tokens', {days:1}],
+  ['你今天遇到了什么阻碍？', 'blockers', {}],
+  ['今天都干了什么？', 'activity', {days:1}],
+  ['刚才我让你做的事情完成了吗？', 'history', {}],
+  ['你为什么没有回复那个群？', 'why', {}],
   ['今日Token', 'tokens', { days: 1 }], ['今天的token是多少', 'tokens', { days: 1 }],
   ['最近七天Token', 'tokens', { days: 7 }], ['今日主要阻碍', 'blockers', {}],
   ['今天的阻碍有哪些', 'blockers', {}], ['今天活跃', 'activity', { days: 1 }],
@@ -209,6 +214,19 @@ for (const [text, action, expected] of queryCases) {
     'a stale/non-context object is not a resolution context');
 
   // Write grammar coverage.
+  deep(resolve('去31001群发一个开心的表情包。')?.intent,
+    { action:'send_sticker', accountId:'alpha', groupId:'31001', query:'开心' }, 'natural adjective before sticker noun');
+  deep(resolve('给开发群发张惊讶的表情')?.intent,
+    { action:'send_sticker', accountId:'alpha', groupId:'31001', query:'惊讶' }, 'natural sticker by group name');
+  deep(resolve('去开发群斗个图')?.intent,
+    { action:'send_sticker', accountId:'alpha', groupId:'31001', query:'斗图' }, 'generic sticker request stays in qualified library');
+  deep(resolve('以后早晚各给我汇报一次就好')?.intent,
+    { action:'notifications', enabled:true, times:['09:00','21:00'], timezone:'Asia/Shanghai' }, 'normal Chinese notification preference');
+  deep(resolve('以后不要频繁给我发消息')?.intent,
+    { action:'notifications', enabled:true, times:['09:00','21:00'], timezone:'Asia/Shanghai' }, 'low-noise preference changes actual settings');
+  deep(resolveOwnerUtterance('把那个群先静默十分钟', {accounts:context.accounts,
+    targets:context.targets, recentTarget:{accountId:'alpha',groupId:'31001'}})?.intent,
+    {action:'quiet',accountId:'alpha',groupId:'31001',minutes:10}, 'relative target uses verified recent pair only');
   deep(resolve('发个表情 alpha 31001 开心')?.intent,
     { action: 'send_sticker', accountId: 'alpha', groupId: '31001', query: '开心' }, 'sticker intent bounded');
   deep(resolve('给开发群发个表情 开心')?.intent,

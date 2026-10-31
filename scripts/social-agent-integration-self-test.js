@@ -9,11 +9,14 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
 import { ingestSocialMessage } from '../src/social-agent-state.js';
+import { readMemorySnapshot } from '../src/memory-repository.js';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'social-bridge-test-'));
 const clockOffset = Date.parse('2026-10-23T04:00:00Z') - Date.now();
 const fixtureNow = () => Date.now() + clockOffset;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+// Owner First 3.4 owner branch is opt-in so the default suite stays unchanged.
+const OWNER_FIRST_FIXTURE = process.env.OWNER_FIRST_FIXTURE === '1';
 async function port() { const server = net.createServer(); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); const p = server.address().port; await new Promise(resolve => server.close(resolve)); return p; }
 const control = await port(), onebot = await port();
 const base = `http://127.0.0.1:${control}`;
@@ -35,6 +38,15 @@ config.vision = { enabled: true, provider: 'custom', model: 'synthetic-vision' }
 config.taskMode = { enabled: false }; config.learningMode = { enabled: false };
 config.adminNotifications = { enabled: false }; config.targetGroups = ['20001','20002']; config.apiCenter = undefined;
 config.privateChats = { enabled: true, targetUsers: ['30001'], ownerUserIds: ['30001'] };
+if (OWNER_FIRST_FIXTURE) {
+  // Owner First 3.4 owner branch only. `ownerFirst.version = 1` is what the real
+  // startup migration reads to know this config is already migrated, so the
+  // branch exercises the seeded policy instead of a rewrite of it.
+  config.ownerFirst = { version: 1, optOuts: { ownerNotifications: true } };
+  config.ownerControl = { enabled: true, naturalLanguage: true, usageEnabled: true, lowRiskDirect: true,
+    targetMode: 'explicit', allowedTargets: [{ accountId: 'primary', groupId: '20002' }] };
+  config.ownerNotifications = { ...config.ownerNotifications, enabled: false, recipients: ['30001'] };
+}
 config.commands = { ...config.commands, enabled: true, ownerUserIds: ['30001'], adminUserIds: ['30001'] };
 config.responseQueue = { ...config.responseQueue, minDelayMs: 2500 };
 const fake = path.join(home, 'fake-hermes.cjs');
@@ -131,7 +143,13 @@ const req=new EventEmitter();req.destroy=()=>req.emit('close');req.end=()=>setIm
 `);
 let child, socket, peerSocket, tail = '', token;
 const calls = () => fs.existsSync(path.join(home,'calls')) ? fs.readFileSync(path.join(home,'calls'),'utf8').trim().split('\n').length : 0;
-const sends = [], reactions = [], onebotRequests = [];
+const sends = [], reactions = [], onebotRequests = [], privateReplies = [];
+const memoryFile = path.join(home, 'data', 'memory.json');
+const memorySnapshot = () => readMemorySnapshot(memoryFile);
+const replyText = row => typeof row.params?.message === 'string' ? row.params.message : JSON.stringify(row.params?.message || '');
+// Owner branch only: message_id -> exact segments, so get_msg can answer with the
+// same bytes the real send used (a real readback, not a fabricated success).
+const ownerSent = new Map();
 async function request(url, { method = 'GET', body, auth = true, origin = base } = {}) {
   const response = await fetch(base + url, { method, headers: { ...(auth && token ? { 'x-hermes-qq-admin': token } : {}),
     ...(method !== 'GET' ? { origin, 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
@@ -149,14 +167,27 @@ async function start() {
   socket.on('message', raw => { const item = JSON.parse(raw); if (!item.action) return;
     onebotRequests.push(item);
     if (item.action.startsWith('send_')) sends.push(item);
+    if (item.action==='send_private_msg' && String(item.params?.user_id)==='30001') privateReplies.push(item);
     if (item.action==='set_group_reaction') reactions.push(item);
+    if (OWNER_FIRST_FIXTURE && item.action==='get_msg') {
+      const sent = ownerSent.get(String(item.params?.message_id));
+      socket.send(JSON.stringify({ status:'ok', retcode:0, echo:item.echo, data: sent ? { message_id:Number(item.params.message_id),
+        group_id: sent.groupId, sender: { user_id: 10001, nickname: 'Test' }, message: sent.segments, raw_message: '' } : null }));
+      return;
+    }
     const data = item.action === 'get_login_info' ? { user_id: 10001, nickname: 'Test' }
+      : item.action === 'get_group_list' ? [{ group_id: 20001 }, { group_id: 20002 }]
       : item.action === 'get_group_member_list' ? [{ user_id: 10001 }, { user_id: 30001 }]
         : item.action === 'get_friend_list' ? [{user_id:30001}]
         : item.action === 'fetch_custom_face_detail' ? [{emoji_id:'fixture-sticker',url:'https://cdn.synthetic-stickers.net/image.png',desc:'synthetic collection'}]
         : item.action === 'get_forward_msg' ? { messages: [{ time: Math.floor(fixtureNow()/1000),
           content: [{ type: 'text', data: { text: 'synthetic forwarded text only' } }] }] }
         : item.action.startsWith('send_') ? { message_id: 90000+sends.length } : { online: true, good: true };
+    if (OWNER_FIRST_FIXTURE && item.action==='send_group_msg' && data.message_id) {
+      const segments = Array.isArray(item.params?.message) ? item.params.message : [];
+      if (segments.some(segment => segment?.type==='image')) ownerSent.set(String(data.message_id),
+        { groupId: item.params.group_id, segments: structuredClone(segments) });
+    }
     socket.send(JSON.stringify({ status: 'ok', retcode: 0, echo: item.echo, data }));
   });
   await new Promise(resolve => socket.once('open', resolve));
@@ -583,6 +614,84 @@ try {
   assert.equal(calls(),beforeForgedCalls+1,'invalid forward tool is not retried');
   assert.equal(forwards21().length,beforeForgedReads,'model-forged ID opens no OneBot read');
   assert.equal(writes21().length,beforeForgedWrites,'invalid forward tool has no external write');
+  if (OWNER_FIRST_FIXTURE) {
+    // ---- Owner First 3.4 owner branch: a real authenticated owner private DM ----
+    // Same real bridge, same real router/executor/library; only the policy and the
+    // seeded qualified sticker differ. Nothing here is a mocked callback.
+    // Reuse the EXISTING fixture sticker: this suite already synchronised it from
+    // the fake collection route and confirmed it through the real review API
+    // (note 开心讨论 / tags [开心], actor local-admin). Only the reuse cooldown is
+    // relaxed so its earlier real receipt does not mask this owner send.
+    await expressionPolicy({ enabled: true, shadowMode: false, conversationIds: ['group:20002'],
+      stickers: { enabled: true, autoSend: true, cooldownMs: 0 } });
+    const stickerCounts = () => {
+      const bots = memorySnapshot()?.socialExpressionAssets?.bots || {};
+      const out = {};
+      for (const bot of Object.values(bots)) for (const [id, asset] of Object.entries(bot.stickers || {}))
+        out[id] = asset.annotations?.['group:20002']?.sentCount ?? 0;
+      return out;
+    };
+    const ownerMessage = (id, text) => socket.send(JSON.stringify({ post_type: 'message', message_type: 'private',
+      self_id: 10001, user_id: 30001, message_id: id, time: Math.floor(fixtureNow() / 1000), message: text,
+      raw_message: text, sender: { nickname: 'Owner' } }));
+    const imageTo20002 = () => sends.filter(item => item.action === 'send_group_msg'
+      && Number(item.params?.group_id) === 20002 && Array.isArray(item.params.message)
+      && item.params.message.some(segment => segment?.type === 'image'));
+
+    // (a) Deterministic Chinese query: the host ledger answers, never a model.
+    const callsBeforeQuery = calls(), groupBeforeQuery = sends.filter(item => item.action === 'send_group_msg').length,
+      repliesBeforeQuery = privateReplies.length;
+    ownerMessage(1401, '今天消耗了多少 Token？');
+    await until(() => privateReplies.length === repliesBeforeQuery + 1, 'owner query private acknowledgment');
+    const queryReply = replyText(privateReplies.at(-1));
+    assert.match(queryReply, /^已核实/, `owner query is acknowledged as verified: ${queryReply}`);
+    assert.match(queryReply, /查询口径：/u, 'the answer body is the deterministic host ledger report');
+    assert.match(queryReply, /已记录调用尝试/u);
+    assert.equal(calls(), callsBeforeQuery, 'an authenticated owner query spends zero model calls');
+    assert.equal(sends.filter(item => item.action === 'send_group_msg').length, groupBeforeQuery,
+      'an owner query never writes to a group');
+    const ledgerView = await request('/api/owner/query?kind=tokens&days=1');
+    assert.equal(ledgerView.status, 200, JSON.stringify(ledgerView.body));
+    assert.equal(ledgerView.body.ok, true, 'the same durable ledger backs the HTTP readback');
+
+    // (b) One real qualified sticker send: expressionStickersFor -> prepare ->
+    //     OneBot image wire -> durable ACK -> get_msg readback, no retry.
+    const beforeCounts = stickerCounts(), imagesBefore = imageTo20002().length, readbacksBefore = onebotRequests.filter(i => i.action === 'get_msg').length;
+    const annotation0sentCount = memorySnapshot().socialExpressionAssets.bots['account:primary']
+      .stickers['fixture-sticker'].annotations['group:20002'].sentCount;
+    const callsBeforeSticker = calls(), repliesBeforeSticker = privateReplies.length;
+    ownerMessage(1402, '去20002群发一个开心的表情包。');
+    await until(() => privateReplies.length === repliesBeforeSticker + 1, 'owner sticker private acknowledgment', 15000);
+    const stickerReply = replyText(privateReplies.at(-1));
+    assert.match(stickerReply, /^已核实/, `qualified sticker send is readback-verified: ${stickerReply}`);
+    assert.match(stickerReply, /OWNER_STICKER_READBACK_VERIFIED/);
+    assert.match(stickerReply, /已回读到目标群图片消息/u);
+    assert.match(stickerReply, /\n操作：[^\n]+/u, 'the receipt carries the durable command id');
+    assert.equal(calls(), callsBeforeSticker, 'a deterministic owner sticker intent spends zero model calls');
+    const images = imageTo20002();
+    assert.equal(images.length, imagesBefore + 1, 'exactly one real image segment reached the fake OneBot');
+    const wire = images.at(-1);
+    assert.equal(wire.params.message.length, 1, 'the sticker wire carries only the prepared image');
+    assert.equal(wire.params.message[0].type, 'image');
+    assert(wire.params.message[0].data.file.startsWith('base64://'), 'prepare() produced pinned image bytes');
+    const readbacks = onebotRequests.filter(i => i.action === 'get_msg');
+    assert.equal(readbacks.length, readbacksBefore + 1, 'exactly one get_msg readback, never retried');
+    const afterCounts = stickerCounts();
+    const sentCountBefore = annotation0sentCount;
+    const received = Object.keys(afterCounts).filter(id => afterCounts[id] !== (beforeCounts[id] ?? 0));
+    assert.equal(received.length, 1, 'exactly one qualified sticker gained a durable receipt');
+    assert.equal(afterCounts[received[0]], (beforeCounts[received[0]] ?? 0) + 1);
+    const annotation = memorySnapshot().socialExpressionAssets.bots['account:primary']
+      .stickers[received[0]].annotations['group:20002'];
+    const receiptIds = Object.keys(annotation.receipts || {});
+    const newId = String(readbacks.at(-1).params.message_id);
+    assert.ok(annotation.receipts[newId], 'the ACKed message id is the durable receipt key');
+    assert.equal(receiptIds.length, annotation.sentCount, 'sentCount equals the durable receipt count');
+    assert.equal(sentCountBefore + 1, annotation.sentCount, 'this send added exactly one receipt');
+    assert.equal(String(wire.params.group_id), '20002', 'the wire target stays inside the allowed pair');
+    console.log('PASS owner-first bridge: authenticated Chinese owner query answered from the durable ledger with 0 model calls; '
+      + 'real owner send_sticker -> expressionStickersFor -> prepare -> image wire -> ACK -> get_msg readback -> sentCount=1; no retry');
+  }
   console.log('PASS Social Experience 2.1 bridge: default-off; actual snapshot-seq interest observe/GET/cancel/auth403/stale409; host mention -> at 30001/group 20002; unknown poke -> no offer/write; original forward -> quoted recentContext; forged model forward -> no read/write/retry');
   console.log('PASS group expression bridge: direct group media -> bounded background learning -> cached auto eligibility -> shared image ACK; host-bound reaction -> acceptance only; no external calls or real QQ');
   console.log('PASS expression library bridge: auth/scope/CAS/intake/review/budget/fake-Vision/host-plan/image-wire/ACK; no external network or QQ');
