@@ -30,7 +30,7 @@ try {
     connection: { id: "conn-b", provider: "xiaomi", baseUrl: "https://separate.invalid/v1" } };
   const capability = { source: "provider-metadata", accountId: "account-a", profileId: "chat-a", connectionId: "conn-a",
     provider: "custom", model: "opaque-model", baseUrl: chat.connection.baseUrl, supportsImages: true, transport: "chat-completions" };
-  const base = { accountId: "account-a", chat, vision, capability, imagePath, prompt: "请判断图片内容", apiKey: "synthetic-key-only",
+  const base = { accountId: "account-a", chat, vision, capability, imagePath, prompt: "请判断图片内容", apiKey: "fake-key-only-for-tests",
     isCurrent: () => true, fetchImpl: () => { throw Error("MISSING_MOCK"); } };
   const invoke = changes => runVisionImage({ ...base, ...changes });
   const unknownUsage = { inputTokens: null, outputTokens: null, totalTokens: null, cachedInputTokens: null, reasoningTokens: null };
@@ -38,7 +38,7 @@ try {
   const rejectsCode = (promise, code) => assert.rejects(promise, error => {
     assert.equal(error.code, code);
     assert.equal(error.message, code);
-    assert.doesNotMatch(JSON.stringify(error), /synthetic-key-only|DO_NOT_RETURN_SECRET|extensionless-image/);
+    assert.doesNotMatch(JSON.stringify(error), /fake-key-only-for-tests|DO_NOT_RETURN_SECRET|extensionless-image/);
     return true;
   });
   const route = changes => selectVisionRoute({ ...base, ...changes });
@@ -67,7 +67,7 @@ try {
     calls++;
     assert.equal(url, "https://synthetic.invalid/v1/chat/completions");
     assert.equal(options.redirect, "manual");
-    assert.equal(options.headers.authorization, "Bearer synthetic-key-only");
+    assert.equal(options.headers.authorization, "Bearer fake-key-only-for-tests");
     const payload = JSON.parse(options.body), parts = payload.messages[0].content;
     assert.equal(payload.model, chat.profile.model);
     assert.deepEqual(parts[0], { type: "text", text: base.prompt });
@@ -212,7 +212,7 @@ try {
   const metadata = await metadataRun(usageResponse({ ...openaiUsage, secret: "DO_NOT_RETURN_SECRET" }, {
     provider: "DO_NOT_RETURN_SECRET", id: "DO_NOT_RETURN_SECRET", error: { message: "DO_NOT_RETURN_SECRET" }
   }));
-  assert.doesNotMatch(JSON.stringify(metadata), /DO_NOT_RETURN_SECRET|synthetic-key-only/);
+  assert.doesNotMatch(JSON.stringify(metadata), /DO_NOT_RETURN_SECRET|fake-key-only-for-tests/);
   assert.deepEqual(Object.keys(metadata).sort(), ["model", "provider", "reason", "route", "text", "usage"]);
   for (const [status, data, code] of [
     [429, usageResponse(openaiUsage, { error: { message: "DO_NOT_RETURN_SECRET" } }), "VISION_REQUEST_FAILED"],
@@ -225,7 +225,7 @@ try {
       assert.equal(error.code, code);
       assert.deepEqual(error.metadata, { usage: status === 500 ? { ...unknownUsage, inputTokens: 7 } : knownUsage,
         model: "reported/model-v2", provider: "openai-compatible", httpStatus: status });
-      assert.doesNotMatch(JSON.stringify(error), /DO_NOT_RETURN_SECRET|synthetic-key-only/);
+      assert.doesNotMatch(JSON.stringify(error), /DO_NOT_RETURN_SECRET|fake-key-only-for-tests/);
       return true;
     });
   }
