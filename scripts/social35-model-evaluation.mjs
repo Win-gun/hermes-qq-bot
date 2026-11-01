@@ -29,6 +29,10 @@ const common = { mode: 'social', identity: { accountId: 'fictional', logicalBotI
   runtimeContext: { now: '2026-11-01T12:00:00+08:00' } };
 const upstreamIdeas = '独立编写的行为参考对照：像群友一样选择是否参与，不逐条回答；留意未完话题，允许等待与潜水。人格与工具协议分开，动作以实际回执为准，不虚构生活；不移植参考项目角色。';
 async function run() {
+  const selectedScenes = process.argv.filter(arg => arg.startsWith('--scene=')).map(arg => arg.slice(8));
+  const selectedVariants = process.argv.filter(arg => arg.startsWith('--variant=')).map(arg => arg.slice(10));
+  for (const id of selectedScenes) if (!scenes.some(([scene]) => scene === id)) throw Error('UNKNOWN_SCENE');
+  for (const id of selectedVariants) if (!['baseline', 'independent-reference', 'candidate'].includes(id)) throw Error('UNKNOWN_VARIANT');
   const baseline = '89d2060bccdb241a55849bb1e84e7a4725ee50a5';
   const out = path.resolve(process.env.HERMES_SOCIAL35_EVAL_OUT || 'outputs/social35-model-evaluation');
   fs.mkdirSync(out, { recursive: true, mode: 0o700 });
@@ -59,6 +63,7 @@ async function run() {
   const rows = [], previousAttempts = previous?.actualCalls || 0;
   let attempts = 0;
   for (const [sceneId, scene] of scenes) for (const [variant, system] of variants) {
+    if ((selectedScenes.length && !selectedScenes.includes(sceneId)) || (selectedVariants.length && !selectedVariants.includes(variant))) continue;
     const existing = previous?.rows.find(row => row.sceneId === sceneId && row.variant === variant);
     if (existing && !existing.error) { rows.push(existing); continue; }
     const prompt = `${system}\n虚构回放，不调用工具、不实际发送。根据场景给出一个简短JSON {decision:reply|observe|wait|tool,content:可选对外内容,tool:可选下一步,reason:一句可公开依据}，不展示思维链。\n${scene}`;
@@ -81,7 +86,7 @@ async function run() {
   fs.writeFileSync(path.join(out, 'results.json'), JSON.stringify({ baseline, actualCalls: previousAttempts + attempts,
     priorUnknownOrFailedCalls: (previous?.priorUnknownOrFailedCalls || 0) + (previous?.rows.filter(row => row.error).length || 0),
     fictionalData: true, humanScore: null, qqWrites: 0, rows }, null, 2), { mode: 0o600 });
-  console.log(JSON.stringify({ ok: !rows.some(r => r.error), scenarios: scenes.length, variants: variants.length,
+  console.log(JSON.stringify({ ok: !rows.some(r => r.error), scenarios: new Set(rows.map(r => r.sceneId)).size, variants: new Set(rows.map(r => r.variant)).size,
     actualCalls: previousAttempts + attempts, humanScore: null, output: path.join(out, 'results.json') }));
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) await run();

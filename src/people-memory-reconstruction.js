@@ -508,6 +508,7 @@ export function peopleReconstructionStatus(root) {
     candidates: job.candidateCount, stats: copy(job.stats), budget: copy(job.budget),
     usageComplete: job.stats.unknownCalls === 0, scanOnly: job.scanOnly === true,
     acknowledgedUnknownCalls: job.acknowledgedUnknownCalls || 0,
+    lastFailureCode: job.lastFailureCode ?? null,
     pauseReason: job.pauseReason ?? null, unknownBatches: job.unknownBatches?.length ?? 0 } : null;
 }
 
@@ -707,7 +708,13 @@ export function createPeopleReconstructionRunner({ getState, transact, readPage,
         // Trusted host callback errors may retain normalized provider usage
         // (e.g. output length rejection). Text/model prose is never a ledger.
         settleUsage(job, output?.usage || error?.metadata?.usage, output !== undefined, latestAttempt);
+        // Only host enum codes are diagnostics. Never persist a provider error
+        // message, model output, candidate text or arbitrary error.code.
+        job.lastFailureCode = error instanceof ReconstructionError ? error.code
+          : ["RECONSTRUCTION_MODEL_OUTPUT_REJECTED", "MODEL_CONTEXT_CHANGED", "RECONSTRUCTION_STALE"].includes(error?.code)
+            ? error.code : "MODEL_OR_HOST_FAILED";
         job.claim.status = "unknown";
+        job.claim.failureCode = job.lastFailureCode;
         if (job.status === "running") { job.status = "paused"; job.pauseReason = "model_unknown"; }
         job.revision++; bump(job.stats, "BATCH_OUTCOME_UNKNOWN", rows.length);
         return { status: job.status, code: "BATCH_OUTCOME_UNKNOWN", claimId };

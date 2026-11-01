@@ -306,6 +306,8 @@ try {
   equal(lengthR.status().stats.unknownCalls, 0, 'normalized provider usage on rejected output is not lost');
   equal(lengthR.status().stats.usage.totalTokens, 25, 'failed semantics retain actual billed token facts');
   equal(lengthR.status().claim.status, 'unknown', 'known cost does not fabricate semantic completion');
+  equal(lengthR.status().lastFailureCode, 'MODEL_OR_HOST_FAILED', 'arbitrary provider message never becomes status');
+  check(!JSON.stringify(lengthR.status()).includes('provider rejected'), 'status contains no raw provider error');
   const recoveryH = harness(), seenPages = [];
   const recoveryR = runnerFor(recoveryH, { readPage: pagedRows, model: async args => {
     seenPages.push(args.candidates[0].key);
@@ -380,6 +382,7 @@ try {
   const badH = harness();
   const badR = runnerFor(badH, { model: async () => ({ groups: [{ ids: ["invented"], summary: "bad" }], usage }) });
   await start(badR); const badResult = await badR.step();
+  equal(badR.status().lastFailureCode, 'MODEL_UNPINNED_ID', 'semantic validation has an exact safe enum diagnosis');
   equal([badResult.code, badR.status().candidates, badR.status().claim.status], ["BATCH_OUTCOME_UNKNOWN", 0, "unknown"], "invalid model patch never commits/ACKs");
   equal(badR.status().stats.usage.totalTokens, 25, "bad model response still records actual usage");
   const conflictH = harness();

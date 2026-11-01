@@ -73,6 +73,14 @@ test("mode changes cannot retain task tools or social observations", () => {
   const direct = make({ workContext: { brokerTools: [{ name: "read_document" }], objective: "任务私有目标" } });
   assert.ok(!direct.text.includes("read_document")); assert.ok(!direct.text.includes("任务私有目标"));
 });
+test("all conversational modes distinguish discovery metadata from actually read evidence", () => {
+  for (const mode of ["direct", "social", "search"]) {
+    const r = make({ mode });
+    assert.match(r.text, /不等于读过正文/);
+    assert.match(r.text, /不补造具体改动/);
+    assert.match(r.text, /没有读取能力就明确尚未读到详情/);
+  }
+});
 test("unknown or absent modes fail closed", () => {
   for (const mode of [undefined, null, "", "reserved2", "closed-agent", "DIRECT", {}, "__proto__"])
     rejects(() => make({ mode }), "AGENT_PROMPT_INVALID_MODE");
