@@ -39,7 +39,7 @@ function base() {
       maxArtifactBytes: 1048576 },
     ownerNotifications: { enabled: true, recipients: ['21001'], times: ['09:00', '21:00'], timezone: 'Asia/Shanghai' },
     apiCenter: { selected: 'bound', connections: [{ id: 'fixture', secretRef: 'fixture-keychain-reference' }] },
-    ai: { model: 'fixture-legacy-chat', reasoningEffort: 'low', apiKey: 'SYNTHETIC_SECRET_SENTINEL' },
+    ai: { model: 'fixture-legacy-chat', reasoningEffort: 'low', apiKey: 'fake-SYNTHETIC_SECRET_SENTINEL' },
     persona: { name: '已有角色' }, prompt: { system: '原有系统提示' }, voice: { enabled: false },
     memory: { people: { enabled: true }, maxUserFacts: 12 }, budgets: { tokens: 5000 } };
 }

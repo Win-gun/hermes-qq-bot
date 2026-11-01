@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { resolveModelCredential } from '../src/model-credentials.js';
 const ai = { provider:'xiaomi', baseUrl:'https://api.xiaomimimo.com/v1', args:['-p','sample'], apiKeyEnv:'XIAOMI_API_KEY' };
 const fixture = { env:{HERMES_HOME:'/fixture'}, stat:()=>({isFile:()=>true,size:100,mode:0o100600,uid:process.getuid()}),
-  read:()=>JSON.stringify({credential_pool:{xiaomi:[{auth_type:'api_key',access_token:'fixture-only-value',base_url:ai.baseUrl}]}}) };
-assert.equal(resolveModelCredential(ai,fixture),'fixture-only-value');
+  read:()=>JSON.stringify({credential_pool:{xiaomi:[{auth_type:'api_key',access_token:'fake-fixture-only-value',base_url:ai.baseUrl}]}}) };
+assert.equal(resolveModelCredential(ai,fixture),'fake-fixture-only-value');
 assert.equal(resolveModelCredential({...ai,args:[]},fixture),null);
 assert.equal(resolveModelCredential({...ai,baseUrl:'https://other.example/v1'},fixture),null);
 assert.equal(resolveModelCredential({...ai,baseUrl:'https://api.xiaomimimo.com/other'},fixture),null);
