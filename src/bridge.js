@@ -14404,11 +14404,18 @@ async function main() {
             let metadata;
             try {
               metadata = await callHermes(prompt, selected, { signal, socialPlannerOnly: true, returnMetadata: true,
-                maxOutputTokens: Math.min(2048, maxTokens), kind: "memory_reconstruction", conversationId: scope.conversationId,
+                maxOutputTokens: Math.min(8192, maxTokens), kind: "memory_reconstruction", conversationId: scope.conversationId,
                 isCurrent: () => configRevision === binding.revision && reconstructionEligible(scope)
                   && accountRuntimeContextCurrent(binding.identity, oneBotAccounts.get(binding.accountId)?.ws) });
               const parsed = extractJsonObject(metadata.text);
               return { ...parsed, usage: metadata.usage };
+            } catch (error) {
+              metadata ??= error?.metadata;
+              const code = ["MODEL_CONTEXT_CHANGED", "RECONSTRUCTION_STALE"].includes(error?.code)
+                ? error.code : "RECONSTRUCTION_MODEL_OUTPUT_REJECTED";
+              const failure = Object.assign(new Error(code), { code });
+              if (metadata?.usage) failure.metadata = { usage: metadata.usage };
+              throw failure;
             } finally {
               await ownerTransact(draft => {
                 const daily = draft.socialAgents?.bots?.[owner]?.runtimeUsage?.days?.[day];
@@ -14862,7 +14869,7 @@ async function main() {
         }
         if (req.method === "POST" && url.pathname === "/api/owner/reconstruction/control") {
           const body = await readBody();
-          if (body.expectedConfigRevision !== configRevision || !reconstructionHost || !["pause", "resume", "cancel"].includes(body.operation)
+          if (body.expectedConfigRevision !== configRevision || !reconstructionHost || !["pause", "resume", "cancel", "resume_semantics"].includes(body.operation)
             || Object.keys(body).some(key => !["expectedConfigRevision", "expectedRevision", "operation"].includes(key)))
             return replyJson(409, { ok: false, code: "RECONSTRUCTION_CONFLICT" });
           try { return replyJson(200, { ok: true, result: await reconstructionHost.control({ authorized: true, operation: body.operation, expectedRevision: body.expectedRevision }) }); }

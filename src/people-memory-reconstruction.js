@@ -413,6 +413,14 @@ export function controlPeopleReconstruction(root, args = {}) {
       if (job.pauseReason !== "operator") job.status = job.cursor.phase === "done" ? "completed_with_limits" : "running";
     }
     job.scanOnly = true;
+  } else if (op === "resume_semantics") {
+    // Explicit operator recovery for NEW pages only. Never clear an unknown
+    // receipt, return to its cursor, release its reserved cost or replay it.
+    if (job.claim || !job.scanOnly || !["running", "paused"].includes(job.status) || job.cursor.phase === "done"
+      || job.stats.modelAttempts >= job.budget.maxCalls
+      || job.stats.usage.totalTokens + job.stats.reservedTokens + job.budget.maxTokensPerCall > job.budget.maxTokens) fail("SEMANTIC_RESUME_BLOCKED");
+    job.acknowledgedUnknownCalls = job.stats.unknownCalls;
+    job.scanOnly = false; job.status = "running"; job.pauseReason = null;
   } else if (op === "set_budget") {
     if (job.claim || !["running", "paused"].includes(job.status)
       || ![args.maxCalls, args.maxTokens].every(integer)) fail("INVALID_BUDGET_CHANGE");
@@ -499,6 +507,7 @@ export function peopleReconstructionStatus(root) {
       count: job.claim.count, modelStarted: job.claim.modelStarted } : null,
     candidates: job.candidateCount, stats: copy(job.stats), budget: copy(job.budget),
     usageComplete: job.stats.unknownCalls === 0, scanOnly: job.scanOnly === true,
+    acknowledgedUnknownCalls: job.acknowledgedUnknownCalls || 0,
     pauseReason: job.pauseReason ?? null, unknownBatches: job.unknownBatches?.length ?? 0 } : null;
 }
 
@@ -638,7 +647,7 @@ export function createPeopleReconstructionRunner({ getState, transact, readPage,
           const current = rows.map(row => classifyPeopleReconstructionRow(root, row, { eligible, now: sync(now) }))
             .filter(c => ids.includes(c.id) && c.tier !== "Suppressed" && c.userId && c.value);
           if (!current.length) return { skip: true };
-          if (job.stats.unknownCalls > 0 || job.stats.modelAttempts >= job.budget.maxCalls
+          if (job.stats.unknownCalls > (job.acknowledgedUnknownCalls || 0) || job.stats.modelAttempts >= job.budget.maxCalls
             || job.stats.usage.totalTokens + job.stats.reservedTokens + job.budget.maxTokensPerCall > job.budget.maxTokens) {
             job.status = "paused";
             if (job.claim.modelStarted) job.claim.status = "unknown"; else job.claim = null;
@@ -690,12 +699,14 @@ export function createPeopleReconstructionRunner({ getState, transact, readPage,
       }
       return await tx(root => applyPeopleReconstructionPage(root, { claimId, rows,
         modelOutput: latestAttempt ? { groups } : undefined, now: sync(now), eligible }));
-    } catch {
+    } catch (error) {
       if (storageBlocked) return { status: "storage_blocked", code: "DURABILITY_UNCERTAIN" };
       return tx(root => {
         const job = jobAt(root);
         if (job.claim?.id !== claimId) return { status: job.status };
-        settleUsage(job, output?.usage, output !== undefined, latestAttempt);
+        // Trusted host callback errors may retain normalized provider usage
+        // (e.g. output length rejection). Text/model prose is never a ledger.
+        settleUsage(job, output?.usage || error?.metadata?.usage, output !== undefined, latestAttempt);
         job.claim.status = "unknown";
         if (job.status === "running") { job.status = "paused"; job.pauseReason = "model_unknown"; }
         job.revision++; bump(job.stats, "BATCH_OUTCOME_UNKNOWN", rows.length);

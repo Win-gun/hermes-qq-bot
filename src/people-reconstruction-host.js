@@ -643,7 +643,7 @@ export function createPeopleReconstructionHost({ getState, transact, getRevision
     if (state.status !== "running") return progress();
     if (worker.status().phase !== "ready") { await worker.advance(); return progress(); }
     const b = budgetValue(budget), spent = state.stats;
-    if (!state.scanOnly && (!model || spent.unknownCalls || spent.modelAttempts >= state.budget.maxCalls
+    if (!state.scanOnly && (!model || spent.unknownCalls > (state.acknowledgedUnknownCalls || 0) || spent.modelAttempts >= state.budget.maxCalls
       || spent.usage.totalTokens + spent.reservedTokens + state.budget.maxTokensPerCall > state.budget.maxTokens
       || b.remainingCalls < 1 || b.remainingTokens < b.maxTokensPerCall)) {
       await runner.control({ authorized: true, operation: "scan_only", expectedRevision: state.revision });

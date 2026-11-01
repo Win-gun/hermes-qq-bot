@@ -299,6 +299,31 @@ try {
   await restarted.control({ authorized: true, operation: "skip_unknown", expectedRevision: restarted.status().revision });
   equal(restarted.status().status, "completed_with_limits", "explicitly skipped last page terminates honestly, not a stuck done cursor");
 
+  const lengthH = harness(), lengthR = runnerFor(lengthH, { model: async () => {
+    throw Object.assign(new Error('provider rejected truncated output'), { metadata: { usage } });
+  } });
+  await start(lengthR); await lengthR.step();
+  equal(lengthR.status().stats.unknownCalls, 0, 'normalized provider usage on rejected output is not lost');
+  equal(lengthR.status().stats.usage.totalTokens, 25, 'failed semantics retain actual billed token facts');
+  equal(lengthR.status().claim.status, 'unknown', 'known cost does not fabricate semantic completion');
+  const recoveryH = harness(), seenPages = [];
+  const recoveryR = runnerFor(recoveryH, { readPage: pagedRows, model: async args => {
+    seenPages.push(args.candidates[0].key);
+    if (seenPages.length === 1) throw new Error('synthetic transport outcome unknown');
+    return { groups: [], usage };
+  } });
+  await start(recoveryR); await recoveryR.step();
+  await rejected(recoveryR.control({ authorized: true, operation: 'resume_semantics', expectedRevision: recoveryR.status().revision }), 'SEMANTIC_RESUME_BLOCKED');
+  await recoveryR.control({ authorized: true, operation: 'scan_only', expectedRevision: recoveryR.status().revision });
+  const reserved = recoveryR.status().stats.reservedTokens;
+  await rejected(recoveryR.control({ authorized: false, operation: 'resume_semantics', expectedRevision: recoveryR.status().revision }), 'UNAUTHORIZED');
+  await recoveryR.control({ authorized: true, operation: 'resume_semantics', expectedRevision: recoveryR.status().revision });
+  await recoveryR.step();
+  equal(seenPages, ['first', 'later'], 'explicit recovery consumes only a new page, never replays failed source');
+  equal(recoveryR.status().stats.reservedTokens, reserved, 'unknown old call reservation is never released by recovery');
+  equal(recoveryR.status().stats.unknownCalls, 1, 'unknown historical receipt is not relabelled confirmed');
+  equal(recoveryR.status().acknowledgedUnknownCalls, 1, 'operator acknowledgment is separate from usage truth');
+
   // Budgets are claim-time gates; explicit increase can resume non-invoked pages.
   const budgetH = harness(); let budgetCalls = 0;
   const budgetR = runnerFor(budgetH, { model: async () => { budgetCalls++; return { groups: [], usage }; } });
