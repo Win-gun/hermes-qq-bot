@@ -40,11 +40,14 @@ assert.equal(service.candidates(ctx, { query: '无语' }).length, 0);
 await assert.rejects(() => service.importPublic(ctx, metadata), /REJECTED/);
 assert.equal((await service.prepare(ctx, imported)).segment, null);
 // A different ID/source must not resurrect the same rejected bytes.
-const assets = root.memory.socialExpressionAssets.bots[ctx.logicalId].stickers;
+let assets = root.memory.socialExpressionAssets.bots[ctx.logicalId].stickers;
 assets.rejected_alias = { ...structuredClone(assets[imported.id]), id: 'rejected_alias' };
 delete assets[imported.id];
 await assert.rejects(() => service.importPublic(ctx, metadata), /REJECTED/);
 // Legacy collection annotations are descriptions, not privacy qualifications.
+// Public downloads reserve through the real writer; published snapshots are
+// replaced even when identical bytes are later rejected. Re-read latest state.
+assets = root.memory.socialExpressionAssets.bots[ctx.logicalId].stickers;
 const legacy = assets.rejected_alias;
 delete assets.rejected_alias;
 legacy.id = 'legacy_collection'; legacy.source = 'collection'; legacy.url = metadata.url;

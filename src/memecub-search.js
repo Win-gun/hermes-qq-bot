@@ -19,7 +19,8 @@ const bounded = (v, max) => typeof v === 'string' && v.length <= max && !v.inclu
 const number = (v, min, max) => Number.isSafeInteger(v) && v >= min && v <= max;
 const cancel = body => { try { Promise.resolve(body?.cancel()).catch(() => {}); } catch {} };
 
-function publicQuery(value) {
+// Shared validation for host resolvers; normalizing never issues an approval.
+export function normalizeMemecubQuery(value) {
   // Reject, do not silently truncate/redact a private message into a search.
   // This is defense in depth, NOT a private-data detector: the host must issue
   // approval for the exact short public phrase, never for a chat transcript.
@@ -42,7 +43,7 @@ function retryDelay(value, now) {
   return Number.isFinite(date) ? Math.max(1000, date - now) : 60000;
 }
 
-/** Public, keyless, host-only search; Node 22+, no media downloads or disk IO.
+/** Public, host-only search; Node 22+, no media downloads or disk IO.
  * Official contract (not instructions to execute):
  * https://github.com/liyupi/memecub/blob/master/README.md
  * https://github.com/liyupi/memecub/blob/master/cli/src/client.ts
@@ -65,6 +66,13 @@ function retryDelay(value, now) {
  * consumes budget, including errors/abort; no automatic retries/backfill polling.
  * Anonymous provider allowance: 20 searches/day/IP; REST limit <=50. We default
  * to <=10 results, 20 attempts/rolling 24h and a 3s minimum interval.
+ * getApiKey({signal}) may return a Bearer key or null/undefined/empty for anonymous.
+ * A selected credential lookup failure MUST throw, never return an empty value.
+ * Invalid keys/401/403 never fall back to anonymous. Authenticated allowance is
+ * independently bounded by maxAuthenticatedRequestsPerDay (default also 20).
+ * No production allowance is changed here. beforeRequest, if supplied, durably
+ * reserves the host's shared/account budget on cache misses only; no retries.
+ * Errors contain only fixed codes. Do not log fetch arguments/credential values.
  *
  * Handles are NOT sticker-store records, content hashes, administrator approvals
  * or automatic eligibility. Host integration must download via the existing
@@ -78,15 +86,19 @@ export function createMemecubSearch({
   isQueryApproved, fetchImpl = globalThis.fetch, lookup = dnsLookup, clock = Date.now,
   timeoutMs = 8000, maxBodyBytes = 256 * 1024, maxResults = 10,
   cacheTtlMs = 5 * 60 * 1000, maxCacheEntries = 32, candidateTtlMs = 10 * 60 * 1000,
-  maxRequestsPerDay = 20, minIntervalMs = 3000
+  maxRequestsPerDay = 20, minIntervalMs = 3000,
+  getApiKey, maxAuthenticatedRequestsPerDay = 20, beforeRequest
 } = {}) {
   if ([isQueryApproved, fetchImpl, lookup, clock].some(f => typeof f !== 'function')
     || !number(timeoutMs, 1, 30000) || !number(maxBodyBytes, 1, 1024 * 1024)
     || !number(maxResults, 1, 50) || !number(candidateTtlMs, 1, 3600000)
     || !number(cacheTtlMs, 0, candidateTtlMs) || !number(maxCacheEntries, 0, 128)
-    || !number(maxRequestsPerDay, 0, 20) || !number(minIntervalMs, 0, DAY)) throw fail('MEMECUB_OPTIONS');
+    || !number(maxRequestsPerDay, 0, 20) || !number(minIntervalMs, 0, DAY)
+    || !number(maxAuthenticatedRequestsPerDay, 0, 10000)
+    || (getApiKey !== undefined && typeof getApiKey !== 'function')
+    || (beforeRequest !== undefined && typeof beforeRequest !== 'function')) throw fail('MEMECUB_OPTIONS');
   const cache = new Map(), handles = new WeakMap();
-  let attempts = [], lastAttempt = -Infinity, cooldownUntil = 0, busy = false, lastClock = 0;
+  let attempts = [], authenticatedAttempts = [], lastAttempt = -Infinity, cooldownUntil = 0, busy = false, lastClock = 0;
   function now() {
     const t = clock();
     if (!number(t, 0, Number.MAX_SAFE_INTEGER - DAY) || t < lastClock) throw fail('MEMECUB_CLOCK');
@@ -109,25 +121,16 @@ export function createMemecubSearch({
 
   async function search(input, { limit = Math.min(5, maxResults), signal } = {}) {
     if (!plain(input) || Object.keys(input).some(k => !['publicQuery', 'approval'].includes(k))) throw fail('MEMECUB_QUERY');
-    const request = Object.freeze({ publicQuery: publicQuery(input.publicQuery), approval: input.approval });
+    const request = Object.freeze({ publicQuery: normalizeMemecubQuery(input.publicQuery), approval: input.approval });
     if (!number(limit, 1, maxResults)) throw fail('MEMECUB_LIMIT');
     if (signal !== undefined && !(signal instanceof AbortSignal)) throw fail('MEMECUB_SIGNAL');
     if (signal?.aborted) throw fail('MEMECUB_ABORTED');
     approved(request);
-    const startedAt = now(), key = hash(JSON.stringify([request.publicQuery, limit]));
+    const startedAt = now();
     for (const [k, entry] of cache) if (entry.expiresAt <= startedAt) cache.delete(k);
-    const hit = cache.get(key);
-    if (hit) {
-      cache.delete(key); cache.set(key, hit);
-      return issue(hit.items, true);
-    }
     // Never enqueue searches for future execution or share abort/approval state
     // between callers. Concurrent cache misses fail fast rather than duplicate.
     if (busy) throw fail('MEMECUB_BUSY');
-    if (startedAt < cooldownUntil) throw fail('MEMECUB_RATE_LIMIT', { retryAfterMs: cooldownUntil - startedAt });
-    attempts = attempts.filter(t => t > startedAt - DAY);
-    if (attempts.length >= maxRequestsPerDay) throw fail('MEMECUB_BUDGET');
-    if (startedAt - lastAttempt < minIntervalMs) throw fail('MEMECUB_RATE_LIMIT', { retryAfterMs: minIntervalMs - (startedAt - lastAttempt) });
 
     busy = true;
     const controller = new AbortController(), active = controller.signal;
@@ -135,7 +138,7 @@ export function createMemecubSearch({
     const timer = setTimeout(() => controller.abort(fail('MEMECUB_TIMEOUT')), timeoutMs);
     signal?.addEventListener('abort', onAbort, { once: true });
     if (signal?.aborted) onAbort();
-    const check = () => { if (active.aborted) throw active.reason; };
+    const check = () => { if (active.aborted) throw active.reason; approved(request); };
     const race = promise => new Promise((resolve, reject) => {
       const abort = () => reject(active.reason);
       active.addEventListener('abort', abort, { once: true });
@@ -149,11 +152,40 @@ export function createMemecubSearch({
     active.addEventListener('abort', cancelReader, { once: true });
     try {
       check(); approved(request);
+      let apiKey;
+      if (getApiKey) {
+        try { apiKey = await race(getApiKey({ signal: active })); }
+        catch { check(); throw fail('MEMECUB_CREDENTIAL'); }
+        check();
+      }
+      const authenticated = apiKey !== undefined && apiKey !== null && apiKey !== '';
+      if (authenticated && (typeof apiKey !== 'string' || apiKey.length > 4096
+        || !/^[\x21-\x7e]+$/.test(apiKey))) throw fail('MEMECUB_CREDENTIAL');
+      // Credential-partitioned cache; neither a raw key nor an approval is stored.
+      const key = hash(JSON.stringify([request.publicQuery, limit, authenticated ? hash(apiKey) : 'anonymous']));
+      const hit = cache.get(key);
+      if (hit && hit.expiresAt > now()) {
+        cache.delete(key); cache.set(key, hit); completed = true;
+        return issue(hit.items, true);
+      }
+      const at = now();
+      if (at < cooldownUntil) throw fail('MEMECUB_RATE_LIMIT', { retryAfterMs: cooldownUntil - at });
+      attempts = attempts.filter(t => t > at - DAY);
+      authenticatedAttempts = authenticatedAttempts.filter(t => t > at - DAY);
+      const counter = authenticated ? authenticatedAttempts : attempts;
+      if (counter.length >= (authenticated ? maxAuthenticatedRequestsPerDay : maxRequestsPerDay)) throw fail('MEMECUB_BUDGET');
+      if (at - lastAttempt < minIntervalMs) throw fail('MEMECUB_RATE_LIMIT', { retryAfterMs: minIntervalMs - (at - lastAttempt) });
+      if (beforeRequest) {
+        check();
+        await race(beforeRequest(Object.freeze({ ...request, authenticated }), { signal: active }));
+        check();
+      }
       const url = new URL(ENDPOINT);
       url.search = new URLSearchParams({ q: request.publicQuery, limit: String(limit) }).toString();
-      attempts.push(startedAt); lastAttempt = startedAt;
+      check(); lastAttempt = now(); counter.push(lastAttempt);
       response = await race(Promise.resolve(fetchImpl(url.href, {
-        method: 'GET', headers: { accept: 'application/json', 'accept-encoding': 'identity' },
+        method: 'GET', headers: { accept: 'application/json', 'accept-encoding': 'identity',
+          ...(authenticated ? { authorization: `Bearer ${apiKey}` } : {}) },
         credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store', signal: active
       })).then(value => {
         // Retain the body before settling the race: abort can arrive between
@@ -209,7 +241,7 @@ export function createMemecubSearch({
         if (!resolved.has(host)) {
           // Only bounded response rows are inspected; no recursive crawling.
           const answers = isIP(host) ? [{ address: host, family: isIP(host) }]
-            : await race(lookup(host, { all: true, verbatim: true }));
+            : (check(), await race(lookup(host, { all: true, verbatim: true })));
           check();
           resolved.set(host, Array.isArray(answers) && answers.length > 0 && answers.length <= 64
             && answers.every(a => a && isPublicAddress(a.address) && a.family === isIP(a.address)));
@@ -233,8 +265,9 @@ export function createMemecubSearch({
           || (row.author != null && !bounded(row.author, 300))
           || (row.license.name !== undefined && !bounded(row.license.name, 200))
           || (row.license.remix_allowed !== undefined && typeof row.license.remix_allowed !== 'boolean')) continue;
-        const mediaUrl = await safeUrl(row.url), pageUrl = await safeUrl(row.page_url);
-        const sourceUrl = row.source_url == null ? null : await safeUrl(row.source_url);
+        check(); const mediaUrl = await safeUrl(row.url); check();
+        const pageUrl = await safeUrl(row.page_url); check();
+        const sourceUrl = row.source_url == null ? null : await safeUrl(row.source_url); check();
         if (!mediaUrl || !pageUrl || (row.source_url != null && !sourceUrl) || seen.has(mediaUrl)) continue;
         seen.add(mediaUrl);
         const license = Object.freeze({ code: row.license.code, commercial_use: row.license.commercial_use,

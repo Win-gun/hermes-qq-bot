@@ -71,7 +71,7 @@ function responseMetadata(data, apiKey, prompt) {
  * Unknown usage fields are null, not zero or token estimates. Safe errors may
  * carry .metadata = {usage,model,provider,httpStatus}, never raw response data.
  */
-export async function completeText({ prompt, baseUrl, model, apiKey, reasoningEffort = 'low', timeoutMs = 60_000, signal, fetchImpl = fetch, returnMetadata = false }) {
+export async function completeText({ prompt, baseUrl, model, apiKey, reasoningEffort = 'low', timeoutMs = 60_000, signal, fetchImpl = fetch, returnMetadata = false, maxOutputTokens }) {
   const endpoint = endpointFor(baseUrl);
   if (typeof prompt !== 'string' || !prompt.trim() || typeof model !== 'string' || !model.trim() || typeof apiKey !== 'string' || !apiKey || typeof fetchImpl !== 'function') {
     throw new Error('Invalid text completion arguments');
@@ -80,6 +80,7 @@ export async function completeText({ prompt, baseUrl, model, apiKey, reasoningEf
     throw new Error('Invalid text completion options');
   }
   if (signal?.aborted) throw abortError();
+  if (maxOutputTokens !== undefined && (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 32768)) throw new Error('Invalid text completion output limit');
 
   const controller = new AbortController();
   let rejectAbort;
@@ -97,6 +98,7 @@ export async function completeText({ prompt, baseUrl, model, apiKey, reasoningEf
     ],
   };
   if (reasoningEffort !== 'none') payload.reasoning_effort = reasoningEffort;
+  if (maxOutputTokens !== undefined) payload.max_tokens = maxOutputTokens;
   let metadata;
   try {
     const response = await wait(fetchImpl(endpoint, {

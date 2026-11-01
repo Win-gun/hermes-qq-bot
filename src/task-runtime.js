@@ -3,6 +3,21 @@ import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { CapabilityError, canonicalNoFollowPath, hasUnresolvedSideEffects, normalizeWorkGrant } from "./work-capabilities.js";
 import { sanitizeArchiveValue } from "./privacy-filter.js";
+import { applyDelegationControl, delegationReplayBlocked, delegationTarget } from "./social-delegation.js";
+
+const delegated = task => task?.socialDelegation?.version === 1;
+const delegationStages = Object.freeze({ waiting: "等待新事件", paused: "已暂停", budget_exhausted: "等待资源预算",
+  interrupted: "执行已中断", accepted: "已受理，等待核实", uncertain: "结果待核实", blocked: "执行受限", cancelled: "已取消", completed: "已完成" });
+const resumableDelegation = ["waiting", "paused", "budget_exhausted", "interrupted", "blocked"];
+const unresolvedTask = task => hasUnresolvedSideEffects(task) || (delegated(task) && delegationReplayBlocked(task.socialDelegation));
+function projectDelegation(task, status) {
+  if (!Object.hasOwn(delegationStages, status)) return;
+  task.status = status;
+  task.currentStage = delegationStages[status];
+  task.lastProgressText = delegationStages[status];
+  task.lastError = "";
+  task.completedAt = ["completed", "cancelled"].includes(status) ? new Date().toISOString() : "";
+}
 
 function asArray(value) {
   if (Array.isArray(value)) return value.filter((item) => item !== undefined && item !== null);
@@ -81,7 +96,8 @@ function backupBeforeOwnerMigration(filePath) {
 }
 
 export class TaskRuntime {
-  constructor({ rootDir, config, execute, notify, log = () => {}, warn = () => {}, ownerForAccount = (id) => id ? `account:${id}` : "legacy:default", clock = Date.now }) {
+  constructor({ rootDir, config, execute, notify, log = () => {}, warn = () => {}, ownerForAccount = (id) => id ? `account:${id}` : "legacy:default",
+    validateDelegationActor, authorizeSocialTask, clock = Date.now }) {
     this.rootDir = rootDir;
     this.getConfig = typeof config === "function" ? config : () => config || {};
     this.execute = execute;
@@ -89,6 +105,8 @@ export class TaskRuntime {
     this.log = log;
     this.warn = warn;
     this.ownerForAccount = ownerForAccount;
+    this.validateDelegationActor = validateDelegationActor;
+    this.authorizeSocialTask = authorizeSocialTask;
     this.clock = clock;
     this.tasks = new Map();
     this.running = new Set();
@@ -170,6 +188,18 @@ export class TaskRuntime {
         interrupted = true;
         task.revision = (Number.isSafeInteger(task.revision) ? task.revision : 0) + 1;
       }
+      if (delegated(task) && !["completed", "cancelled"].includes(task.socialDelegation.status)) {
+        const goal = task.socialDelegation;
+        goal.recoveryReadOnly = true;
+        if (["running", "ready"].includes(goal.status)) goal.status = delegationReplayBlocked(goal) ? "uncertain" : "interrupted";
+        goal.revision = nextCounter(goal.revision);
+        goal.controlRevision = nextCounter(goal.controlRevision);
+        goal.updatedAt = this.clock();
+        goal.code = "DELEGATION_RESTART_NO_REPLAY";
+        projectDelegation(task, goal.status);
+        task.revision = nextCounter(task.revision);
+        needsWrite = true;
+      }
       if (needsWrite) writeJsonAtomic(filePath, task);
       if (interrupted) appendJsonl(path.join(baseDir, name, "events.jsonl"), { at: task.interruptedAt, type: "interrupted", reason: task.lastError });
       this.tasks.set(task.id, task);
@@ -245,6 +275,18 @@ export class TaskRuntime {
     this.publishState(task);
   }
 
+  // Existing task writer, synchronous latest-draft builder; no second writer.
+  mutateDelegation(taskId, build) {
+    const task = this.get(taskId);
+    if (!task || task.authorityBlocked) throw new CapabilityError("DELEGATION_TASK_UNAVAILABLE");
+    const goal = build(structuredClone(task.socialDelegation ?? null), structuredClone(task));
+    if (!goal || goal.version !== 1 || typeof goal.then === "function") throw new CapabilityError("DELEGATION_MUTATION_INVALID");
+    task.socialDelegation = structuredClone(goal);
+    projectDelegation(task, goal.status);
+    this.persist(task);
+    return { ok: true, durable: true, value: structuredClone(goal) };
+  }
+
   // Detached, redacted projections only. Replay never pumps tasks or replays an
   // operation/notification. Listeners are asynchronous, not on the chat lane.
   snapshot(taskId) {
@@ -298,7 +340,8 @@ export class TaskRuntime {
   activeForConversation(conversationId, { logicalBotId } = {}) {
     return Array.from(this.tasks.values()).find((task) => task.conversationId === String(conversationId)
       && (logicalBotId === undefined || taskOwnedBy(task, logicalBotId))
-      && ["offered", "queued", "planning", "running", "waiting_permission", "reviewing", "delivering", "interrupted"].includes(task.status));
+      && (["offered", "queued", "planning", "running", "waiting_permission", "reviewing", "delivering", "interrupted"].includes(task.status)
+        || delegated(task) && ["waiting", "paused", "budget_exhausted", "blocked", "accepted", "uncertain"].includes(task.status)));
   }
 
   get(taskId) {
@@ -322,6 +365,18 @@ export class TaskRuntime {
     if (!actorId || /^(model|ai|agent|tool)$/i.test(actor.source || "") || actor.kind === "model"
       || actor.accountId !== undefined && actor.accountId !== task.accountId
       || actor.logicalBotId !== undefined && actor.logicalBotId !== task.logicalBotId) return { ok: false, code: "HUMAN_ACTOR_REQUIRED", reason: "任务确认需要已验证的人类身份。" };
+    if (delegated(task) && typeof this.authorizeSocialTask === "function") {
+      // A fresh host event continues a DURABLE owner grant; it is not a new
+      // owner command and cannot carry the controller's ephemeral WeakMap key.
+      // The strict event verifier below still has to authenticate this event,
+      // scope, freshness, current policy and exact goal revision before queuing.
+      if (actor.source === "host_event" && actor.kind === "event" && actorId === task.socialOwnerUserId
+        && /^[a-f0-9]{64}$/.test(task.socialSourceClaim || "") && typeof this.validateDelegationActor === "function") return { ok: true, owner: true };
+      try {
+        return this.authorizeSocialTask(actor, immutableSnapshot(task), { action: task.status === "offered" ? "start" : "resume" }) === true
+          ? { ok: true, owner: true } : { ok: false, code: "SOCIAL_TASK_AUTHORITY_REQUIRED", reason: "社交委托需要宿主签发的真实主人权限。" };
+      } catch { return { ok: false, code: "SOCIAL_TASK_AUTHORITY_REQUIRED", reason: "社交委托来源已失效。" }; }
+    }
     const owner = cfg.ownerUserIds.includes(actorId);
     if (task.requiresLocalFiles || task.requiresComputer || task.requiresAuthenticatedBrowser) {
       return owner ? { ok: true, owner } : { ok: false, owner, reason: "该任务涉及本机或登录态，只能由主人确认。" };
@@ -333,22 +388,85 @@ export class TaskRuntime {
     return { ok: false, owner: false, reason: "当前会话或账号没有正式任务权限。" };
   }
 
+  /** Internal host attestation, not an actor/grant supplied by model JSON.
+   * Ordinary formal work keeps canConfirm's historical semantics. Delegation
+   * requires an authenticated qq/admin actor; host events additionally require
+   * a synchronous source verifier and a pinned goal revision. The verifier must
+   * check the actual transport event, freshness and the current standing policy.
+   */
+  delegationActorPermission(task, actor, action) {
+    const deny = code => ({ ok: false, code, reason: "持续任务需要已验证的身份和当前事件来源。" });
+    if (actor?.verified !== true || !["qq", "admin", "host_event"].includes(actor.source)
+      || actor.kind !== undefined && !["human", "event"].includes(actor.kind)
+      || actor.accountId !== undefined && actor.accountId !== task.accountId
+      || actor.logicalBotId !== undefined && actor.logicalBotId !== task.logicalBotId
+      || actor.groupId !== undefined && actor.groupId !== task.groupId
+      || actor.conversationId !== undefined && actor.conversationId !== task.conversationId) return deny("DELEGATION_ACTOR_REQUIRED");
+    const event = actor.source === "host_event";
+    if (event) {
+      const at = this.clock();
+      if (action !== "resume" || actor.kind !== "event" || actor.accountId !== task.accountId || actor.logicalBotId !== task.logicalBotId
+        || task.messageType === "group" && actor.groupId !== task.groupId
+        || actor.conversationId !== task.conversationId || !/^[A-Za-z0-9_.:-]{1,160}$/.test(actor.eventId || "")
+        || !Number.isSafeInteger(actor.eventAt) || actor.eventAt < 0 || actor.eventAt > at || at - actor.eventAt > 120000
+        || actor.expectedDelegationRevision !== task.socialDelegation.revision
+        || typeof this.validateDelegationActor !== "function") return deny("DELEGATION_EVENT_SOURCE_REQUIRED");
+      if (!["waiting", "budget_exhausted", "interrupted", "blocked"].includes(task.socialDelegation.status)) return deny("DELEGATION_EVENT_RESUME_BLOCKED");
+      const key = createHash("sha256").update(JSON.stringify([task.logicalBotId, task.accountId, task.conversationId, actor.eventId])).digest("hex");
+      const claims = task.socialDelegation.resumeEventClaims || [];
+      if (!Array.isArray(claims) || claims.includes(key)) return deny("DELEGATION_EVENT_ALREADY_CLAIMED");
+      if (claims.length >= 512) return deny("DELEGATION_EVENT_CAPACITY");
+    } else if (actor.kind === "event") return deny("DELEGATION_ACTOR_REQUIRED");
+    if (actor.expectedDelegationRevision !== undefined && actor.expectedDelegationRevision !== task.socialDelegation.revision)
+      return deny("DELEGATION_CONTROL_CONFLICT");
+    try {
+      if (!event && this.authorizeSocialTask && this.authorizeSocialTask(actor, immutableSnapshot(task), Object.freeze({ action, event })) !== true)
+        return deny("SOCIAL_TASK_AUTHORITY_REQUIRED");
+      if (this.validateDelegationActor && this.validateDelegationActor(actor, immutableSnapshot(task), Object.freeze({ action, event })) !== true)
+        return deny("DELEGATION_ACTOR_REQUIRED");
+    } catch { return deny("DELEGATION_ACTOR_REQUIRED"); }
+    return { ok: true, event };
+  }
+
   confirm(taskId, actor = {}) {
     const task = this.get(taskId);
     if (!task) return { ok: false, reason: "任务不存在。" };
     if (this.running.has(task.id)) return { ok: false, task, code: "TASK_BUSY", reason: "旧执行尚未退出。" };
-    if (hasUnresolvedSideEffects(task)) return { ok: false, task, code: "UNRESOLVED_SIDE_EFFECT", reason: "存在已声明或结果不确定的执行副作用，不能恢复重放；此限制不包括通知回执。" };
-    if (!["offered", "interrupted", "failed"].includes(task.status)) return { ok: false, task, reason: `任务当前状态是 ${task.status}。` };
+    if (unresolvedTask(task)) return { ok: false, task, code: "UNRESOLVED_SIDE_EFFECT", reason: "存在已声明或结果不确定的执行副作用，不能恢复重放；此限制不包括通知回执。" };
+    if (!["offered", "interrupted", "failed", ...(delegated(task) ? resumableDelegation : [])].includes(task.status)) return { ok: false, task, reason: `任务当前状态是 ${task.status}。` };
     const permission = this.canConfirm(task, actor);
     if (!permission.ok) return { ok: false, task, ...(permission.code ? { code: permission.code } : {}), reason: permission.reason };
+    if (delegated(task)) {
+      const allowed = this.delegationActorPermission(task, actor, task.status === "offered" ? "start" : "resume");
+      if (!allowed.ok) return { ...allowed, task };
+      // Identity is immutable. A target change needs a new host-validated task;
+      // never transfer or discard the old task's operation/receipt history.
+      let target;
+      try { target = delegationTarget(task.socialDelegation.target); } catch { return { ok: false, code: "DELEGATION_TARGET_MISMATCH" }; }
+      if (target.accountId !== task.accountId || target.logicalBotId !== task.logicalBotId || target.conversationId !== task.conversationId
+        || (target.groupId ? target.groupId !== task.groupId || task.messageType !== "group"
+          : target.userId !== task.userId || task.messageType !== "private")) return { ok: false, code: "DELEGATION_TARGET_MISMATCH" };
+      let goal = task.socialDelegation;
+      if (goal.status !== "ready") {
+        try { goal = applyDelegationControl(goal, { action: "resume", expectedRevision: goal.revision }, this.clock()); }
+        catch (error) { return { ok: false, code: error.code || "DELEGATION_NOT_RESUMABLE" }; }
+      }
+      if (allowed.event) {
+        const key = createHash("sha256").update(JSON.stringify([task.logicalBotId, task.accountId, task.conversationId, actor.eventId])).digest("hex");
+        goal = { ...goal, resumeEventClaims: [...(goal.resumeEventClaims || []), key] };
+      }
+      task.socialDelegation = goal;
+    }
     task.confirmedBy = String(actor.userId || "");
     task.confirmedAt = new Date().toISOString();
     task.status = "queued";
     task.currentStage = "排队准备";
     task.lastProgressAt = Date.now();
     task.lastProgressText = "已确认，正在进入执行队列。";
-    task.suppressStartNotice = actor.source === "qq";
+    task.suppressStartNotice = actor.source === "qq" || delegated(task)
+      && (actor.source === "host_event" || task.socialDelegation.recoveryReadOnly === true);
     task.permissionTier = permission.owner ? "owner" : "isolated";
+    if (delegated(task) && this.authorizeSocialTask && typeof actor.socialConfigRevision === "string") task.socialOwnerRevision = actor.socialConfigRevision;
     task.lastError = "";
     task.completedAt = "";
     this.persist(task);
@@ -371,7 +489,7 @@ export class TaskRuntime {
     let item;
     try { item = normalizeWorkGrant(task, grant, actor, this.clock()); }
     catch (error) { return { ok: false, code: error.code || "GRANT_INVALID", reason: "授权目标、期限或身份无效，需要明确范围；不能使用旧 computer 广泛授权。" }; }
-    if (task.status === "waiting_permission" && hasUnresolvedSideEffects(task)) return { ok: false, code: "UNRESOLVED_SIDE_EFFECT", reason: "副作用结果未确定，不能重新排队。" };
+    if (task.status === "waiting_permission" && unresolvedTask(task)) return { ok: false, code: "UNRESOLVED_SIDE_EFFECT", reason: "副作用结果未确定，不能重新排队。" };
     task.grantRevision = nextCounter(task.grantRevision);
     item.grantRevision = task.grantRevision;
     task.grants = [...asArray(task.grants), item];
@@ -460,6 +578,12 @@ export class TaskRuntime {
     const allowed = actorId && !/^(model|ai|agent|tool)$/i.test(actor.source || "") && actor.kind !== "model"
       && (actorId === String(task.userId) || this.config().ownerUserIds.includes(actorId));
     if (!allowed) return { ok: false, reason: "只有任务发起人或主人可以取消。" };
+    if (delegated(task)) {
+      const permission = this.delegationActorPermission(task, actor, "cancel");
+      if (!permission.ok) return permission;
+      if (!["cancelled", "completed"].includes(task.socialDelegation.status)) task.socialDelegation = applyDelegationControl(task.socialDelegation,
+        { action: "cancel", expectedRevision: task.socialDelegation.revision }, this.clock());
+    }
     task.status = "cancelled";
     task.currentStage = "已取消";
     task.lastProgressAt = Date.now();
@@ -479,9 +603,18 @@ export class TaskRuntime {
     const actorId = String(actor.userId || "");
     const allowed = actorId === String(task.userId) || this.config().ownerUserIds.includes(actorId);
     if (!allowed) return { ok: false, reason: "只有任务发起人或主人可以补充任务。" };
+    if (delegated(task)) {
+      const permission = this.delegationActorPermission(task, actor, "context");
+      if (!permission.ok) return permission;
+      if (["completed", "cancelled"].includes(task.socialDelegation.status)) return { ok: false, code: "DELEGATION_TERMINAL" };
+    }
     const value = String(text || "").trim().slice(0, 4000);
     if (!value) return { ok: false, reason: "补充内容不能为空。" };
     task.supplements = [...asArray(task.supplements), { text: value, userId: actorId, at: new Date().toISOString() }].slice(-30);
+    if (delegated(task)) task.socialDelegation = { ...task.socialDelegation,
+      revision: nextCounter(task.socialDelegation.revision), controlRevision: nextCounter(task.socialDelegation.controlRevision),
+      supplementCount: nextCounter(task.socialDelegation.supplementCount), supplements: task.supplements.map(row => sanitizeArchiveValue(row.text)),
+      updatedAt: this.clock(), code: "DELEGATION_CONTEXT_UPDATED" };
     task.lastProgressAt = Date.now();
     task.lastProgressText = this.running.has(task.id) ? "已收到补充要求，将并入当前任务。" : "已收到补充要求，等待任务继续。";
     this.persist(task);
@@ -565,6 +698,46 @@ export class TaskRuntime {
     }
   }
 
+  async finishDelegation(task, result) {
+    let goal = task.socialDelegation;
+    // The latest durable goal/control wins over a returned (possibly stale)
+    // executor result. No MAX-pass path may mark unseen goal input complete.
+    const staleComplete = goal.status === "completed" && (result?.delegationStatus !== "completed"
+      || result.delegationRevision !== goal.revision || result.delegationControlRevision !== goal.controlRevision
+      || result.delegationSupplementCount !== (goal.supplementCount || 0));
+    const pendingEffect = unresolvedTask(task);
+    if ((pendingEffect && !["cancelled", "accepted", "uncertain"].includes(goal.status))
+      || ["running", "ready"].includes(goal.status) || staleComplete || !Object.hasOwn(delegationStages, goal.status)) {
+      goal = { ...goal, status: pendingEffect ? "uncertain" : "interrupted", revision: nextCounter(goal.revision),
+        code: "DELEGATION_REEVALUATION_REQUIRED", updatedAt: this.clock() };
+      task.socialDelegation = goal;
+    }
+    projectDelegation(task, goal.status);
+    task.lastProgressAt = this.clock();
+    task.resultSummary = task.socialOwnerPrivate ? "主人持续委托已更新。" : String(goal.summary || goal.code || "").slice(0, 4000);
+    task.deliveryArtifactNames = goal.status === "completed" ? asArray(result?.artifacts).map(x => String(x?.name || "")).filter(Boolean) : [];
+    this.persist(task);
+    this.event(task, task.status, { delegation: true, code: goal.code, controlRevision: goal.controlRevision });
+    // Parking/recovery is a UI/state change, not a new QQ send or replay timer.
+    if (goal.status !== "completed" || goal.recoveryReadOnly === true) return;
+    if (task.socialOwnerPrivate) {
+      // The injected host MUST route this to the currently verified owner DM,
+      // never task.groupId. Keep public summaries generic. Claim BEFORE calling
+      // the host; even a lost ACK/throw/restart must not retry this external act.
+      if (task.socialCompletionNotice) return;
+      task.socialCompletionNotice = { status: "claimed", goalRevision: goal.revision, at: this.clock() };
+      this.persist(task);
+      const accepted = await this.notifySafely(task, { type: "completed", audience: "owner_private",
+        text: `委托 ${task.id} 已完成。`, artifacts: [] });
+      task.socialCompletionNotice = { ...task.socialCompletionNotice,
+        status: accepted === true ? "accepted" : "uncertain", settledAt: this.clock() };
+      this.persist(task);
+      return;
+    }
+    await this.notifySafely(task, { type: "completed",
+      text: `任务 ${task.id} 已完成。${task.resultSummary ? `\n${task.resultSummary}` : ""}`, artifacts: this.deliveryArtifacts(task) });
+  }
+
   async run(task) {
     if (!assignedOwner(task) || this.running.has(task.id) || !this.config().enabled) return;
     const controller = new AbortController();
@@ -573,7 +746,10 @@ export class TaskRuntime {
     let heartbeat;
     try {
       if (task.authorityBlocked) throw new CapabilityError("TASK_DURABILITY_UNKNOWN");
-      if (hasUnresolvedSideEffects(task)) throw new CapabilityError("UNRESOLVED_SIDE_EFFECT");
+      if (unresolvedTask(task)) {
+        if (delegated(task)) { await this.finishDelegation(task, {}); return; }
+        throw new CapabilityError("UNRESOLVED_SIDE_EFFECT");
+      }
       task.attempt = nextCounter(task.attempt);
       task.attemptId = `attempt_${randomBytes(12).toString("hex")}`;
       task.status = "planning";
@@ -591,7 +767,8 @@ export class TaskRuntime {
           task.lastProgressAt = Date.now();
           task.lastProgressText = `仍在执行：${task.currentStage || task.status}`;
           this.persist(task);
-          this.notifySafely(task, { type: "heartbeat", text: `任务 ${task.id} 还在执行，当前阶段：${task.status}。` });
+          if (!delegated(task) || task.socialDelegation.recoveryReadOnly !== true && !task.socialOwnerPrivate)
+            this.notifySafely(task, { type: "heartbeat", text: `任务 ${task.id} 还在执行，当前阶段：${task.status}。` });
         } catch { controller.abort(); }
       }, this.config().progressHeartbeatMs);
       task.status = "running";
@@ -613,7 +790,9 @@ export class TaskRuntime {
           throw new CapabilityError("TASK_RESULT_INVALID");
         }
         passes += 1;
-        if (asArray(task.supplements).length <= supplementCount || result?.waitingPermission || result?.ok === false || passes >= 2 || hasUnresolvedSideEffects(task)) break;
+        // Delegation owns its multi-step loop and control revisions. It is NOT
+        // a legacy supplement pass; never re-enter it via the fixed two passes.
+        if (delegated(task) || asArray(task.supplements).length <= supplementCount || result?.waitingPermission || result?.ok === false || passes >= 2 || hasUnresolvedSideEffects(task)) break;
         task.previousResultSummary = String(result?.summary || "").slice(0, 3000);
         task.currentStage = "合并补充要求";
         task.lastProgressAt = Date.now();
@@ -622,7 +801,12 @@ export class TaskRuntime {
         this.event(task, "supplement_pass_started", { pass: passes + 1, supplementCount: asArray(task.supplements).length });
         await this.notifySafely(task, { type: "progress", text: `任务 ${task.id} 收到新补充，正在合并到下一阶段。` });
       } while (!controller.signal.aborted);
-      if (task.status === "cancelled" || controller.signal.aborted) return;
+      if (task.status === "cancelled") return;
+      if (controller.signal.aborted) {
+        if (delegated(task)) await this.finishDelegation(task, result);
+        return;
+      }
+      if (delegated(task)) { await this.finishDelegation(task, result); return; }
       if (result.ok && hasUnresolvedSideEffects(task)) throw new CapabilityError("UNRESOLVED_SIDE_EFFECT");
       task.status = result?.waitingPermission ? "waiting_permission" : result?.ok === false ? "failed" : "completed";
       task.currentStage = task.status === "waiting_permission" ? "等待授权" : task.status === "completed" ? "已完成" : "执行失败";
@@ -645,7 +829,16 @@ export class TaskRuntime {
         artifacts: task.status === "completed" ? this.deliveryArtifacts(task) : []
       });
     } catch (err) {
-      if (controller.signal.aborted || task.status === "cancelled") return;
+      if (task.status === "cancelled") return;
+      if (controller.signal.aborted && !delegated(task)) return;
+      if (delegated(task)) {
+        if (["TASK_DURABILITY_UNKNOWN", "DELEGATION_DURABILITY_UNKNOWN"].includes(err?.code)) {
+          task.authorityBlocked = true;
+          throw err; // No compensating write after an uncertain publication.
+        }
+        await this.finishDelegation(task, { ok: false });
+        return;
+      }
       task.status = "failed";
       task.currentStage = "执行失败";
       task.lastProgressAt = Date.now();
@@ -673,6 +866,14 @@ export function publicTask(task) {
   copy.attempt = Number.isSafeInteger(task.attempt) ? task.attempt : 0;
   copy.attemptId = typeof task.attemptId === "string" ? task.attemptId : "";
   copy.grants = asArray(copy.grants).map(publicGrant);
+  if (copy.socialOwnerPrivate && copy.socialDelegation) {
+    delete copy.socialDelegation.objective;
+    delete copy.socialDelegation.supplements;
+    delete copy.socialDelegation.summary;
+    copy.socialDelegation.steps = asArray(copy.socialDelegation.steps).map(({ observation, ...receipt }) => receipt);
+    copy.supplements = [];
+    copy.resultSummary = "主人持续委托已更新。";
+  }
   return sanitizeTaskView(copy);
 }
 
@@ -680,6 +881,7 @@ export function publicTask(task) {
 // secret detector. Keep host IDs stable for projections and API addressing;
 // sanitize all free-form model/user text and obvious credential-bearing fields.
 const TASK_VIEW_IDS = new Set(["id", "taskId", "logicalBotId", "accountId", "conversationId", "groupId", "userId",
+  "socialOwnerUserId",
   "grantedBy", "confirmedBy", "cancelledBy", "revokedBy", "operationId", "attemptId", "grantId", "externalGrantId",
   "backendId", "operationDigest", "targetDigest"]);
 function sanitizeTaskView(value, key = "") {

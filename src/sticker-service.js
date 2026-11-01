@@ -149,8 +149,41 @@ export function createStickerService({ request, transact, readState, isCurrent, 
   };
   const projected = (asset, scope, ctx) => ({ id: asset.id, source: asset.source || 'collection', autoEligible: stickerAutoEligible(asset, asset.annotations[scope], ctx), official: { url: asset.url, desc: asset.desc, trust: 'untrusted' },
     annotation: asset.annotations[scope] ? structuredClone(asset.annotations[scope]) : null });
-  async function image(c, url, signal) {
+  async function claimPublicDownload(c) {
+    // Reuse the existing group-learning DOWNLOAD ledger, not the independent
+    // vision-call book. The daily counter IS the durable dispatch reservation;
+    // do not fabricate a QQ observation/replay key in the learning claims map.
+    // All groups/public imports of the same logical bot share the daily cap.
+    const limit = c.ctx.policy.stickers.maxDailyDownloads === undefined ? 16 : c.ctx.policy.stickers.maxDailyDownloads;
+    if (!integer(limit) || limit > 100) throw fail('STICKER_SCHEMA');
+    await commit(c, root => {
+      let envelope = root.memory.groupStickerLearning;
+      if (envelope === undefined) envelope = root.memory.groupStickerLearning = { version: 1, bots: {} };
+      const fields = (value, keys) => map(value) && Object.keys(value).every(k => keys.includes(k));
+      if (!fields(envelope, ['version', 'bots']) || envelope.version !== 1 || !map(envelope.bots)) throw fail('STICKER_SCHEMA');
+      let b = envelope.bots[c.logicalId];
+      if (b === undefined) b = envelope.bots[c.logicalId] = { claims: {}, days: {}, lastAt: 0 };
+      if (!fields(b, ['claims', 'days', 'lastAt']) || !map(b.claims) || !map(b.days) || !integer(b.lastAt)
+        || Object.keys(b.claims).length > 10000
+        || Object.entries(b.claims).some(([key, value]) => !digestOK(key) || !fields(value, ['at', 'urlHash', 'assetId'])
+          || !integer(value.at) || value.urlHash !== undefined && !digestOK(value.urlHash)
+          || value.assetId !== undefined && !/^gs_[a-f0-9]{64}$/.test(value.assetId))
+        || Object.entries(b.days).some(([day, count]) => !/^\d{4}-\d{2}-\d{2}$/.test(day) || !integer(count))) throw fail('STICKER_SCHEMA');
+      const at = now();
+      if (at < b.lastAt || at > 8640000000000000 - 28800000) throw fail('STICKER_CLOCK');
+      const day = new Date(at + 28800000).toISOString().slice(0, 10);
+      if ((b.days[day] || 0) >= limit) throw fail('STICKER_DOWNLOAD_BUDGET');
+      b.lastAt = at; b.days[day] = (b.days[day] || 0) + 1;
+      for (const previous of Object.keys(b.days)) if (previous < day) delete b.days[previous];
+    });
+    // A failed/uncertain publication never reaches dispatch and is not retried.
+    // A durable reservation invalidated before wire remains spent (no guesses).
+    c.guard();
+  }
+  async function image(c, url, signal, publicDownload = false) {
     publicMediaUrl(url);
+    c.guard();
+    if (publicDownload) { await claimPublicDownload(c); c.guard(); }
     const downloaded = await downloadImage(url, { signal }); c.guard();
     const result = validateImage(downloaded?.buffer, downloaded?.mimeType);
     return { ...result, sha256: hash(result.buffer) };
@@ -196,7 +229,7 @@ export function createStickerService({ request, transact, readState, isCurrent, 
       // Preserve source/license locally; never turn provider metadata into an
       // instruction or a forged human message/administrator confirmation.
       publicMediaUrl(metadata.pageUrl);
-      const media = await image(c, metadata.url, signal);
+      const media = await image(c, metadata.url, signal, true);
       const id = `public_${media.sha256}`;
       const existing = getBot(readState(), c)?.stickers[id];
       if (contentDenied(readState(), c, media.sha256) || existing?.denied || existing?.blocked || existing?.annotations[c.conversationId]?.status === 'rejected')

@@ -40,7 +40,10 @@ const publicSticker = a => ({ id: a.id, source: a.source, autoEligible: a.autoEl
 /** Host-only adapter; NEVER expose this object or ctx handles as model tools.
  * readState() -> {memory:<published memory root>}; transact(syncBuilder) receives
  * that same envelope's latest private draft and resolves after durable publish.
- * capture(accountId,conversationId) is synchronous and returns the exact host ctx:
+ * capture(accountId,conversationId,openOptions) is synchronous and returns the exact host ctx:
+ * openOptions is opaque host input, not authorization. The host must authenticate
+ * any owner/exact-target override (e.g. single-use WeakMap grant), bind it to
+ * content-only scope and keep normal social opens from borrowing that authority.
  * {accountId,logicalId,conversationId,revision,policy,...opaqueHostData}.
  * isCurrent(ctx) authenticates route/revision/session, not selected/online/quiet.
  * Host request separately enforces connection, selected identity and scope; real
@@ -165,9 +168,9 @@ export function createExpressionLibrary({ readState, transact, capture, isCurren
       }, { fact: true });
     }
   }
-  function open(accountId, conversationId) {
+  function open(accountId, conversationId, openOptions) {
     if (typeof accountId !== "string" || !/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(accountId) || !SCOPE.test(conversationId)) throw fail("EXPRESSION_SCOPE");
-    const ctx = capture(accountId, conversationId);
+    const ctx = capture(accountId, conversationId, openOptions);
     if (!plain(ctx) || issued.has(ctx) || ctx.accountId !== accountId || !LOGICAL.test(ctx.logicalId) || ctx.conversationId !== conversationId
       || !(typeof ctx.revision === "string" || uint(ctx.revision))) throw fail("EXPRESSION_CONTEXT");
     let policy; try {

@@ -21,6 +21,9 @@ const defaults = {
   comments: { enabled: false, maxDaily: 2, cooldownMs: 600000 },
   autonomy: { enabled: false, maxContentLength: 280, sources: [] }
 };
+// No 3.5 migration expands visibility: omitted audience remains self-only.
+// scoped_autonomy is standing authority, not evidence of protocol support or
+// a low-impact classification. The runtime still requires host attestations.
 const fail = () => { throw new Error("QZONE_POLICY_INVALID"); };
 const bounded = (v, min, max) => Number.isSafeInteger(v) && v >= min && v <= max;
 const ref = v => typeof v === "string" && /^[a-zA-Z0-9:_-]{1,96}$/.test(v)

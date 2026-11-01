@@ -115,13 +115,36 @@ export function recoverQzoneState(memory, { reason, now: at } = {}) {
  * no dispatch API. Feed/cursor handles live only in this context, expire and never get
  * persisted. No private_qzone text is passed to onEpisode or any group projector.
  * All returned drafts/status are detached views. Recover never sends or resumes.
+ *
+ * 3.5 adapters: isLowImpact(ctx, frozenDraftView) synchronously attests ordinary
+ * low-impact content from allowed public/admin sources (or an allowed fresh
+ * interaction). It is HOST policy, never a model-supplied approval flag. False
+ * leaves reviewed approval available; defaults preserve legacy exact text grants.
+ * isOwnerReviewActor(ctx, originalActor, frozenDraftView) authenticates a consumed QQ preview
+ * claim, including its execution current() callback from owner-review.publish's
+ * fourth argument, invoked as current(frozenDraftView) to bind this exact draft.
+ * Omitted => qq_owner approval fails closed. Console actors
+ * must never satisfy it. Both callbacks re-run at final queued wire and must be
+ * pure, synchronous and check current revocation, account and content scope.
+ * Parent must route eligible standing-authority drafts to publish (same sender)
+ * rather than unconditionally offering qq_owner review; never loosen reviewed
+ * console endpoints. No timers, model calls or sender are added here.
  */
 export function createQzoneRuntime({ capture, isCurrent, readState, transact, request,
-  clock = Date.now, isAdministrator, peerQqs, onEpisode, isSourceAllowed = () => false, resolveImage } = {}) {
+  clock = Date.now, isAdministrator, peerQqs, onEpisode, isSourceAllowed = () => false, resolveImage,
+  isLowImpact = () => false, isOwnerReviewActor = () => false } = {}) {
   for (const dep of [capture, isCurrent, readState, transact, request, clock, isAdministrator, peerQqs])
     if (typeof dep !== "function") fail("QZONE_HOST_CONTRACT");
   if (typeof isSourceAllowed !== "function" || onEpisode !== undefined && typeof onEpisode !== "function") fail("QZONE_HOST_CONTRACT");
   if (resolveImage !== undefined && typeof resolveImage !== "function") fail("QZONE_HOST_CONTRACT");
+  if ([isLowImpact, isOwnerReviewActor].some(fn => typeof fn !== "function")) fail("QZONE_HOST_CONTRACT");
+  function attested(fn, ...args) {
+    try {
+      const result = fn(...args);
+      if (types.isPromise(result)) Promise.prototype.then.call(result, undefined, () => {});
+      return result === true;
+    } catch { return false; }
+  }
   const contexts = new WeakMap(), leases = new Map(), targets = new Map(), attempted = new Set(), freshDrafts = new Map();
   const poisoned = new Set(); // Uncertain repository failures cannot be retried in this instance.
   const now = () => {
@@ -188,6 +211,7 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
     return structuredClone({ id: row.id, kind: row.kind, revision: row.revision, status: row.status,
       content: row.content, source: row.source, audience: row.audience,
       images: imageRecords(row).map(image => image.id), containsPrivateContent: row.source?.kind === "private_qzone" ? true : null,
+      imageClaims: imageRecords(row).map(image => ({ ...image })), confirmationHash: confirmationFor(row),
       creationReason: row.creationReason || (row.kind === "publish" ? "管理员创建的文字草稿" : "管理员提交的互动提案"),
       protocolAccepted: row.protocolAccepted, clientVerified: row.clientVerified,
       ...(row.reason ? { reason: row.reason } : {}) });
@@ -197,11 +221,40 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
     const actions = [...QZONE_READ_ACTIONS, ...QZONE_WRITE_ACTIONS];
     return { enabled: c.policy.enabled, mode: c.policy.mode, current: isCurrent(ctx) === true,
       capabilities: Object.fromEntries(actions.map(a => [a, cap(b, c, a)])),
+      capabilityDescriptors: capabilityDescriptors(ctx),
       daily: { reads: counts.reads || 0, publish: counts.publish || 0, likes: counts.likes || 0, comments: counts.comments || 0 },
       drafts: Object.values(b?.drafts || {}).map(draftView),
       images: resolveImage ? { supported: true, maxCount: MAX_IMAGES }
         : { supported: false, reason: "QZONE_HOST_IMAGE_RESOLVER_REQUIRED" },
       destructive: { supported: false, reason: "QZONE_DESTRUCTIVE_NOT_IMPLEMENTED" } };
+  }
+  // Dynamic, read-only discovery for the parent Agent adapter. This does not
+  // probe writes, allocate claims, resolve images or grant model tool authority.
+  // Unknown support must be bootstrapped by an explicitly reviewed real action,
+  // never a synthetic success or an automatic capability-test publication.
+  function capabilityDescriptors(ctx) {
+    const c = info(ctx), b = currentBook(ctx), current = isCurrent(ctx) === true, at = now();
+    return ["publish", "like", "comment"].map(kind => {
+      const action = actionFor(kind), section = sectionFor(kind), support = cap(b, c, action);
+      const enabled = current && c.policy.enabled && c.policy[section].enabled && c.policy.mode !== "draft_only";
+      const actualSupport = support === "supported" && b?.capabilities[action]?.writeSettled === true;
+      const standingAuthority = enabled && c.policy.mode === "scoped_autonomy" && c.policy.autonomy.enabled;
+      const remainingDaily = Math.max(0, c.policy[section].maxDaily - (b?.days[day(at)]?.[section] || 0));
+      const last = b?.lastWriteAt[section], cooldownAvailable = last == null
+        || at >= last && at - last >= c.policy[section].cooldownMs;
+      const inFlight = Object.values(b?.drafts || {}).some(r => r.kind === kind && r.claimId
+        && r.wireSettledAt == null && r.recoveredAt == null);
+      return { kind, action, support, actualSupport, enabled, standingAuthority,
+        autonomous: standingAuthority && actualSupport && remainingDaily > 0 && cooldownAvailable && !inFlight,
+        remainingDaily, cooldownAvailable, inFlight,
+        requiresCandidateCheck: true, reviewTransport: c.policy.reviewTransport || "console",
+        allowedAudiences: [...c.policy.allowedAudiences], defaultAudience: c.policy.ugcRight,
+        maxContentLength: c.policy.autonomy.maxContentLength,
+        images: { resolverAvailable: typeof resolveImage === "function", maxCount: MAX_IMAGES },
+        reason: !enabled ? "QZONE_WRITE_DISABLED" : !actualSupport ? "QZONE_ACTUAL_SUPPORT_REQUIRED"
+          : !standingAuthority ? "QZONE_APPROVAL_REQUIRED" : !remainingDaily || !cooldownAvailable ? "QZONE_BUDGET_OR_COOLDOWN"
+            : inFlight ? "QZONE_WRITE_IN_FLIGHT" : "QZONE_LOW_IMPACT_CHECK_REQUIRED" };
+    });
   }
   function open(accountId) {
     if (!safeId(accountId)) fail("QZONE_ACCOUNT");
@@ -437,7 +490,12 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
   }
   async function transition(ctx, id, revision, actor, next) {
     const c = guard(ctx); admin(ctx, actor);
+    const reviewAuthority = row => {
+      if (next === "approved" && c.policy.reviewTransport === "qq_owner"
+        && !attested(isOwnerReviewActor, ctx, actor, freeze(draftView(row)))) fail("QZONE_OWNER_QQ_CONFIRM_REQUIRED");
+    };
     const original = rowFor(currentBook(ctx), id);
+    reviewAuthority(original);
     const confirmation = next === "approved" ? confirmationFor(original) : null;
     if (next === "approved") checkImages(ctx, original);
     let sourceProof;
@@ -455,6 +513,7 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
     await transact(root => {
       guard(ctx); admin(ctx, actor);
       const row = rowFor(book(root, c), id); cas(row, revision);
+      reviewAuthority(row);
       if (confirmation !== null && confirmationFor(row) !== confirmation) fail("QZONE_CONFIRMATION_CHANGED");
       checkSource(row);
       if (next === "review" ? row.status !== "draft" : !["review", "approved"].includes(row.status)) fail("QZONE_TRANSITION");
@@ -462,6 +521,7 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
     });
     guard(ctx); admin(ctx, actor);
     const row = rowFor(currentBook(ctx), id);
+    reviewAuthority(row);
     if (row.revision !== revision + 1 || row.status !== next) fail("QZONE_REVISION");
     checkSource(row);
     if (next === "approved") {
@@ -483,6 +543,7 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
     const support = cap(b, c, action);
     if (["unsupported", "temporarily_unavailable"].includes(support)) fail("QZONE_UNSUPPORTED");
     if (row.kind === "publish" && !c.policy.allowedAudiences.includes(row.audience)) fail("QZONE_AUDIENCE");
+    if (row.kind === "publish" && !["admin_topic", "public_information"].includes(row.source.kind)) fail("QZONE_SOURCE");
     if (row.source.kind === "public_information") {
       const fresh = freshDrafts.get(row.id);
       if (fresh?.ctx !== ctx || fresh.source.kind !== row.source.kind || fresh.source.ref !== row.source.ref
@@ -497,14 +558,21 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
       && lease.revision === row.revision - (claimed ? 1 : 0);
     if (reviewed) {
       admin(ctx, lease.actor); // Explicit reviewed operation may bootstrap unknown.
+      if (c.policy.reviewTransport === "qq_owner" && !attested(isOwnerReviewActor, ctx, actor, freeze(draftView(row))))
+        fail("QZONE_OWNER_QQ_CONFIRM_REQUIRED");
       return;
     }
     const proof = b?.capabilities[action];
-    if (c.policy.mode !== "scoped_autonomy" || !c.policy.autonomy.enabled || row.kind !== "publish"
-      || freshDrafts.get(row.id)?.ctx !== ctx || imageRecords(row).length || row.audience === 1 || support !== "supported" || proof?.writeSettled !== true
-      || row.content.length > c.policy.autonomy.maxContentLength
-      || !c.policy.autonomy.sources.some(s => s.kind === row.source.kind && s.ref === row.source.ref && s.content === row.content))
+    if (c.policy.mode !== "scoped_autonomy" || !c.policy.autonomy.enabled
+      || freshDrafts.get(row.id)?.ctx !== ctx || support !== "supported" || proof?.writeSettled !== true
+      || row.content.length > c.policy.autonomy.maxContentLength)
       fail("QZONE_APPROVAL_REQUIRED");
+    // Legacy exact-text grants stay compatible. New creative/image/interaction
+    // authority requires a synchronous HOST assessment of this exact immutable
+    // view, not a boolean supplied by model prose. Called again at queued wire.
+    const legacy = row.kind === "publish" && !imageRecords(row).length && row.audience !== 1
+      && c.policy.autonomy.sources.some(s => s.kind === row.source.kind && s.ref === row.source.ref && s.content === row.content);
+    if (!legacy && !attested(isLowImpact, ctx, freeze(draftView(row)))) fail("QZONE_APPROVAL_REQUIRED");
   }
   async function publish(ctx, id, expectedRevision, options = {}) {
     exact(options, ["signal", "actor"]);
@@ -641,6 +709,6 @@ export function createQzoneRuntime({ capture, isCurrent, readState, transact, re
     });
     return { recovered: result.recovered, automaticResume: false };
   }
-  return Object.freeze({ open, status, readFeeds, readOwn, createDraft, submitReview, approve,
+  return Object.freeze({ open, status, capabilityDescriptors, readFeeds, readOwn, createDraft, submitReview, approve,
     approveInteraction: approve, publish, proposeInteraction, verifyPublish, cancel, recover });
 }
