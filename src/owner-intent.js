@@ -135,7 +135,8 @@ function pairFromTokens(tokens, context) {
       const asGroup = matchTarget(tokens[0], context);
       if (asGroup.status === 'unknown' && matchAccount(tokens[0], context).status === 'unknown') return acct;
     } else {
-      const found = matchTarget(tokens[1], context);
+      const found = matchTarget(tokens[1], { ...context,
+        targets: context.targets.filter(row => row.accountId === acct.value.id) });
       if (found.status === 'ok' && found.value.accountId === acct.value.id) return { ok: true, target: found.value };
       if (found.status === 'ok') return { ok: false, ...clarify('OWNER_TARGET_AMBIGUOUS',
         '该群不属于这个账号，请说明允许的账号和QQ群。', [`${found.value.accountId}:${found.value.groupId}`]) };
@@ -220,11 +221,24 @@ function destinationPrefix(remainder, context) {
 
 /** Destinations from "@account group rest" tokens, else the longest authorized prefix. */
 function destinationThen(remainder, context) {
+  // Explicit account ownership wins over the ingress bot/recent destination.
+  // These words describe syntax, not new authority: resolve only in this
+  // account's existing, host-filtered target set before parsing the payload.
+  const addressed = /^(.{1,80}?)\s*账号\s*(?:给|向)\s*(.+)$/u.exec(remainder);
+  if (addressed) {
+    const acct = account(addressed[1].trim(), context);
+    if (!acct.ok) return { ok: false, clarify: acct.clarify };
+    const scoped = { ...context, targets: context.targets.filter(row => row.accountId === acct.value.id) };
+    const destination = addressed[2].replace(/^(?:测试群|QQ群|群号|群)\s*(?=[1-9]\d{4,19}(?:\s|群|发|发送|说|讲|安静|静默|$))/u, '');
+    const found = destinationPrefix(destination, scoped);
+    return found.ok ? found : { ok: false, clarify: found.clarify || clarify('OWNER_TARGET_REQUIRED', TARGET_QUESTION).clarify };
+  }
   const tokens = remainder.split(/\s+/u);
   if (tokens.length >= 3) {
     const acct = matchAccount(tokens[0], context);
     if (acct.status === 'ok') {
-      const found = matchTarget(tokens[1], context);
+      const found = matchTarget(tokens[1], { ...context,
+        targets: context.targets.filter(row => row.accountId === acct.value.id) });
       const consumed = remainder.slice(tokens[0].length).replace(/^\s+/u, '');
       const rest = consumed.slice(tokens[1].length).replace(/^[\s:：,，]+/u, '');
       if (found.status === 'ok' && found.value.accountId === acct.value.id) return { ok: true, target: found.value, rest };
@@ -442,7 +456,7 @@ export function parseOwnerWriteUtterance(text, context) {
 
   // Destination-first forms: <lead><destination><verb><payload>.
   if (!LEAD.test(body)) return null;
-  const remainder = body.replace(/^(?:给|向|在|对|让|把|去|到)/u, '');
+  const remainder = body.replace(/^(?:给|向|在|对|让|把|去|到)/u, '').trimStart();
   const found = destinationThen(remainder, context);
   if (!found.ok) {
     // A write verb without a resolvable, already-allowed destination must ask.

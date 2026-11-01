@@ -663,7 +663,7 @@ try {
     const annotation0sentCount = memorySnapshot().socialExpressionAssets.bots['account:primary']
       .stickers['fixture-sticker'].annotations['group:20002'].sentCount;
     const callsBeforeSticker = calls(), repliesBeforeSticker = privateReplies.length;
-    ownerMessage(1402, '去20002群发一个开心的表情包。');
+    ownerMessage(1402, '让 primary 账号给测试群 20002 发一张开心的表情包');
     await until(() => privateReplies.length === repliesBeforeSticker + 1, 'owner sticker private acknowledgment', 15000);
     const stickerReply = replyText(privateReplies.at(-1));
     assert.match(stickerReply, /^已核实/, `qualified sticker send is readback-verified: ${stickerReply}`);

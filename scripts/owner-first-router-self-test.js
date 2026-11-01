@@ -214,6 +214,22 @@ for (const [text, action, expected] of queryCases) {
     'a stale/non-context object is not a resolution context');
 
   // Write grammar coverage.
+  for (const text of ['让 alpha 账号给测试群 31001 发一张开心的表情包',
+    '请让alpha账号向QQ群31001发一张开心的表情包', '让alpha账号给开发群发一张开心的表情包',
+    '让阿法账号给群号31001发一张开心的表情包'])
+    deep(resolve(text)?.intent, { action:'send_sticker', accountId:'alpha', groupId:'31001', query:'开心' },
+      'explicit account + natural destination wrappers reuse qualified sticker intent');
+  equal(resolve('让不存在账号给测试群31001发一张开心的表情包')?.clarify?.code, 'OWNER_ACCOUNT_REQUIRED',
+    'unknown explicit account cannot fall through to a recent target');
+  equal(resolveOwnerUtterance('让主号账号给测试群31001发一张开心的表情包', dupAccount)?.clarify?.code,
+    'OWNER_ACCOUNT_AMBIGUOUS', 'duplicate account names remain an explicit clarification');
+  equal(resolve('让beta账号给测试群31001发一张开心的表情包')?.clarify?.code, 'OWNER_TARGET_REQUIRED',
+    'another account cannot borrow an allowed destination');
+  const sharedExplicit = { ...noRecentSame, currentAccountId:'alpha' };
+  for (const text of ['让 beta 账号给群31001发一张开心的表情包', '给 beta 31001 发个表情 开心', '发个表情 beta 31001 开心'])
+    deep(resolveOwnerUtterance(text, sharedExplicit)?.intent,
+      { action:'send_sticker', accountId:'beta', groupId:'31001', query:'开心' },
+      'explicit peer wins over the ingress account for a shared group');
   deep(resolve('去31001群发一个开心的表情包。')?.intent,
     { action:'send_sticker', accountId:'alpha', groupId:'31001', query:'开心' }, 'natural adjective before sticker noun');
   deep(resolve('给开发群发张惊讶的表情')?.intent,

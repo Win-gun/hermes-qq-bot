@@ -303,8 +303,27 @@ async function runElectronSmoke() {
         }
       }
     }
+    // Exercise the actual sandbox preload again on reload, not just the first
+    // navigation. A successful HTTP health check cannot prove a renderer loaded.
+    for (let reload = 0; reload < 2; reload++) {
+      const loaded = new Promise((resolve, reject) => {
+        const finished = () => { cleanup(); resolve(); };
+        const failed = (_event, code) => { cleanup(); reject(new Error(`reload failed: ${code}`)); };
+        const cleanup = () => {
+          window.webContents.removeListener("did-finish-load", finished);
+          window.webContents.removeListener("did-fail-load", failed);
+        };
+        window.webContents.once("did-finish-load", finished);
+        window.webContents.once("did-fail-load", failed);
+      });
+      window.webContents.reload();
+      await loaded;
+      assert.equal(await evaluate('Boolean(document.body && document.body.textContent.trim())'), true);
+      assert.equal(await evaluate('window.hermesQQ.getTheme().theme'), "system");
+      assert.ok(["dark", "light"].includes(await evaluate('document.documentElement.dataset.theme')));
+    }
     assert.match(await evaluate('window.hermesQQ.setTheme({theme:"dark"}).then(() => "accepted", error => error.message)'), /invalid desktop theme/);
-    console.log(JSON.stringify({ ok: true, electronSmoke: true, sharedAssetsPresent, screenshots, bridgeStarted: false, liveDataTouched: false }));
+    console.log(JSON.stringify({ ok: true, electronSmoke: true, reloads: 2, sharedAssetsPresent, screenshots, bridgeStarted: false, liveDataTouched: false }));
   } finally {
     clearTimeout(timeout);
     window?.destroy();
