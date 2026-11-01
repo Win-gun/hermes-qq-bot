@@ -5,6 +5,7 @@ import { officialMimoSearchEndpoint, parseMimoSearchResponse, searchWithMimoPlug
 import { normalizeApiCenter, resolveApiCapability } from "../src/api-center.js";
 import { configForAccountCapabilities } from "../src/bot-capabilities.js";
 import { registryConfig } from "../src/account-registry.js";
+import { resolveModelCredential } from "../src/model-credentials.js";
 
 assert.equal(officialMimoSearchEndpoint(), "https://api.xiaomimimo.com/v1/chat/completions");
 assert.throws(() => officialMimoSearchEndpoint("https://example.test/v1"), /官方 API/);
@@ -182,6 +183,10 @@ const calls = [];
 const invocations = [];
 const bridgeSearch = vm.runInNewContext(`${bridgeSource.slice(searchStart, searchEnd)}\nwebSearch;`, {
   normalizeApiCenter, resolveApiCapability,
+  resolveModelCredential: (ai, options) => resolveModelCredential(ai, { ...options,
+    env: { [ai.apiKeyEnv]: `fixture-only-${ai.apiKeyEnv}` },
+    read: () => assert.fail("synthetic environment credential must not read a profile"),
+    stat: () => assert.fail("synthetic environment credential must not inspect a profile") }),
   getApiSecret: () => assert.fail("regression must not read Keychain"),
   getVoiceSecret: () => assert.fail("regression must not read legacy Keychain"),
   voiceApiEnvironment: ({ apiKeyEnv }) => ({ [apiKeyEnv]: `fixture-only-${apiKeyEnv}` }),

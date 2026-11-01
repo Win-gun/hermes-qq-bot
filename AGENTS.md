@@ -323,6 +323,20 @@ arrays must not bypass confidence or correction gates. Durable memory is not a
 FIFO cache. Background archive search must not fall back to a synchronous cold
 index build on the reply thread.
 
+Autonomous Social Life 3.5 is tracked in `docs/AUTONOMOUS-SOCIAL-LIFE-3.5.md`.
+Continue to use the existing Social Agent, TaskRuntime, MemoryRuntime and final
+OneBot delivery gate. Dynamic capability descriptions are not authority. Owner
+guidance is evidence/version-bound; group reviewers cannot create global rules.
+An exact owner content grant does not broaden autonomous conversation scopes.
+Tool-lifetime signals expire on return: reopen content context for a later tool,
+never reuse a prepared offer's stale guard. Private QZone observations taint a
+delegation durably; do not deliver its private goal/results to the target group.
+Legacy people reconstruction uses a read-only source worker and the same writer;
+semantic models cannot fabricate historical Bot ownership or raise evidence tiers.
+Use selected-connection credentials consistently; no cross-provider/profile key
+borrowing or silent fallback. Run `npm run test:autonomous-social` and actual
+bridge integration regressions; these are not live QQ or human effect acceptance.
+
 ## Task mode and reviewer rules
 
 - Formal tasks are stored under `data/tasks/<taskId>/` with `task.json`, `events.jsonl`, and `outputs/`.

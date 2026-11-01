@@ -7,6 +7,7 @@ import http from "node:http";
 import { spawn } from "node:child_process";
 import WebSocket from "ws";
 import { registryConfig } from "../src/account-registry.js";
+import { readMemorySnapshot } from "../src/memory-repository.js";
 
 // Disposable HOME, two fake OneBots, no model endpoint and no real QQ calls.
 const root = path.resolve(import.meta.dirname, ".."), home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "hermes-sl31-")));
@@ -54,6 +55,7 @@ try {
     config[key] = { ...config[key], enabled: false };
   config.memory.aiExtraction.enabled = false; config.memory.learning = { enabled: false };
   config.socialAgent = { enabled: false }; config.dailyMessages = { enabled: false, schedules: [] }; delete config.hourlyChat;
+  config.autonomousSocial = { version: 1, enabled: false, guidance: false, delegation: false, reconstruction: false };
   config.privateChats = { ...config.privateChats, enabled: true, ownerUserIds: ["93001"], targetUserIds: ["93001"] };
   config.responseQueue = { ...config.responseQueue, minDelayMs: 0 };
   config.accounts = { version: 2, failoverGroups: [], topology: "function_split", diagnostics: { enabled: false, peerPingEnabled: false },
@@ -65,7 +67,7 @@ try {
       socialExperience: { enabled: id === "alpha", shadowMode: false, conversationIds: ["group:810001"],
         expression: { enabled: true }, pokes: { enabled: true } },
       ...(id === "alpha" ? { qzone: { enabled: true, mode: "reviewed", reads: { feeds: true, own: true, cooldownMs: 0 },
-        publish: { enabled: true, cooldownMs: 0 }, likes: { enabled: true, cooldownMs: 0 }, comments: { enabled: true, cooldownMs: 0 } } } : {}) })) };
+        publish: { enabled: true, maxDaily: 5, cooldownMs: 0 }, likes: { enabled: true, cooldownMs: 0 }, comments: { enabled: true, cooldownMs: 0 } } } : {}) })) };
   fs.writeFileSync(path.join(home, "config.json"), JSON.stringify(registryConfig(config, { strict: true })));
   child = spawn(process.execPath, [path.join(root, "src/bridge.js")], { cwd: root, env: {
     HOME: home, TMPDIR: path.join(home, "tmp"), PATH: `${path.join(home, "bin")}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
@@ -93,6 +95,7 @@ try {
       if (request.action === "get_qzone_msg_list") data = { total: own.length, msglist: own };
       if (request.action === "send_group_msg") data = { message_id: 94001 };
       if (request.action === "send_private_msg") data = { message_id: 95000 + wire.length };
+      wire.at(-1).receipt = structuredClone(data);
       ws.send(JSON.stringify({ status: "ok", retcode: 0, echo: request.echo, data }));
     });
     await until(() => ws.readyState === 1);
@@ -194,25 +197,48 @@ try {
   check(createdForOwner.status === 200, `owner draft creation/preview ${createdForOwner.data.code}`);
   const previewWire = wire.filter(x => x.action === "send_private_msg").at(-1);
   const previewText = previewWire?.params.message?.[0]?.data?.text;
-  const reviewToken = previewText?.match(/qzone confirm ([a-f0-9]{32})/)?.[1];
   check(previewWire?.account === 0 && String(previewWire.params.user_id) === "93001"
-    && previewText.includes("公开素材的独立空间预览") && reviewToken, "exact body and confirmation token reach verified owner private chat");
+    && previewText.includes("公开素材的独立空间预览") && /引用.*发吧.*不发了/u.test(previewText), "exact body and natural quoted decisions reach verified owner private chat");
+  check(!/qzone confirm [a-f0-9]{32}/.test(previewText), "the owner is not required to copy a token");
   const ownerDraft = createdForOwner.data.result;
   check((await api(`${pathA}/approve`, "POST", { expectedRevision: reviewView.revision,
     id: ownerDraft.id, draftRevision: ownerDraft.revision })).data.code === "QZONE_OWNER_QQ_CONFIRM_REQUIRED", "console cannot bypass QQ review");
-  const ownerEvent = (userId, selfId, messageId) => ({ post_type: "message", message_type: "private", sub_type: "friend",
+  check((await api(`${pathA}/publish`, "POST", { expectedRevision: reviewView.revision,
+    id: ownerDraft.id, draftRevision: ownerDraft.revision })).data.code === "QZONE_OWNER_QQ_CONFIRM_REQUIRED", "console publishing also cannot bypass QQ review");
+  const ownerEvent = (userId, selfId, messageId, replyId = previewWire.receipt.message_id, text = "发吧") => ({ post_type: "message", message_type: "private", sub_type: "friend",
     self_id: selfId, user_id: userId, message_id: messageId, time: Math.floor(Date.now() / 1000),
-    raw_message: `/bot qzone confirm ${reviewToken}`, message: [{ type: "text", data: { text: `/bot qzone confirm ${reviewToken}` } }],
+    raw_message: `[CQ:reply,id=${replyId}]${text}`, message: [{ type: "reply", data: { id: String(replyId) } }, { type: "text", data: { text } }],
     sender: { user_id: userId, nickname: "Fixture owner" } });
   sockets[1].send(JSON.stringify(ownerEvent(93001, 91002, 96101)));
   await pause(250);
-  check(wire.filter(x => x.action === "send_qzone_msg").length === 1, "another account cannot consume owner token");
+  check(wire.filter(x => x.action === "send_qzone_msg").length === 1, "another account cannot consume owner preview");
+  sockets[0].send(JSON.stringify(ownerEvent(93001, 91001, 96104, 99999)));
+  await until(() => wire.filter(x => x.action === "send_private_msg").some(x => JSON.stringify(x.params).includes("QZONE_REVIEW_EXPIRED_OR_CHANGED")));
+  check(wire.filter(x => x.action === "send_qzone_msg").length === 1, "a quoted unrelated message cannot approve the draft");
   sockets[0].send(JSON.stringify(ownerEvent(93001, 91001, 96102)));
   await until(() => wire.filter(x => x.action === "send_qzone_msg").length === 2);
   check(wire.filter(x => x.action === "send_qzone_msg").at(-1).params.content === "公开素材的独立空间预览", "owner confirmation executes exact reviewed body once");
+  await until(() => Object.values(readMemorySnapshot(path.join(home, "data/memory.json")).qzoneOwnerReviews.records)
+    .some(row => row.draftId === ownerDraft.id && row.status === "accepted"));
+  const ownerRecord = Object.values(readMemorySnapshot(path.join(home, "data/memory.json")).qzoneOwnerReviews.records).find(row => row.draftId === ownerDraft.id);
+  check(ownerRecord.previewMessageId === String(previewWire.receipt.message_id) && ownerRecord.draftRevision === ownerDraft.revision,
+    "durable review binds the actual preview ACK and exact draft version");
   sockets[0].send(JSON.stringify(ownerEvent(93001, 91001, 96103)));
   await pause(350);
   check(wire.filter(x => x.action === "send_qzone_msg").length === 2, "duplicate owner confirmation never republishes");
+  const legacyView = (await api(pathA)).data;
+  const legacyDraft = await api(`${pathA}/create-draft`, "POST", { expectedRevision: legacyView.revision,
+    content: "旧确认命令兼容验证", source: { kind: "admin_topic", ref: "legacy-owner-topic" } });
+  check(legacyDraft.status === 200, "legacy-compatible draft has a real private preview");
+  const legacyRecord = Object.values(readMemorySnapshot(path.join(home, "data/memory.json")).qzoneOwnerReviews.records)
+    .find(row => row.draftId === legacyDraft.data.result.id);
+  check(legacyRecord.status === "awaiting_owner" && /^[a-f0-9]{32}$/.test(legacyRecord.token), "legacy token remains a durable single-use reference");
+  const legacyText = `/bot qzone confirm ${legacyRecord.token}`;
+  const legacyEvent = { ...ownerEvent(93001, 91001, 96105), raw_message: legacyText, message: [{ type: "text", data: { text: legacyText } }] };
+  sockets[0].send(JSON.stringify(legacyEvent)); await until(() => wire.filter(x => x.action === "send_qzone_msg").length === 3);
+  check(wire.filter(x => x.action === "send_qzone_msg").at(-1).params.content === "旧确认命令兼容验证", "legacy token uses the actual reviewed actor and exact content");
+  sockets[0].send(JSON.stringify({ ...legacyEvent, message_id: 96106 })); await pause(350);
+  check(wire.filter(x => x.action === "send_qzone_msg").length === 3, "legacy confirmation cannot replay");
   const beforeVision = (await api("/api/config")).data;
   const visionSave = await api("/api/config", "PATCH", { expectedRevision: beforeVision.revision,
     vision: { enabled: true, preferChatModel: true } });

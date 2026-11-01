@@ -168,6 +168,12 @@ requiredReleaseFiles.push(
   "docs/SOCIAL-AGENCY-3.2.md",
   "docs/OWNER-FIRST-3.4.md"
 );
+requiredReleaseFiles.push(
+  "src/model-credentials.js", "src/public-sticker-resolver.js",
+  "src/owner-guidance.js", "src/social-delegation.js", "src/owner-social-controller.js",
+  "src/autonomous-social-migration.js", "src/people-memory-reconstruction.js", "src/people-reconstruction-host.js",
+  "docs/AUTONOMOUS-SOCIAL-LIFE-3.5.md"
+);
 
 export const releaseFiles = Object.freeze(requiredReleaseFiles);
 

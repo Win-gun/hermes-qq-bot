@@ -14,9 +14,14 @@ import { personMemoryContext, recordPersonEvidence } from "../src/people-memory.
 import { readMemorySnapshot } from "../src/memory-repository.js";
 import { ownerDirectiveAllows, putOwnerDirective, revokeOwnerDirective } from "../src/owner-authority.js";
 import { accountDeliveryDecision, GroupSendCoordinator } from "../src/account-delivery.js";
+import { createHash } from "node:crypto";
+import { applyOwnerGuidance, getOwnerGuidance, ownerGuidanceAllows } from "../src/owner-guidance.js";
 
 assert.equal(Number(process.versions.node.split(".")[0]), 22, "Use Node 22 for this fixture");
-const root = path.resolve(import.meta.dirname, ".."), home = fs.mkdtempSync(path.join(os.tmpdir(), "people-owner-bridge-"));
+// Reconstruction canonicalizes cache ancestors. On macOS /var and /private/var
+// alias the same directory; compare against the canonical disposable HOME, not
+// a wider allowlist. All outside-root reads/writes remain denied and logged.
+const root = path.resolve(import.meta.dirname, ".."), home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "people-owner-bridge-")));
 const memoryFile = path.join(home, "data", "memory.json"), guardLog = path.join(home, "guard.jsonl");
 const preload = path.join(home, "deny-preload.cjs"), DAY = 86_400_000, OWNER = "21001", PERSON = "22001";
 const PUBLIC = "PUBLIC_ALPHA_PERSON_FIXTURE", BETA = "PUBLIC_BETA_PERSON_FIXTURE", PRIVATE = "PRIVATE_PERSON_ONLY_FIXTURE";
@@ -201,19 +206,19 @@ function writePreload(ports) {
 const fs=require('node:fs'),cp=require('node:child_process'),net=require('node:net'),tls=require('node:tls'),dns=require('node:dns'),path=require('node:path'),mod=require('node:module');
 const home=${JSON.stringify(home)},root=${JSON.stringify(root)},allowed=new Set(${JSON.stringify(ports)});
 const rawAppend=fs.appendFileSync.bind(fs);
-function record(type,code){rawAppend(${JSON.stringify(guardLog)},JSON.stringify({type,code})+'\\n');}
-function denied(type,code){record(type,code);throw Object.assign(new Error(code),{code});}
+function record(type,code,detail={}){rawAppend(${JSON.stringify(guardLog)},JSON.stringify({type,code,...detail})+'\\n');}
+function denied(type,code,detail){record(type,code,detail);throw Object.assign(new Error(code),{code});}
 function filePath(v){if(typeof v==='number')return null;if(v instanceof URL)v=require('node:url').fileURLToPath(v);return path.resolve(String(v));}
-function access(v,write){const p=filePath(v);if(p===null)return;const local=p===home||p.startsWith(home+path.sep);
+function access(v,write,method){const p=filePath(v);if(p===null)return;const local=p===home||p.startsWith(home+path.sep);
  const source=p===root||p.startsWith(root+path.sep);const relative=path.relative(root,p);
  const runtime=/^(?:config\\.json(?:\\.|$)|data(?:\\/|$)|logs(?:\\/|$)|secrets(?:\\/|$)|napcat[^/]*(?:\\/|$)|snowluma[^/]*(?:\\/|$))/.test(relative);
- if(write?!local:(!local&&!(source&&!runtime)&&p!=='/dev/null'))denied('filesystem',write?'FIXTURE_WRITE_OUTSIDE_HOME':'FIXTURE_READ_OUTSIDE_SAFE_ROOTS');}
+ if(write?!local:(!local&&!(source&&!runtime)&&p!=='/dev/null'))denied('filesystem',write?'FIXTURE_WRITE_OUTSIDE_HOME':'FIXTURE_READ_OUTSIDE_SAFE_ROOTS',{method,path:p});}
 // Linux's backend attests only procfs existence during construction. Permit
 // that exact metadata probe, never listing/reading procfs or opening its FDs.
-for(const name of ['readFileSync','readFile','existsSync','statSync','lstatSync','accessSync','readdirSync','createReadStream']){const old=fs[name];fs[name]=function(file,...args){if(process.platform==='linux'&&name==='existsSync'&&filePath(file)==='/proc/self/fd'){record('platformProbe','PROC_FD_EXISTS');return old.call(this,file,...args);}access(file,false);return old.call(this,file,...args);};}
-for(const name of ['writeFileSync','writeFile','appendFileSync','appendFile','mkdirSync','mkdir','rmSync','rm','unlinkSync','unlink','rmdirSync','rmdir','createWriteStream','chmodSync','chmod','utimesSync']){const old=fs[name];if(old)fs[name]=function(file,...args){access(file,true);return old.call(this,file,...args);};}
-for(const name of ['renameSync','rename','linkSync','link','copyFileSync','copyFile']){const old=fs[name];fs[name]=function(a,b,...args){access(a,true);access(b,true);return old.call(this,a,b,...args);};}
-for(const name of ['openSync','open']){const old=fs[name];fs[name]=function(file,flags,...args){access(file,typeof flags==='number'?flags!==0:/[wa+]/.test(String(flags)));return old.call(this,file,flags,...args);};}
+for(const name of ['readFileSync','readFile','existsSync','statSync','lstatSync','accessSync','readdirSync','createReadStream']){const old=fs[name];fs[name]=function(file,...args){if(process.platform==='linux'&&name==='existsSync'&&filePath(file)==='/proc/self/fd'){record('platformProbe','PROC_FD_EXISTS');return old.call(this,file,...args);}access(file,false,name);return old.call(this,file,...args);};}
+for(const name of ['writeFileSync','writeFile','appendFileSync','appendFile','mkdirSync','mkdir','rmSync','rm','unlinkSync','unlink','rmdirSync','rmdir','createWriteStream','chmodSync','chmod','utimesSync']){const old=fs[name];if(old)fs[name]=function(file,...args){access(file,true,name);return old.call(this,file,...args);};}
+for(const name of ['renameSync','rename','linkSync','link','copyFileSync','copyFile']){const old=fs[name];fs[name]=function(a,b,...args){access(a,true,name+':source');access(b,true,name+':destination');return old.call(this,a,b,...args);};}
+for(const name of ['openSync','open']){const old=fs[name];fs[name]=function(file,flags,...args){access(file,typeof flags==='number'?flags!==0:/[wa+]/.test(String(flags)),name);return old.call(this,file,flags,...args);};}
 cp.spawnSync=function(command){record('spawnSyncDenied',path.basename(String(command)));return{status:1,stdout:'',stderr:'FIXTURE_PROCESS_DENIED'};};
 for(const name of ['spawn','exec','execFile','execSync','execFileSync','fork'])cp[name]=function(command){return denied('process','FIXTURE_PROCESS_DENIED:'+name+':'+path.basename(String(command)));};
 function connection(args){let opt=args[0];if(Array.isArray(opt))opt=opt[0];if(typeof opt==='number')opt={port:opt,host:typeof args[1]==='string'?args[1]:'127.0.0.1'};
@@ -248,10 +253,11 @@ function finalGateFixture() {
     oneBotBindingCurrent: (ws, binding) => ws.__hermesAccountId === binding.id && ws.__hermesSessionId === binding.sessionId,
     accountRuntimeContext: id => ({ accountId: id, logicalBotId: `account:${id}` }),
     accountRuntimeContextCurrent: (context, ws) => context.accountId === ws.__hermesAccountId,
-    ownerDirectiveAllows, logicalBotId: (_config, id) => `account:${id}`, accountGroup: () => null,
+    ownerDirectiveAllows, ownerGuidanceAllows, logicalBotId: (_config, id) => `account:${id}`, accountGroup: () => null,
     accountById: (cfg, id) => cfg.accounts.items.find(account => account.id === id), accountStateById: () => ({}),
     diagnoseAccount: () => ({ routeState: "ONLINE" }), accountDeliveryDecision, accountIsSelected: () => true,
-    configForReplyAccount: account => account, isQuiet: () => false, warn: () => {}
+    configForReplyAccount: account => account,
+    isQuiet: (root, id) => Number(root.groups?.[id]?.settings?.quietUntil || 0) > Date.now(), warn: () => {}
   });
   new vm.Script(bridgeFunction("dispatchAccountAction", "validateAccountConfig")).runInContext(sandbox);
   function dispatch(id = "alpha", userId = 22002, groupId = 31001) {
@@ -264,7 +270,29 @@ function finalGateFixture() {
       groupId: "31001", userId: "22002", messageId: "fixture-final-gate", authorized: true, now: Date.now() });
     assert.equal(result.ok, true); return result;
   }
-  return { memory, runtime, coordinator, sandbox, peers, transmitted, dispatch, restrict };
+  let guidanceSerial = 0;
+  function guidance(operations, logicalBotId = "account:alpha") {
+    const now = Date.now(), text = `本次明确行为指导${++guidanceSerial}`;
+    const actor = { version: 1, verificationId: `guidance:${guidanceSerial}`, configRevision: "config:1", controlRevision: "control:1",
+      origin: "onebot", human: true, direct: true, actorUserId: OWNER, ownerUserId: OWNER, role: "owner",
+      logicalBotId, accountId: logicalBotId.split(":")[1], conversationId: `private:${OWNER}`,
+      messageId: `guidance-message:${guidanceSerial}`, sentAt: now, receivedAt: now,
+      textHash: createHash("sha256").update(text).digest("hex"), explicitlyMentioned: false, managementAddressed: false,
+      allowedScopes: [{ kind: "bot" }, { kind: "group", groupId: "31001" },
+        { kind: "member", groupId: "31001", userId: "22002" }] };
+    // Original immutable fixture event, not a role flag or permissive gate stub.
+    const original = JSON.stringify(actor);
+    const result = applyOwnerGuidance(memory, { actor, text, now,
+      expectedRevision: getOwnerGuidance(memory, { logicalBotId }).revision,
+      operations: operations.map(operation => ({ ...operation, evidence: text })),
+      verifyActor: candidate => JSON.stringify(candidate) === original });
+    assert.equal(result.ok, true, JSON.stringify(result)); return result;
+  }
+  const restrictGuidance = (scope = { kind: "member", groupId: "31001", userId: "22002" }) => guidance([
+    { op: "create", scope, field: "relationship", value: { poke: "off" } }
+  ]);
+  const setQuiet = () => { memory.groups = { "31001": { settings: { quietUntil: Date.now() + 60000 } } }; };
+  return { memory, runtime, coordinator, sandbox, peers, transmitted, dispatch, restrict, guidance, restrictGuidance, setQuiet };
 }
 function resultSummary() {
   return { ok: failures.length === 0, passed: completed.length, failed: failures.length, failures,
@@ -340,6 +368,8 @@ try {
   // not a disabled assertion: the center stays off because the owner said so,
   // and every other 3.4 surface still has to satisfy the unchanged checks.
   config.ownerFirst = { version: 1, optOuts: { ownerNotifications: true } };
+  if (process.env.PEOPLE_OWNER_35_MIGRATION_AUDIT !== "1")
+    config.autonomousSocial = { version: 1, enabled: false, guidance: false, delegation: false, reconstruction: false };
   config.ownerNotifications = { enabled: false };
   config.privateChats = { enabled: true, targetUsers: ["*"], ownerUserIds: [OWNER] };
   config.memory = { ...config.memory, people: { enabled: true }, verification: { enabled: false },
@@ -399,6 +429,36 @@ try {
     await assert.rejects(fixture.dispatch(), { code: "ACCOUNT_SEND_BLOCKED" });
     assert.equal(validations, 1); assert.equal(fixture.transmitted.length, 0);
   }, "src/bridge.js dispatchAccountAction final validate()");
+  await test("real guidance final gate isolates member/group/logical bot and bot-wide restrictions", async () => {
+    const member = finalGateFixture(); member.restrictGuidance();
+    await assert.rejects(member.dispatch(), { code: "ACCOUNT_SEND_BLOCKED" });
+    await member.dispatch("beta"); await member.dispatch("alpha", 22003); await member.dispatch("alpha", 22002, 31002);
+    assert.equal(member.transmitted.length, 3, "member guidance does not leak to a peer bot, member or group");
+    const bot = finalGateFixture(); bot.restrictGuidance({ kind: "bot" });
+    for (const [user, group] of [[22002, 31001], [22003, 31001], [22002, 31002]])
+      await assert.rejects(bot.dispatch("alpha", user, group), { code: "ACCOUNT_SEND_BLOCKED" });
+    await bot.dispatch("beta"); assert.equal(bot.transmitted.length, 1, "bot guidance belongs only to alpha");
+  }, "src/bridge.js dispatchAccountAction / src/owner-guidance.js ownerGuidanceAllows");
+  await test("guidance arriving in group queue blocks wire; revoke never replays it", async () => {
+    const f = finalGateFixture(); let release;
+    const blocker = f.coordinator.dispatch("31001", () => {}, () => new Promise(resolve => { release = resolve; }));
+    while (!release) await pause(1);
+    const blocked = assert.rejects(f.dispatch(), { code: "ACCOUNT_SEND_BLOCKED" });
+    const restriction = f.restrictGuidance(); release({}); await blocker; await blocked;
+    assert.equal(f.transmitted.length, 0);
+    f.guidance([{ op: "revoke", id: restriction.changes[0].id, expectedVersion: restriction.changes[0].version }]);
+    await pause(10); assert.equal(f.transmitted.length, 0, "revocation is not a replay queue");
+    await f.dispatch(); assert.equal(f.transmitted.length, 1, "only a fresh action can send");
+  }, "src/bridge.js final guidance gate / GroupSendCoordinator");
+  for (const late of ["guidance", "quiet"]) await test(`${late} installed in validation microtask blocks actual wire`, async () => {
+    const f = finalGateFixture(); let validations = 0;
+    f.sandbox.accountDeliveryDecision = (...args) => {
+      if (++validations === 1) queueMicrotask(() => late === "guidance" ? f.restrictGuidance() : f.setQuiet());
+      return accountDeliveryDecision(...args);
+    };
+    await assert.rejects(f.dispatch(), { code: "ACCOUNT_SEND_BLOCKED" }); assert.equal(f.transmitted.length, 0);
+    assert.equal(validations, late === "guidance" ? 1 : 2, "the final validation, not an earlier fixture refusal, blocks wire");
+  }, "src/bridge.js dispatchAccountAction final validate() / real guidance and quiet gates");
   await test("in-flight legacy notification is suppressed by enabled center at final send gate", async () => {
     const fixture = finalGateFixture(); let validations = 0;
     Object.assign(fixture.sandbox, { trimForGroup: text => text, asStringId: String,

@@ -5,7 +5,7 @@ import { botControlRevision, logicalBotId } from "../src/account-runtime.js";
 import { administerPersonMemory, personMemoryControl } from "../src/people-memory.js";
 import { createQzoneRuntime } from "../src/qzone-runtime.js";
 import { createQzoneOwnerReview } from "../src/qzone-owner-review.js";
-import { normalizeQzonePolicy } from "../src/qzone-policy.js";
+import { normalizeQzonePolicy, isQzoneSafeText } from "../src/qzone-policy.js";
 import { isQzoneAction, qzoneActionKind } from "../src/qzone-delivery.js";
 import { assertPublicIllustration } from "../src/public-illustration.js";
 
@@ -97,7 +97,7 @@ function qzoneFixture(initialMemory = { groups: {} }) {
       change: build => mutateMemory(memory, build) };
   `, {
     initialMemory: structuredClone(initialMemory), hooks, config, createHash, logicalBotId, botControlRevision,
-    normalizeQzonePolicy, createQzoneOwnerReview, isQzoneAction, qzoneActionKind, assertPublicIllustration,
+    normalizeQzonePolicy, isQzoneSafeText, createQzoneOwnerReview, isQzoneAction, qzoneActionKind, assertPublicIllustration,
     createQzoneRuntime: options => { runtimeOptions = options; return createQzoneRuntime(options); },
     oneBotAccounts: accounts, qzoneBindings: new WeakMap(),
     accountById: () => account, effectiveAccount: () => account,
@@ -125,19 +125,26 @@ function qzoneFixture(initialMemory = { groups: {} }) {
   const setQuiet = () => host.change(draft => {
     draft.groups[`qzone:${QQ}`] = { settings: { quietUntil: NOW + 3600000 } };
   });
-  async function offer() {
+  async function offer(extra = {}) {
     const zone = host.qzoneContext(ACCOUNT).ctx;
     const draft = await host.qzoneRuntime.createDraft(zone, { content: "合成公开主题正文",
-      audience: 64, source: { kind: "admin_topic", ref: "synthetic-topic" } }, host.qzoneAdminActor);
+      audience: 64, source: { kind: "admin_topic", ref: "synthetic-topic" }, ...extra }, host.qzoneAdminActor);
     assert.equal((await host.offerQzoneOwnerReview(zone, draft)).status, "accepted");
     const preview = wire.find(row => row.action === "send_private_msg");
     assert.equal(preview.params.user_id, OWNER);
     assert(preview.params.message[0].data.text.includes(draft.content));
-    const token = preview.params.message[0].data.text.match(/qzone confirm ([a-f0-9]{32})/)?.[1];
-    assert(token, "Real preview callback must provide its confirmation token");
-    const confirm = () => host.qzoneOwnerReview.handle(host.qzoneReviewContext(zone),
-      { private: true, verified: true, userId: OWNER }, `/bot qzone confirm ${token}`);
-    return { zone, draft, confirm, token };
+    const previewText = preview.params.message[0].data.text;
+    assert.match(previewText, /引用.*发吧.*不发了/u, "real preview offers natural quote decisions");
+    assert.doesNotMatch(previewText, /qzone confirm [a-f0-9]{32}/, "no manual token copying required");
+    const saved = Object.values(host.memory.qzoneOwnerReviews.records).find(row => row.draftId === draft.id);
+    assert.match(saved.token, /^[a-f0-9]{32}$/); assert.equal(saved.status, "awaiting_owner");
+    assert.equal(saved.draftRevision, draft.revision); assert.equal(saved.previewMessageId, "51001");
+    const event = overrides => ({ private: true, verified: true, userId: OWNER, accountId: ACCOUNT, logicalId: BOT,
+      actualQq: QQ, controlRevision: zone.revision, messageId: "52001", replyMessageId: saved.previewMessageId, ...overrides });
+    const confirm = (overrides = {}, text = "发吧") => host.qzoneOwnerReview.handle(host.qzoneReviewContext(zone), event(overrides), text);
+    const legacyConfirm = () => host.qzoneOwnerReview.handle(host.qzoneReviewContext(zone),
+      { private: true, verified: true, userId: OWNER }, `/bot qzone confirm ${saved.token}`);
+    return { zone, draft, confirm, legacyConfirm, token: saved.token, previewMessageId: saved.previewMessageId };
   }
   return { host, hooks, wire, requests, gateChecks, ws, setQuiet, offer, options: () => runtimeOptions,
     writes: () => wire.filter(row => row.action === "send_qzone_msg") };
@@ -188,6 +195,34 @@ try {
     assert.equal(f.writes()[0].params.ugc_right, review.draft.audience);
     assert.equal((await review.confirm()).status, "blocked");
     assert.equal(f.writes().length, 1);
+  });
+  await test("qzone: legacy token remains one-shot compatible with actual host actor", async () => {
+    const f = qzoneFixture(), review = await f.offer();
+    assert.equal((await review.legacyConfirm()).status, "accepted");
+    assert.equal((await review.legacyConfirm()).status, "blocked"); assert.equal(f.writes().length, 1);
+    assert.equal(f.host.qzoneOwnerActors.has(Object.freeze({ source: "qq-owner-review" })), false);
+  });
+  await test("qzone: console cannot bypass reviewed QQ approval", async () => {
+    const f = qzoneFixture(), review = await f.offer();
+    const row = await f.host.qzoneRuntime.submitReview(review.zone, review.draft.id, review.draft.revision, f.host.qzoneAdminActor);
+    await assert.rejects(() => f.host.qzoneRuntime.approve(review.zone, row.id, row.revision, f.host.qzoneAdminActor), /OWNER_QQ_CONFIRM_REQUIRED/);
+    assert.equal(f.writes().length, 0);
+    assert.equal((await review.confirm()).status, "blocked", "the old preview version cannot approve the newly submitted revision");
+  });
+  for (const overrides of [{ replyMessageId: "51002" }, { actualQq: "20002" }, { accountId: "other" },
+    { logicalId: "account:other" }, { controlRevision: "old" }, { private: false }, { verified: false }, { userId: PERSON }]) {
+    await test("qzone: natural quote rejects wrong message/actor/account/actual QQ/version", async () => {
+      const f = qzoneFixture(), review = await f.offer();
+      assert.equal((await review.confirm(overrides)).status, "blocked"); assert.equal(f.writes().length, 0);
+      assert.equal((await review.confirm()).status, "accepted", "invalid reference does not consume a valid preview");
+      assert.equal(f.writes().length, 1);
+    });
+  }
+  await test("qzone: natural rejection consumes exact preview without a send", async () => {
+    const f = qzoneFixture(), review = await f.offer();
+    assert.equal((await review.confirm({}, "不发了")).status, "confirmed");
+    assert.equal((await review.confirm()).status, "blocked"); assert.equal(f.writes().length, 0);
+    assert.equal(f.host.qzoneRuntime.status(review.zone).drafts[0].reason, "QZONE_CANCELLED_NO_RETRY");
   });
   await test("qzone: control change invalidates capture/current, even without identity changes", async () => {
     const f = qzoneFixture(), zone = f.host.qzoneContext(ACCOUNT).ctx;

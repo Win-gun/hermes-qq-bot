@@ -3569,6 +3569,8 @@
 
     function renderOverview() {
       const h = statusData?.health || {};
+      const storage = h.memoryStorage || statusData?.memoryStorage || desktopStatusData?.bridgeHealth?.memoryStorage;
+      const memoryBlocked = storage?.recoveryRequired === true || storage?.loaded === true && storage?.writable === false;
       const runtime = h.runtime || {};
       const independent = true;
       const enabledAccounts = accountRows().filter((item) => item.enabled !== false);
@@ -3587,7 +3589,7 @@
       const activeConnected = Boolean(activeAccount.connected ?? h.onebotConnected);
       const connectedCount = enabledAccounts.filter((item) => item.connected).length;
       const replyState = h.replyCoordinator || h.diagnostics?.replyCoordinator || {};
-      const needsAttention = independent ? Boolean(problemAccounts.length) : Boolean(needsLogin || !activeConnected || h.onebotStale || sendBad || messageInactive || primaryBad);
+      const needsAttention = memoryBlocked || (independent ? Boolean(problemAccounts.length) : Boolean(needsLogin || !activeConnected || h.onebotStale || sendBad || messageInactive || primaryBad));
       $("statLogin").innerHTML = independent
         ? `<span class="dot ${problemAccounts.length ? "bad" : "good"}"></span>${!enabledAccounts.length ? "机器人已停用" : problemAccounts.length ? `${problemAccounts.length} 个账号异常` : `${enabledAccounts.length} 个账号正常`}`
         : `<span class="dot ${needsLogin || sendBad || primaryBad ? "bad" : "good"}"></span>${needsLogin ? "需登录" : sendBad ? "发送失败" : primaryBad ? "主号异常" : "正常"}`;
@@ -3602,7 +3604,7 @@
       $("statModelHint").textContent = `provider: ${cfg?.ai?.provider || "未设置"} · timeout: ${fmtMs(cfg?.ai?.timeoutMs)}`;
       $("statMemory").textContent = `${memoryData?.groupCount ?? 0} 群`;
       const users = (memoryData?.groups || []).reduce((sum, g) => sum + Number(g.users || 0), 0);
-      $("statMemoryHint").textContent = `${users} 个成员档案 · ${cfg?.memory?.aiExtraction?.enabled === false ? "AI 记忆关闭" : "AI 记忆开启"}`;
+      $("statMemoryHint").textContent = `${users} 个成员档案 · ${memoryBlocked ? "写入已停止，需恢复" : cfg?.memory?.aiExtraction?.enabled === false ? "AI 记忆关闭" : "AI 记忆开启"}`;
       $("sideStatus").innerHTML = [
         independent ? statusPill(!problemAccounts.length, problemAccounts.length ? `${problemAccounts.length} 个账号需关注` : "QQ 正常") : statusPill(!needsLogin && !sendBad && !primaryBad, needsLogin ? "QQ 需登录" : sendBad ? "发送失败" : primaryBad ? "主号需关注" : "QQ 正常"),
         independent ? statusPill(connectedCount === enabledAccounts.length, `OneBot ${connectedCount}/${enabledAccounts.length} 已连`) : statusPill(Boolean(activeConnected && !h.onebotStale && !messageInactive), h.onebotStale ? "OneBot 卡住" : messageInactive ? "消息停滞" : activeConnected ? "OneBot 已连" : "OneBot 断开")
@@ -3612,7 +3614,8 @@
       const box = $("attentionBox");
       box.className = needsAttention ? "alert" : "success";
       const freshness = `最近消息：${runtime.lastOneBotMessagePreview || "暂无"}（${fmtAgo(runtime.lastOneBotMessageAt)}）`;
-      box.textContent = independent
+      box.textContent = memoryBlocked ? "记忆仓库处于只读保护，新的记忆、用量登记及依赖持久状态的动作不能继续；QQ 连接正常不代表机器人整体正常。请先备份并检查日志，再受控重启；不要重试结果不确定的发送。"
+        : independent
         ? problemAccounts.length
           ? `以下账号需分别处理：${problemAccounts.map((item) => `${item.displayName || item.id}：${item.statusReason || item.statusText || "连接异常"}`).join("；")}。请到账号状态页逐一检测。`
           : enabledAccounts.length ? `${enabledAccounts.length} 个账号独立工作，当前没有发现强异常。${freshness}` : "所有账号的机器人功能均已停用。"
@@ -7128,6 +7131,7 @@
       if (typeof socialUi !== "undefined") socialUi.sync();
       if (typeof discoveryUi !== "undefined") discoveryUi.sync();
       if (typeof peopleOwnerUi !== "undefined") peopleOwnerUi.syncAccounts();
+      if (typeof autonomousSocialUi !== "undefined") autonomousSocialUi.syncAccounts();
       for (const page of ["qa", "vision", "voice"]) {
         const host = document.querySelector(`[data-registry-context="${page}"]`); if (!host) continue;
         if (page === "qa") host.hidden = activeTabs.qa !== "persona";
@@ -8337,8 +8341,125 @@
     })();
     // SOCIAL_DISCOVERY_UI_END
 
+    // AUTONOMOUS_SOCIAL_UI_START — read-only snapshots, never settings/draft projection.
+    function createAutonomousSocialStatusController({ document, api, accounts, contextEpoch }) {
+      const views = {}, state = { snapshot: null, signature: "", epoch: 0, pending: null, error: "" };
+      const count = value => Number.isSafeInteger(value) && value >= 0 ? String(value) : "未知";
+      const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
+      const toggle = value => value === true ? "开启" : value === false ? "关闭" : "未知";
+      const node = (tag, text, className) => { const el = document.createElement(tag); if (text !== undefined) el.textContent = text; if (className) el.className = className; return el; };
+      const safeLabel = value => typeof value === "string" && value.trim() && !/[\u0000-\u001f\u007f]|Bearer|sk-|token|secret|password|cookie|密钥|密码/iu.test(value)
+        ? value.trim().slice(0, 64) : "未知账号";
+      const reasonLabels = { CAPABILITY_UNAVAILABLE: "能力不可用", CAPABILITY_NOT_ATTESTED: "能力未核实", NOT_SUPPORTED: "当前协议不支持",
+        PROTOCOL_UNSUPPORTED: "当前协议不支持", QZONE_NOT_SUPPORTED: "当前协议不支持空间操作", QZONE_NOT_CONFIGURED: "未配置空间策略",
+        DISABLED: "已关闭", POLICY_DISABLED: "策略已关闭", SCOPE_REQUIRED: "缺少明确范围", NO_SCOPE: "未配置范围",
+        OWNER_REQUIRED: "需要已验证主人", SOURCE_VERIFICATION_REQUIRED: "历史来源待核实", RECONSTRUCTION_SOURCE_VERIFICATION_REQUIRED: "历史来源待核实",
+        ACCOUNT_OR_SCOPE_UNAVAILABLE: "账号、连接或范围未就绪", SOURCE_CAPTURE_FAILED: "历史来源快照读取失败", NOT_STARTED: "尚未开始",
+        MEMORY_UNAVAILABLE: "记忆仓库不可写", HOST_ADAPTER_READY: "宿主适配器已就绪" };
+      const reason = value => typeof value === "string" && Object.hasOwn(reasonLabels, value) ? reasonLabels[value]
+        : typeof value === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value) && !/SECRET|TOKEN|PASSWORD|COOKIE|KEY|CREDENTIAL/.test(value) ? value : "原因未知";
+      const featureLabels = { social: "社交", guidance: "长期指导", delegation: "持续委托", reconstruction: "资料重建", stickers: "贴纸",
+        voice: "语音", poke: "拍一拍", pokes: "拍一拍", qzone: "空间", qzonePublish: "空间发表", qzone_publish: "空间发表", discovery: "发现", task: "任务", tasks: "任务",
+        read_context: "当前会话", read_person: "人物记忆", read_self: "自身成长卡", public_discoveries: "公开素材", search_stickers: "贴纸检索",
+        web_search: "公开联网", express: "实际表达", execution_status: "委托回执", qzone_read: "空间读取", qzone_draft: "空间拟稿", qzone_like: "空间点赞", qzone_comment: "空间评论" };
+      const accountRows = () => accounts().filter(row => row?.id && !row.archived);
+      const accountName = id => { const row = accountRows().find(row => row.id === id); return row ? safeLabel(row.displayName || row.id) : "未知账号"; };
+      function lines(host, values) { host.replaceChildren(...values.map(text => node("p", text, "hint"))); }
+      function reconstructionLines(value) {
+        const job = value?.initialized === false ? null : value?.reconstruction, stats = job?.stats;
+        const labels = { ready: "等待处理", idle: "空闲", running: "进行中", paused: "已暂停", cancelled: "已取消", interrupted: "已中断",
+          completed: "已完成", completed_with_limits: "已完成（仍有待核实项）", uncertain: "结果不确定，不自动重试", failed: "失败", source_verification_required: "历史来源待核实" };
+        const phase = value?.initialized === false ? "尚未初始化" : typeof job?.status === "string" && Object.hasOwn(labels, job.status) ? labels[job.status] : "未知";
+        return [`重建：${phase} · 后台：${value?.busy === true ? "忙碌" : value?.busy === false ? "空闲" : "未知"}${value?.code && !["READY", "OK"].includes(value.code) ? ` · ${reason(value.code)}` : ""}`,
+          `扫描 ${count(stats?.scanned)} · 恢复来源 ${count(stats?.recoveredSources)} · 人物 ${count(stats?.people)} · 归属待核实 ${count(stats?.unattributed)}`,
+          `已核验 Verified ${count(stats?.tiers?.Verified)} · 支持类 Supported ${count(stats?.tiers?.Supported)} · 待核实 Tentative ${count(stats?.tiers?.Tentative)} · 冲突 Conflicted ${count(stats?.tiers?.Conflicted)} · 已抑制 Suppressed ${count(stats?.tiers?.Suppressed)}`,
+          `模型尝试 ${count(stats?.modelAttempts)} · 用量未知调用 ${count(stats?.unknownCalls)} · 已知 Token：输入 ${count(stats?.usage?.inputTokens)} / 输出 ${count(stats?.usage?.outputTokens)} / 合计 ${count(stats?.usage?.totalTokens)}（非完整账单）`];
+      }
+      function render() {
+        if (!views.owner) return;
+        const data = state.snapshot, policy = data?.policy, o = views.owner, p = views.people;
+        const master = policy?.optOut === true ? "已退出" : policy?.paused === true ? "已暂停" : policy?.enabled === false ? "关闭"
+          : policy?.enabled === true && policy.optOut === false && policy.paused === false ? "开启" : "未知";
+        const guidance = data?.guidance?.accounts;
+        const total = Array.isArray(guidance) && guidance.length <= 64 && new Set(guidance.map(row => row?.accountId)).size === guidance.length
+          && guidance.every(row => object(row) && accountRows().some(account => account.id === row.accountId) && Number.isSafeInteger(row.ruleCount) && row.ruleCount >= 0)
+          ? guidance.reduce((sum, row) => sum + row.ruleCount, 0) : null;
+        lines(o.body, [`已保存偏好 · 自主模式：${master} · 指导：${toggle(policy?.guidance)} · 委托：${toggle(policy?.delegation)} · 重建：${toggle(policy?.reconstruction)}`,
+          `持续委托：运行 ${count(data?.delegations?.running)} · 等待 ${count(data?.delegations?.waiting)} · 暂停 ${count(data?.delegations?.paused)} · 结果不确定 ${count(data?.delegations?.uncertain)}`,
+          `长期指导：${count(total)} 条（当前返回账号）；各账号实际能力见下方，不由开关推定。`]);
+        const status = state.error || (state.pending ? "正在读取只读状态…" : data ? "已读取服务端快照。" : "尚未读取；未知不代表零。" );
+        for (const view of [o, p]) { view.status.textContent = status; view.status.className = state.error ? "warning" : "hint"; }
+        o.accounts.replaceChildren();
+        const caps = data?.capabilities;
+        if (!Array.isArray(caps)) o.accounts.append(node("p", "账号能力：未知。", "hint"));
+        else if (!caps.length) o.accounts.append(node("p", "当前返回无账号能力记录。", "hint"));
+        for (const row of Array.isArray(caps) ? caps.slice(0, 32) : []) {
+          const features = Array.isArray(row?.features) ? row.features.slice(0, 16).map(feature => {
+            const label = typeof feature?.id === "string" && Object.hasOwn(featureLabels, feature.id) ? featureLabels[feature.id] : "其他能力";
+            return `${label}：${feature?.available === true ? "宿主报告可用" : feature?.available === false ? `不可用（${reason(feature.reason)}）` : "未知"}`;
+          }).join("；") : "能力未知";
+          o.accounts.append(node("p", `${accountName(row?.accountId)} · ${features || "未提供能力项"}${Array.isArray(row?.features) && row.features.length > 16 ? "；其余能力未展开" : ""}`, "hint"));
+        }
+        if (Array.isArray(caps) && caps.length > 32) o.accounts.append(node("p", `另有 ${caps.length - 32} 个账号未展开。`, "hint"));
+        if (!Array.isArray(guidance)) o.accounts.append(node("p", "各账号指导规则数：未知。", "hint"));
+        for (const row of Array.isArray(guidance) ? guidance.slice(0, 32) : []) o.accounts.append(node("p", `${accountName(row?.accountId)} · 长期指导 ${count(row?.ruleCount)} 条`, "hint"));
+        if (Array.isArray(guidance) && guidance.length > 32) o.accounts.append(node("p", `另有 ${guidance.length - 32} 个账号的指导记录未展开。`, "hint"));
+        lines(p.body, reconstructionLines(data?.reconstruction)); p.refresh.disabled = !!state.pending;
+      }
+      function syncAccounts() {
+        const signature = JSON.stringify([contextEpoch(), accountRows().map(row => [row.id, row.displayName])]);
+        if (signature === state.signature) return;
+        const hadState = state.snapshot || state.pending; state.signature = signature; state.epoch++;
+        state.snapshot = null; state.pending?.controller.abort(); state.pending = null;
+        state.error = hadState ? "账号或配置版本已变化，请重新读取自主状态。" : ""; render();
+      }
+      async function load() {
+        syncAccounts(); if (state.pending) return;
+        const ticket = { controller: new AbortController(), epoch: state.epoch, signature: state.signature };
+        state.pending = ticket; state.snapshot = null; state.error = ""; render(); let timer;
+        const current = () => state.pending === ticket && state.epoch === ticket.epoch && state.signature === ticket.signature;
+        try {
+          const result = await Promise.race([
+            api("/api/owner/autonomy", { method: "GET", signal: ticket.controller.signal }),
+            new Promise((_, reject) => ticket.controller.signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true })),
+            new Promise((_, reject) => { timer = setTimeout(() => { reject(new Error("deadline")); ticket.controller.abort(); }, 20000); })
+          ]);
+          syncAccounts(); if (!current()) return;
+          if (result?.ok !== true || !object(result.policy) || !((typeof result.revision === "string" && result.revision.trim()) || Number.isSafeInteger(result.revision) && result.revision >= 0)) throw new Error("invalid_response");
+          state.snapshot = result;
+        } catch (error) {
+          if (current()) state.error = `${Number.isSafeInteger(error?.status) ? `读取失败（HTTP ${error.status}）` : error?.message === "deadline" ? "读取自主状态超时" : "读取自主状态失败或格式无效"}；数据未知，请重新读取。`;
+        } finally {
+          clearTimeout(timer); if (current()) { state.pending = null; render(); }
+        }
+      }
+      function mount() {
+        if (views.owner) return;
+        const owner = document.getElementById("ownerControlCard"), people = document.getElementById("peopleProfileCard");
+        if (!owner || !people) return;
+        for (const [key, host, id, title, anchor] of [["owner", owner, "autonomousSocialSummary", "自主运行摘要", "ownerResultDetails"],
+          ["people", people, "peopleReconstructionSummary", "人物资料重建", "peopleResult"]]) {
+          const section = node("section", undefined, "settings-block"); section.id = id; section.setAttribute("style", "min-width:0;overflow-wrap:anywhere");
+          const heading = node("h4", title); heading.id = `${id}Heading`; section.setAttribute("aria-labelledby", heading.id); section.append(heading);
+          const status = node("p", undefined, "hint"); status.id = `${id}State`; status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite");
+          const body = node("div"); body.id = `${id}Body`; section.append(status, body); host.insertBefore(section, document.getElementById(anchor));
+          views[key] = { section, status, body };
+        }
+        const o = views.owner, p = views.people;
+        o.details = node("details", undefined, "panel-details"); o.details.open = false; o.details.append(node("summary", "各账号能力与指导（只读）"));
+        o.accounts = node("div"); o.accounts.id = "autonomousSocialAccounts"; o.details.append(o.accounts); o.section.append(o.details);
+        p.section.append(node("p", "支持类理解（Supported）不等于亲历，也不自动成为已确认事实。", "hint"));
+        p.refresh = node("button", "读取重建进度（只读）", "secondary"); p.refresh.id = "peopleReconstructionRead"; p.refresh.type = "button";
+        p.refresh.addEventListener("click", load); p.section.append(p.refresh);
+        syncAccounts(); render();
+      }
+      return { mount, load, syncAccounts, views, state };
+    }
+    const autonomousSocialUi = createAutonomousSocialStatusController({ document, api, accounts: promptAccountRows, contextEpoch: () => registryState.epoch });
+    // AUTONOMOUS_SOCIAL_UI_END
+
     // PEOPLE_OWNER_UI_START — explicit actions only; no polling or config projection.
-    function createPeopleOwnerController({ document, api, accounts, contextEpoch, confirm, beforeUnload }) {
+    function createPeopleOwnerController({ document, api, accounts, contextEpoch, confirm, beforeUnload, onOwnerLoaded }) {
       const views = {}, lanes = {}, state = { owner: null, person: null, ownerDirty: false, ownerEdit: 0, ownerBase: null, peopleEpoch: 0, queryEpoch: 0, signature: "" };
       const revision = value => (Number.isSafeInteger(value) && value >= 0) || (typeof value === "string" && !!value.trim());
       const node = (tag, text, className) => { const el = document.createElement(tag); if (text !== undefined) el.textContent = text; if (className) el.className = className; return el; };
@@ -8525,7 +8646,7 @@
       }
       async function loadOwner() {
         if (lanes.owner) return; syncAccounts(); const edit = state.ownerEdit, signature = state.signature; state.owner = null; message(views.owner, "正在读取主人控制状态…");
-        try { const result = await request("owner", "/api/owner/status"); syncAccounts(); if (signature !== state.signature) return; acceptOwner(result, edit); }
+        try { const result = await request("owner", "/api/owner/status"); syncAccounts(); if (signature !== state.signature) return; acceptOwner(result, edit); if (typeof onOwnerLoaded === "function") await onOwnerLoaded(); }
         catch (error) { message(views.owner, `${failure(error)}。草稿保留，请点击重新加载。`, true); }
         finally { syncButtons(); }
       }
@@ -8596,7 +8717,7 @@
       }
       return { mount, syncAccounts, loadPerson, applyPerson, loadOwner, saveOwner, queryOwner, views, state };
     }
-    const peopleOwnerUi = createPeopleOwnerController({ document, api, accounts: promptAccountRows, contextEpoch: () => registryState.epoch, confirm: text => confirm(text), beforeUnload: handler => window.addEventListener("beforeunload", handler) });
+    const peopleOwnerUi = createPeopleOwnerController({ document, api, accounts: promptAccountRows, contextEpoch: () => registryState.epoch, confirm: text => confirm(text), beforeUnload: handler => window.addEventListener("beforeunload", handler), onOwnerLoaded: () => autonomousSocialUi.load() });
     // PEOPLE_OWNER_UI_END
 
     mountAdminPanels();
@@ -8607,6 +8728,7 @@
     socialUi.mount();
     discoveryUi.mount();
     peopleOwnerUi.mount();
+    autonomousSocialUi.mount();
     refreshAll().catch(async (error) => {
       showFatalError(`桥接暂不可用：${error.message}。备份与迁移页仍可用于启动或恢复服务。`);
       await refreshDesktopBackup();

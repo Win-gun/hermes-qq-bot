@@ -163,7 +163,8 @@ test("no action or send API is exported in composed results", () => {
   assert.equal(r instanceof Promise, false);
   assert.deepEqual(Object.values(r).filter(value => typeof value === "function"), []);
   assert.equal(Object.hasOwn(r, "send"), false); assert.equal(Object.hasOwn(r, "authorized"), false);
-  assert.match(layer(make(), "SocialSimulation"), /不自行调用发送工具、创建定时器、长轮询或新工具/);
+  assert.match(layer(make(), "SocialSimulation"), /普通回复使用ReplyPlan/);
+  assert.match(layer(make(), "SocialSimulation"), /不自行创建计时器或长轮询/);
 });
 test("default prompts contain no old persona, framework templates or native tool names as grants", () => {
   for (const mode of ["direct", "social", "search", "task"]) {
@@ -331,8 +332,8 @@ test("preview diagnostics cannot taint a later request", () => {
 
 test("chapters are mode-selected, detached and never selected by context", () => {
   const expected = {
-    direct: ["request", "rhythm", "expression", "memory", "boundaries", "protocol", "preset"],
-    social: ["participation", "agency", "silence", "rhythm", "waiting", "expression", "memory", "boundaries", "protocol", "preset"],
+    direct: ["request", "rhythm", "expression", "situations", "tools", "continuity", "memory", "boundaries", "protocol", "preset"],
+    social: ["participation", "agency", "silence", "rhythm", "waiting", "expression", "situations", "tools", "continuity", "memory", "boundaries", "protocol", "preset"],
     search: ["request", "evidence", "rhythm", "memory", "boundaries", "protocol", "preset"], task: []
   };
   for (const [mode, chapterIds] of Object.entries(expected)) {

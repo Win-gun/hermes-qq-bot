@@ -25,6 +25,7 @@ import { ExpressionDiagnostics } from "../src/social-expression-diagnostics.js";
 import { isQzoneAction, qzoneActionKind, isUnmanagedFavoriteWrite } from "../src/qzone-delivery.js";
 import { recordSocialEpisode } from "../src/social-episodes.js";
 import { recordOwnerInteraction } from "../src/owner-interactions.js";
+import { ownerGuidanceAllows } from "../src/owner-guidance.js";
 
 // Read source only. Never import/start main(), open sockets, spawn a service,
 // read live config/state, or persist anything. The complete real message callback
@@ -105,7 +106,8 @@ const realFunctions = [
   "stableMessageFingerprint", "accountScopedInboundKey", "claimConversationMessage", "messageTiming", "extractReplyMessageIds", "recordPeopleSourceObservation",
   "messageDebounceConfig", "isLikelyIncompleteInput", "shouldWaitForMoreInput", "flushDebouncedMessage", "enqueueDebouncedMessage", "pendingDebouncedContext", "orderedHistory", "mergeReplyCurrents",
   "quietUntil", "isQuiet", "repairInvalidQuietUntil", "parseDurationMs", "formatDuration", "isGroupAdmin", "handleBotCommand", "handleMemoryVerificationCommand",
-  "sameLogicalAccount", "recordBotMessage", "lastBotMessageForAccount", "sendGroupMessage", "aiVoicePlanAllowed", "deliverChatExpression", "lastNonBotMessage", "lastNonBotMessagesSince", "scoreImplicitReplyAgainstBotMessage", "isMediaOnlyText"
+  "sameLogicalAccount", "recordBotMessage", "lastBotMessageForAccount", "sendGroupMessage", "aiVoicePlanAllowed", "deliverChatExpression", "lastNonBotMessage", "lastNonBotMessagesSince", "scoreImplicitReplyAgainstBotMessage", "isMediaOnlyText",
+  "groupBehaviorGuidance", "wakeOwnerDelegations"
 ];
 
 function harness(config = fixtureConfig(), mutation = {}) {
@@ -128,6 +130,7 @@ function harness(config = fixtureConfig(), mutation = {}) {
     isQzoneAction, qzoneActionKind, isUnmanagedFavoriteWrite,
     recordSocialEpisode, socialEpisodeDeliveredProvider: async () => {},
     recordOwnerInteraction: (root, args) => recordOwnerInteraction(root, structuredClone(args)),
+    ownerGuidanceAllows: (root, args) => ownerGuidanceAllows(structuredClone(root), structuredClone(args)),
     ownerServices: { router: { handle: async () => ({ matched: true, status: "blocked", code: "OWNER_IDENTITY_REQUIRED" }) } },
     expressionDiagnostics: new ExpressionDiagnostics(),
     logicalBotId, botConversationKey, botControlRevision, replyDeliveryConfig,

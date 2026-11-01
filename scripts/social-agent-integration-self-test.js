@@ -38,6 +38,9 @@ config.vision = { enabled: true, provider: 'custom', model: 'synthetic-vision' }
 config.taskMode = { enabled: false }; config.learningMode = { enabled: false };
 config.adminNotifications = { enabled: false }; config.targetGroups = ['20001','20002']; config.apiCenter = undefined;
 config.privateChats = { enabled: true, targetUsers: ['30001'], ownerUserIds: ['30001'] };
+// Pin this legacy suite; 3.5 source/migration/controller coverage has a separate
+// explicitly enabled fixture and must not mutate revisions mid-test here.
+config.autonomousSocial = { version: 1, enabled: false, guidance: false, delegation: false, reconstruction: false };
 if (OWNER_FIRST_FIXTURE) {
   // Owner First 3.4 owner branch only. `ownerFirst.version = 1` is what the real
   // startup migration reads to know this config is already migrated, so the
@@ -689,18 +692,54 @@ try {
     assert.equal(receiptIds.length, annotation.sentCount, 'sentCount equals the durable receipt count');
     assert.equal(sentCountBefore + 1, annotation.sentCount, 'this send added exactly one receipt');
     assert.equal(String(wire.params.group_id), '20002', 'the wire target stays inside the allowed pair');
-    // Owner command authority does not override an account's explicit content
-    // scope. An unavailable library reports a useful Chinese reason, never ACK.
+    // 3.5: an exact owner command may prepare content once for an owner-allowed
+    // target outside autonomous expression scope. It must not persist that grant
+    // into socialExperience/socialAgent scope or bypass the target allowlist.
     await expressionPolicy({ enabled:true, shadowMode:false, conversationIds:['group:20001'] });
-    const imagesBeforeUnavailable = imageTo20002().length, repliesBeforeUnavailable = privateReplies.length;
+    const savedBeforeExact = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8'));
+    const accountBeforeExact = savedBeforeExact.accounts.items.find(row => row.id === 'primary');
+    assert.deepEqual(accountBeforeExact.socialExperience.conversationIds, ['group:20001']);
+    const imagesBeforeExact = imageTo20002().length, repliesBeforeExact = privateReplies.length;
+    const readsBeforeExact = onebotRequests.filter(row => row.action === 'get_msg').length, countsBeforeExact = stickerCounts();
+    const callsBeforeExact = calls();
     ownerMessage(1403, '去20002群发一个开心的表情包。');
-    await until(() => privateReplies.length === repliesBeforeUnavailable + 1, 'unavailable sticker result');
-    const unavailable = replyText(privateReplies.at(-1));
-    assert.match(unavailable, /OWNER_QUALIFIED_STICKER_UNAVAILABLE/);
-    assert.match(unavailable, /没有可用的合格表情.*没有发送消息/u);
-    assert.equal(imageTo20002().length, imagesBeforeUnavailable, 'unavailable sticker never writes or retries');
+    await until(() => privateReplies.length === repliesBeforeExact + 1, 'exact owner content grant receipt', 15000);
+    const exactReceipt = replyText(privateReplies.at(-1));
+    assert.match(exactReceipt, /^已核实/); assert.match(exactReceipt, /OWNER_STICKER_READBACK_VERIFIED/);
+    assert.match(exactReceipt, /已回读到目标群图片消息/u);
+    assert.equal(imageTo20002().length, imagesBeforeExact + 1, 'exact content grant produces exactly one actual image wire');
+    const exactWire = imageTo20002().at(-1);
+    assert.equal(exactWire.params.message.length, 1); assert.equal(exactWire.params.message[0].type, 'image');
+    assert.match(exactWire.params.message[0].data.file, /^base64:\/\//);
+    const exactReadbacks = onebotRequests.filter(row => row.action === 'get_msg');
+    assert.equal(exactReadbacks.length, readsBeforeExact + 1, 'one ACK-backed readback, not an acceptance-only claim');
+    const exactId = String(exactReadbacks.at(-1).params.message_id);
+    const countsAfterExact = stickerCounts(), changed = Object.keys(countsAfterExact).filter(id => countsAfterExact[id] !== (countsBeforeExact[id] ?? 0));
+    assert.equal(changed.length, 1); assert.equal(countsAfterExact[changed[0]], (countsBeforeExact[changed[0]] ?? 0) + 1);
+    assert.ok(memorySnapshot().socialExpressionAssets.bots['account:primary'].stickers[changed[0]]
+      .annotations['group:20002'].receipts[exactId], 'the actual fake-wire ACK id is durably recorded');
+    const savedAfterExact = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8'));
+    const accountAfterExact = savedAfterExact.accounts.items.find(row => row.id === 'primary');
+    for (const field of ['socialExperience', 'socialAgent', 'scope'])
+      assert.deepEqual(accountAfterExact[field], accountBeforeExact[field], `${field} is not expanded by a one-shot content grant`);
+    assert.deepEqual(savedAfterExact.ownerControl, savedBeforeExact.ownerControl);
+    assert.equal(calls(), callsBeforeExact, 'exact owner content execution adds no model call');
+    ownerMessage(1403, '去20002群发一个开心的表情包。');
+    await until(() => privateReplies.length === repliesBeforeExact + 2, 'duplicate exact command receipt');
+    assert.equal(imageTo20002().length, imagesBeforeExact + 1, 'duplicate command cannot replay the content grant');
+    assert.equal(onebotRequests.filter(row => row.action === 'get_msg').length, readsBeforeExact + 1);
+    assert.deepEqual(stickerCounts(), countsAfterExact, 'duplicate does not manufacture another durable receipt');
+    const beforeDenied = sends.length, repliesBeforeDenied = privateReplies.length;
+    ownerMessage(1404, '/owner sticker primary 20001 开心');
+    await until(() => privateReplies.length === repliesBeforeDenied + 1, 'owner-disallowed target refusal');
+    assert.match(replyText(privateReplies.at(-1)), /OWNER_SCOPE_REQUIRED/);
+    assert.equal(sends.slice(beforeDenied).filter(row => row.action === 'send_group_msg').length, 0,
+      'an expression-enabled but owner-disallowed target still receives no message');
+    assert.equal(onebotRequests.filter(row => row.action === 'get_msg').length, readsBeforeExact + 1);
+    assert.equal(calls(), callsBeforeExact, 'scope refusal spends no model calls');
     console.log('PASS owner-first bridge: authenticated Chinese owner query answered from the durable ledger with 0 model calls; '
-      + 'real owner send_sticker -> expressionStickersFor -> prepare -> image wire -> ACK -> get_msg readback -> sentCount=1; no retry');
+      + 'real owner send_sticker -> expressionStickersFor -> prepare -> image wire -> ACK -> get_msg readback -> durable receipt; '
+      + 'one-shot exact content grant without autonomous scope expansion; disallowed target refused; no retry');
   }
   console.log('PASS Social Experience 2.1 bridge: default-off; actual snapshot-seq interest observe/GET/cancel/auth403/stale409; host mention -> at 30001/group 20002; unknown poke -> no offer/write; original forward -> quoted recentContext; forged model forward -> no read/write/retry');
   console.log('PASS group expression bridge: direct group media -> bounded background learning -> cached auto eligibility -> shared image ACK; host-bound reaction -> acceptance only; no external calls or real QQ');
