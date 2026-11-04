@@ -40,7 +40,8 @@ import { redactText, sanitizeArchiveValue } from "./privacy-filter.js";
  * not a shared provider conversation/session. Model input excludes suppressed
  * rows; output contains IDs + semantic proposals
  * only. Summaries NEVER become evidence, confidence, authority or experiences.
- * Only unchanged Verified canonical values may use recordPersonEvidence. All
+ * Only unchanged Verified canonical values, or separately verified literal
+ * public self-statements from the pinned archive, may use recordPersonEvidence. All
  * other results stay in this bounded additive staging store. Existing originals,
  * timestamps, conflicts and tombstones are never rewritten or removed.
  *
@@ -71,6 +72,7 @@ const FIELD = "peopleReconstruction";
 const BAD = new Set(["__proto__", "constructor", "prototype"]);
 const TIERS = ["Verified", "Supported", "Tentative", "Conflicted", "Suppressed"];
 const DURABLE = new Set(["stable_fact", "preference", "alias", "boundary"]);
+const ARCHIVE_SELF_CONFIDENCE = 0.7; // same evidence grade as ordinary live public self-report
 const SEMANTIC_CATEGORIES = new Set([...DURABLE, "quote", "episode", "uncertain", "discard"]);
 const SEMANTIC_RELATIONS = new Set(["related", "duplicate", "conflict", "temporal", "withdrawal", "insufficient"]);
 const TERMINAL = new Set(["deleted", "revoked", "rejected", "superseded", "suppressed"]);
@@ -344,6 +346,62 @@ function sourceTuple(raw, row, scope, now) {
     boundValueDigest: /^[a-f0-9]{64}$/.test(raw.boundValueDigest ?? "") ? raw.boundValueDigest : null,
     sourceTextDigest: /^[a-f0-9]{64}$/.test(raw.sourceTextDigest ?? "") ? raw.sourceTextDigest : null,
     ...(archiveContext ? { archiveConversationId: raw.archiveConversationId } : {}) };
+}
+
+/** Derive the entire value from one original, plain self-statement. No model,
+ * legacy summary, substring match, residence or arbitrary free-text inference. */
+export function literalPeopleArchiveSelfStatement(rawText) {
+  const body = text(rawText);
+  if (!body || /[\r\n\[\]<>]/u.test(rawText)) return null;
+  const match = /^我(?:本人|自己|个人)?(喜欢|偏爱|偏好|中意|爱好|习惯|常用|名叫|叫做|昵称是|外号是|别名是|从事|用的是)([^，,、。！？!?；;：:]{1,64})。?$/u.exec(body);
+  if (!match) return null;
+  const [, verb, object] = match;
+  const kind = /^(?:名叫|叫做|昵称是|外号是|别名是)$/u.test(verb) ? "alias"
+    : /^(?:从事|用的是)$/u.test(verb) ? "stable_fact" : "preference";
+  const value = kind === "alias" ? object.trim() : `${verb}${object}`.trim();
+  return verifyPublicSelfStatement({ text: body, value, kind }).ok ? { kind, value } : null;
+}
+
+/** Dedicated model-free publication cursor. No source text/semantic output is
+ * accepted here: host supplies only worker-authenticated, literal statements
+ * from the job's existing immutable source. The ACK and facts share one draft. */
+export function applyPeopleArchiveSelfEvidencePage(root, { authorized, expectedRevision, page, eligible, now } = {}) {
+  if (authorized !== true) fail("UNAUTHORIZED");
+  const job = jobAt(root);
+  if (!job || job.revision !== expectedRevision) fail("REVISION_MISMATCH");
+  if (!job.publishVerified || job.claim || job.cursor.phase !== "done"
+    || !["paused", "completed", "completed_with_limits"].includes(job.status)) fail("EVIDENCE_PUBLICATION_BLOCKED");
+  const offset = job.archiveSelfEvidence?.offset ?? 0;
+  if (!object(page) || page.sourceId !== job.sourceId || page.offset !== offset || !Array.isArray(page.rows)
+    || page.rows.length > L.page || page.nextOffset !== offset + page.rows.length || typeof page.done !== "boolean"
+    || (!page.rows.length && !page.done) || typeof eligible !== "function" || time(now) === null
+    || job.archiveSelfEvidence?.done) fail("INVALID_EVIDENCE_PAGE");
+  const stats = job.archiveSelfEvidence ??= { offset: 0, done: false, published: 0, skipped: 0, duplicates: 0, reasons: {} };
+  for (const row of page.rows) {
+    const userId = qq(row?.userId), logicalBotId = id(row?.logicalBotId), scope = row?.conversationId;
+    const value = text(row?.value), kind = row?.kind;
+    const s = userId && logicalBotId && /^group:[1-9]\d{4,19}$/.test(scope ?? "")
+      ? sourceTuple(row.source, { userId }, scope, now) : null;
+    const reject = reason => { stats.skipped++; bump(stats, reason); };
+    if (!s || s.logicalBotId !== logicalBotId || s.via !== "archive" || !value
+      || !["preference", "alias", "stable_fact"].includes(kind)) { reject("INVALID_SELF_SOURCE"); continue; }
+    const reason = fence(root, logicalBotId, userId) ?? archiveNegativeFence(root, userId, scope, [s.messageId], logicalBotId);
+    if (reason) { reject(reason); continue; }
+    if (sync(eligible, { logicalBotId, userId, conversationId: scope, mode: "reconstruction" }) !== true
+      || sync(eligible, { ...s, userId, mode: "source" }) !== true) { reject("SCOPE_NOT_AUTHORIZED"); continue; }
+    const entries = root.peopleMemory?.bots?.[logicalBotId]?.people?.[userId]?.entries;
+    if (entries?.some(e => e.status === "active" && e.kind === kind && e.conversationId === scope
+      && oppositeAssertion(e.value, value))) { reject("CURRENT_MEMORY_DIFFERS"); continue; }
+    const result = recordPersonEvidence(root, { logicalBotId, userId, verifiedSenderId: s.verifiedSenderId,
+      accountId: s.accountId, conversationId: scope, messageId: s.messageId, time: s.time, now,
+      kind, value, privacy: "public", sourceType: "archive", confidence: ARCHIVE_SELF_CONFIDENCE,
+      selfReported: true, reconstructedSelfReport: true, retainDurable: true });
+    if (!result.ok) reject(`PROJECTION_${result.reason}`);
+    else if (result.changed) { stats.published++; job.stats.published++; }
+    else stats.duplicates++;
+  }
+  stats.offset = page.nextOffset; stats.done = page.done; job.revision++;
+  return copy(stats);
 }
 /** Host-only content witness, produced after checking an actual archive record.
  * Never accept this marker from model JSON. It avoids copying private source
@@ -783,7 +841,8 @@ export function peopleReconstructionStatus(root) {
     acknowledgedUnknownCalls: job.acknowledgedUnknownCalls || 0,
     lastFailureCode: job.lastFailureCode ?? null,
     pauseReason: job.pauseReason ?? null, unknownBatches: job.unknownBatches?.length ?? 0,
-    semanticStage: job.semanticStage ? copy(job.semanticStage) : null } : null;
+    semanticStage: job.semanticStage ? copy(job.semanticStage) : null,
+    archiveSelfEvidence: job.archiveSelfEvidence ? copy(job.archiveSelfEvidence) : null } : null;
 }
 
 export function peopleReconstructionProjectionKey(conversationId, userId, logicalBotId = null) {
@@ -1014,7 +1073,8 @@ export function createPeopleReconstructionRunner({ getState, transact, readPage,
         // Only host enum codes are diagnostics. Never persist a provider error
         // message, model output, candidate text or arbitrary error.code.
         job.lastFailureCode = error instanceof ReconstructionError ? error.code
-          : ["RECONSTRUCTION_MODEL_OUTPUT_REJECTED", "MODEL_CONTEXT_CHANGED", "RECONSTRUCTION_STALE",
+          : ["RECONSTRUCTION_MODEL_OUTPUT_REJECTED", "RECONSTRUCTION_MODEL_TIMEOUT", "RECONSTRUCTION_MODEL_TRUNCATED",
+            "RECONSTRUCTION_MODEL_HTTP_REJECTED", "MODEL_CONTEXT_CHANGED", "RECONSTRUCTION_STALE",
             "MODEL_PROMPT_LIMIT", "MODEL_TOKEN_ENVELOPE", "MODEL_SCOPE_DENIED", "MODEL_BINDING_CHANGED",
             "EXISTING_BUDGET_EXHAUSTED"].includes(error?.code)
             ? error.code : "MODEL_OR_HOST_FAILED";

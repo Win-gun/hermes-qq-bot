@@ -740,7 +740,8 @@ for (const [owner, scoped] of [[BOT, `private:${USER}:fixture`], ["group:Pair_A-
     const observed = [], sandbox = vm.createContext({
       Date: class extends Date { static now() { return NOW; } },
       logicalBotId: config => config.owner,
-      personMemoryContext: (memory, options) => { const args = structuredClone(options); observed.push(args); return personMemoryContext(memory, args); }
+      reconstructedPeopleSourceEligible: () => false,
+      personMemoryContext: (memory, { sourceEligible, ...args }) => { observed.push(structuredClone(args)); return personMemoryContext(memory, { ...args, sourceEligible }); }
     });
     new vm.Script(source.slice(start, end)).runInContext(sandbox);
     const before = structuredClone(root);

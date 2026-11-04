@@ -53,6 +53,10 @@ config.commands.adminUserIds = ["20002"];
 config.privateChats.enabled = true;
 config.privateChats.targetUsers = ["20002"];
 config.privateChats.ownerUserIds = ["20002"];
+// This fixture exercises deterministic voice commands and voice fallback.
+// Preserve the owner's identity, but do not auto-enable semantic owner routing.
+config.ownerFirst = { version: 1 };
+config.autonomousSocial = { version: 1, enabled: false, guidance: false, delegation: false, reconstruction: false };
 config.voice.enabled = true;
 config.voice.tts.enabled = true;
 config.voice.tts.allowMemberVoiceDesign = false;

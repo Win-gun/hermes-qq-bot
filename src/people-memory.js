@@ -87,6 +87,9 @@ import { redactText, sanitizeArchiveValue } from "./privacy-filter.js";
  * ask for groups they are authorized to use, and personMemoryContext explains
  * that such internal understanding must not be proclaimed as other-group or
  * private knowledge.
+ * Reconstructed archive self-reports require a synchronous sourceEligible
+ * callback on both the original and current group, including same-group reads.
+ * Missing callbacks never grant access. Canonical source corrections win.
  */
 export const PEOPLE_MEMORY_LIMITS = Object.freeze({
   bots: 16, peoplePerBot: 256, entriesPerPerson: 48, archivePerPerson: 64,
@@ -196,6 +199,9 @@ function validEntry(entry, userId) {
       && source.key === hash([source.conversationId, source.messageId]) && identifier(source.messageId)
       && identifier(source.accountId) && ["message", "human", "archive"].includes(source.sourceType)
       && typeof source.confidence === "number" && Number.isFinite(source.confidence) && source.confidence >= 0 && source.confidence <= 1
+      && (!Object.hasOwn(source, "reconstructedSelfReport") || (source.reconstructedSelfReport === true
+        && source.sourceType === "archive" && source.confidence < 0.8 && entry.privacy === "public" && SELF_REPORTED_KINDS.has(entry.kind)
+        && entry.selfEvidence > 0))
       && timestamp(source.time) !== null)
     && (entry.authority === null || (plain(entry.authority) && qq(entry.authority.actorUserId)
       && timestamp(entry.authority.at) !== null && identifier(entry.authority.entryId)))
@@ -468,6 +474,9 @@ export function recordPersonEvidence(root, args = {}) {
   const selfReported = args.selfReported === true;
   if (selfReported && (!conversationId.startsWith("group:") || args.privacy !== "public"
     || !SELF_REPORTED_KINDS.has(kind))) return result(state, userId, "INVALID_SELF_REPORT");
+  const reconstructedSelfReport = args.reconstructedSelfReport === true;
+  if (Object.hasOwn(args, "reconstructedSelfReport") && (!reconstructedSelfReport || !selfReported
+    || args.sourceType !== "archive" || args.confidence >= 0.8)) return result(state, userId, "INVALID_SELF_REPORT");
   const time = timestamp(args.time, true), now = timestamp(args.now);
   if (time === null || now === null || time > now || (state.person && now < state.person.updatedAt)) return result(state, userId, "INVALID_TIME");
   const currentStatus = status(state, userId);
@@ -483,7 +492,19 @@ export function recordPersonEvidence(root, args = {}) {
   let entry = person.entries.find(item => item.id === id);
   if (entry) {
     const duplicate = entry.evidence.find(item => item.key === key);
-    if (duplicate) return result(state, userId, duplicate.time === time ? "DUPLICATE" : "SOURCE_CONFLICT", duplicate.time === time, false, { entryId: id });
+    if (duplicate) {
+      if (duplicate.time === time && duplicate.accountId === accountId && duplicate.sourceType === "archive"
+        && duplicate.confidence < 0.8 && reconstructedSelfReport && !entry.selfEvidence) {
+        // A prior canonical import may already hold this exact source but not
+        // its self-report attestation. Add that metadata without raising its
+        // confidence, creating another source or refreshing the original age.
+        duplicate.reconstructedSelfReport = true;
+        entry.selfEvidence = 1;
+        const saved = publish(root, state, logicalBotId, userId, person, { ...(state.bot?.tombstones ?? {}) }, now);
+        return saved.ok ? { ...saved, entryId: id } : saved;
+      }
+      return result(state, userId, duplicate.time === time ? "DUPLICATE" : "SOURCE_CONFLICT", duplicate.time === time, false, { entryId: id });
+    }
     if (entry.evidence.length >= PEOPLE_MEMORY_LIMITS.evidencePerEntry) return result(state, userId, "EVIDENCE_CAPACITY");
   } else {
     entry = { id, semanticId: semantic, userId, kind, value, privacy: args.privacy, conversationId,
@@ -491,7 +512,8 @@ export function recordPersonEvidence(root, args = {}) {
       expiresAt: time + TTL[kind], authority: null };
     person.entries.push(entry);
   }
-  entry.evidence.push({ key, accountId, conversationId, messageId, time, sourceType: args.sourceType, confidence: args.confidence });
+  entry.evidence.push({ key, accountId, conversationId, messageId, time, sourceType: args.sourceType, confidence: args.confidence,
+    ...(reconstructedSelfReport ? { reconstructedSelfReport: true } : {}) });
   entry.firstSeenAt = Math.min(entry.firstSeenAt ?? time, time);
   entry.lastConfirmedAt = Math.max(entry.lastConfirmedAt ?? time, time);
   entry.expiresAt = entry.lastConfirmedAt + TTL[kind];
@@ -527,6 +549,23 @@ function effectiveConfidence(entry, now) {
   return Math.max(DURABLE_CONFIDENCE_FLOOR, entry.confidence / (1 + stale));
 }
 
+function reconstructedArchiveSourceCurrent(root, userId, source) {
+  // Recheck only the two exact historical keys. A canonical correction can
+  // arrive after publication and must not leave a stale archive projection.
+  for (const key of [source.conversationId, source.conversationId.slice(6)]) {
+    const entries = root.groups?.[key]?.users?.[userId]?.canonicalMemory?.entries;
+    if (entries === undefined) continue;
+    if (!Array.isArray(entries) || entries.length > 4096 || entries.some(entry => {
+      if (!entry || !(entry.correctedAt || entry.negative === true
+        || ["deleted", "revoked", "rejected", "superseded", "suppressed"].includes(entry.status))) return false;
+      const ids = entry.sourceMessageIds;
+      return !Array.isArray(ids) || !ids.length || ids.length > PEOPLE_MEMORY_LIMITS.extractionSources
+        || ids.some(id => String(id) === source.messageId);
+    })) return false;
+  }
+  return true;
+}
+
 export function queryPersonMemory(root, args = {}) {
   const control = personMemoryControl(root, args);
   const purpose = args?.purpose === undefined ? "disclosure" : args.purpose;
@@ -545,6 +584,13 @@ export function queryPersonMemory(root, args = {}) {
   const rows = [];
   for (const entry of state.person.entries) {
     if (entry.status !== "active" || suppressed.has(entry.semanticId) || digests.has(valueDigest(userId, entry.value))) continue;
+    const archiveSelf = entry.evidence.filter(source => source.reconstructedSelfReport);
+    const groupEligible = id => typeof args.sourceEligible === "function"
+      && args.sourceEligible({ logicalBotId: args.logicalBotId, userId, conversationId: id }) === true;
+    const archiveCurrent = archiveSelf.length > 0 && !control.suppressesLegacy && conversationId.startsWith("group:")
+      && groupEligible(conversationId) && archiveSelf.some(source => reconstructedArchiveSourceCurrent(root, userId, source)
+        && (conversationId === source.conversationId || groupEligible(source.conversationId)));
+    if (archiveSelf.length && !archiveCurrent) continue;
     const confidence = effectiveConfidence(entry, now), stale = entry.expiresAt <= now;
     if (entry.conversationId === conversationId) {
       // Durable traits stay readable when stale; transient episodes/edges do not.

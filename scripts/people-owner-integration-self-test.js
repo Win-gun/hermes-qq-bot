@@ -25,6 +25,7 @@ const root = path.resolve(import.meta.dirname, ".."), home = fs.realpathSync(fs.
 const memoryFile = path.join(home, "data", "memory.json"), guardLog = path.join(home, "guard.jsonl");
 const preload = path.join(home, "deny-preload.cjs"), DAY = 86_400_000, OWNER = "21001", PERSON = "22001";
 const PUBLIC = "PUBLIC_ALPHA_PERSON_FIXTURE", BETA = "PUBLIC_BETA_PERSON_FIXTURE", PRIVATE = "PRIVATE_PERSON_ONLY_FIXTURE";
+const ARCHIVE_PERSON = "22991", ARCHIVE_TRAIT = "喜欢版画";
 const LEGACY = "LEGACY_PERSON_MUST_NOT_RESURRECT", EXTRACT = "偏好合成星图标记";
 const OWN_FRAGMENT = "OWNER_PRIVATE_FRAGMENT_FIXTURE", OTHER_FRAGMENT = "OTHER_PRIVATE_FRAGMENT_MUST_NOT_LEAK";
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -398,6 +399,10 @@ try {
       userId, verifiedSenderId: userId, conversationId, messageId: `seed-${bot}-${userId}-${privacy}-${i}`,
       time: (now - (2 - i) * DAY) / 1000, now, kind: "stable_fact", value, confidence: 0.9, sourceType: "message", privacy }).ok, true);
   }
+  assert.equal(recordPersonEvidence(seed, { logicalBotId: "account:alpha", accountId: "alpha", userId: ARCHIVE_PERSON,
+    verifiedSenderId: ARCHIVE_PERSON, conversationId: "group:31001", messageId: "seed-archive-self", time: (now - DAY) / 1000,
+    now, kind: "preference", value: ARCHIVE_TRAIT, confidence: 0.7, sourceType: "archive", privacy: "public",
+    selfReported: true, reconstructedSelfReport: true }).ok, true);
   fs.mkdirSync(path.join(home, "data")); fs.writeFileSync(memoryFile, JSON.stringify(seed));
   writePreload([config.listen.port, config.control.port, model.address().port]);
   await launch();
@@ -592,10 +597,20 @@ try {
     check(!privateOnly.includes(OTHER_FRAGMENT), "undeleted other person's private evidence never enters group command");
     assert.equal(calls.length, before, "deterministic memory queries do not invoke a model");
   }, "src/bridge.js handleBotCommand memory index projection");
+  await test("archive self-report uses authorized same-group profile and command scope only", async () => {
+    const source = await api(peoplePath("alpha", "group:31001", ARCHIVE_PERSON));
+    assert.deepEqual(source.body.profile.entries.map(entry => entry.value), [ARCHIVE_TRAIT]);
+    const cross = await api(peoplePath("alpha", "group:31002", ARCHIVE_PERSON));
+    const peer = await api(peoplePath("beta", "group:31001", ARCHIVE_PERSON));
+    assert.deepEqual([cross.body.profile.entries, peer.body.profile.entries], [[], []]);
+    assert.equal((await api(peoplePath("alpha", "group:31003", ARCHIVE_PERSON))).status, 400);
+    check((await groupMemoryCommand(ARCHIVE_PERSON)).includes(ARCHIVE_TRAIT), "actual /bot memory keeps authorized same-group attestation");
+  }, "src/bridge.js /api/people and /bot memory archive scope");
   await test("actual private fragment projection fixes conversation subject for both scoped job keys", async () => {
     const state = snapshot(), original = structuredClone(state);
     const observed = [], sandbox = vm.createContext({ Date, logicalBotId: () => "account:alpha",
-      personMemoryContext: (memory, options) => { const args = structuredClone(options); observed.push(args); return personMemoryContext(memory, args); } });
+      reconstructedPeopleSourceEligible: () => false,
+      personMemoryContext: (memory, { sourceEligible, ...args }) => { observed.push(structuredClone(args)); return personMemoryContext(memory, { ...args, sourceEligible }); } });
     new vm.Script(bridgeFunction("compactSelectedMemory", "buildContextBundle")).runInContext(sandbox);
     for (const conversationId of [`private:${OWNER}:alpha`, `private:${OWNER}:group:FixturePair`]) {
       const text = sandbox.compactSelectedMemory({}, [OWNER, "22002"], { memory: { people: { enabled: true } } }, "", state, conversationId);

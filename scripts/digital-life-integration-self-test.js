@@ -58,7 +58,7 @@ try {
   config.memory.aiExtraction.enabled = false; config.memory.learning = { enabled: false };
   config.dailyMessages = { enabled: false, schedules: [] }; delete config.hourlyChat;
   config.socialAgent = { enabled: false }; config.trigger = { ...config.trigger, activeReply: false };
-  config.privateChats = { ...config.privateChats, enabled: true, targetUsers: ["10001"], ownerUserIds: ["10001"] };
+  config.privateChats = { ...config.privateChats, enabled: true, targetUsers: ["10001", "10002"], ownerUserIds: ["10001"] };
   config.taskMode = { ...config.taskMode, enabled: true, shadowMode: false, ownerUserIds: ["10001"],
     allowedGroupIds: ["810001"], workspaceBaseDir: "data/tasks", defaultToolsets: [], webResearchEnabled: false };
   config.accounts = { version: 2, topology: "function_split", failoverGroups: [], diagnostics: { enabled: false, peerPingEnabled: false },
@@ -128,8 +128,9 @@ try {
   const registry = (await api("/api/accounts")).data;
   assert.equal((await api("/api/accounts/alpha", "PATCH", { expectedRevision: registry.revision,
     patch: { digitalLife: { enabled: true, socialPreset: "balanced", work: { enabled: false } } } })).status, 200);
-  sockets[0].send(JSON.stringify({ post_type: "message", message_type: "private", self_id: "91001", user_id: "10001",
-    sender: { user_id: "10001", nickname: "Fixture human" }, message_id: "fixture-agent-direct", time: Math.floor(Date.now() / 1000),
+  // This assertion is about the ordinary reply path, not the owner classifier.
+  sockets[0].send(JSON.stringify({ post_type: "message", message_type: "private", self_id: "91001", user_id: "10002",
+    sender: { user_id: "10002", nickname: "Fixture human" }, message_id: "fixture-agent-direct", time: Math.floor(Date.now() / 1000),
     message: [{ type: "text", data: { text: "你好，今天怎么样" } }] }));
   await until(() => sends.some(x => x.index === 0 && x.action === "send_private_msg" && JSON.stringify(x.params).includes("Fixture direct reply")), "opt-in text-only chat");
   assert.equal(modelCalls, 2); assert.match(modelPrompts[1], /【SocialSimulation】/);

@@ -165,6 +165,7 @@ let memoryVerificationNotifier = null;
 let socialPromptProvider = () => "";
 let ownerGuidancePromptProvider = () => [];
 let reconstructedPeoplePromptProvider = () => "";
+let reconstructedPeopleSourceEligible = () => false;
 let workLifePromptProvider = () => "";
 let socialEpisodePromptProvider = () => "";
 let socialEpisodeDeliveredProvider = async () => {};
@@ -1971,7 +1972,8 @@ function compactMemory(memory, groupId, config, currentSenderId = "") {
   if (config.memory?.people?.enabled === true) {
     const gm = memory.groups?.[String(groupId)], owner = logicalBotId(config, config.__activeAccountId);
     const context = currentSenderId ? personMemoryContext(memory, { logicalBotId: owner, userId: String(currentSenderId),
-      conversationId: String(groupId).startsWith("private:") ? `private:${currentSenderId}` : `group:${groupId}`, now: Date.now(), understanding: true }) : "";
+      conversationId: String(groupId).startsWith("private:") ? `private:${currentSenderId}` : `group:${groupId}`, now: Date.now(), understanding: true,
+      sourceEligible: reconstructedPeopleSourceEligible }) : "";
     const control = currentSenderId ? personMemoryControl(memory, { logicalBotId: owner, userId: String(currentSenderId) }) : null;
     const legacy = !String(groupId).startsWith("private:") && !control?.suppressesLegacy && gm?.users?.[currentSenderId]
       ? userMemoryBits(gm.users[currentSenderId], config, String(currentSenderId)).slice(0, 8).join("；") : "";
@@ -2602,7 +2604,8 @@ function compactSelectedMemory(gm, ids, config, query = "", memory = null, conve
   if (memory && config.memory?.people?.enabled === true) return ids.slice(0, Number(config.memory?.promptMaxUsers || 8)).map(userId => {
     const owner = logicalBotId(config, config.__activeAccountId);
     const context = personMemoryContext(memory, { logicalBotId: owner, userId: String(userId), understanding: true,
-      conversationId: String(conversationId).startsWith("private:") ? `private:${String(conversationId).split(":")[1]}` : `group:${conversationId}`, now: Date.now() });
+      conversationId: String(conversationId).startsWith("private:") ? `private:${String(conversationId).split(":")[1]}` : `group:${conversationId}`, now: Date.now(),
+      sourceEligible: reconstructedPeopleSourceEligible });
     const legacy = !String(conversationId).startsWith("private:") && gm?.users?.[userId]
       && !personMemoryControl(memory, { logicalBotId: owner, userId: String(userId) }).suppressesLegacy
       ? userMemoryBits(gm.users[userId], config, String(userId), query).slice(0, 8).join("；") : "";
@@ -7118,7 +7121,8 @@ async function handleBotCommand({ ws, event, text, config, memory, onVoiceComman
     const personControl = memory.peopleMemory ? personMemoryControl(memory, { logicalBotId: logicalBotId(config, config.__activeAccountId), userId: targetUserId }) : null;
     const memoryText = config.memory?.people?.enabled === true
       ? personMemoryContext(memory, { logicalBotId: logicalBotId(config, config.__activeAccountId), userId: targetUserId,
-        conversationId: event.message_type === "private" ? `private:${event.user_id}` : `group:${event.group_id}`, now: Date.now() }) || "当前没有适合在此会话展示的人物长期记忆。"
+        conversationId: event.message_type === "private" ? `private:${event.user_id}` : `group:${event.group_id}`, now: Date.now(),
+        sourceEligible: reconstructedPeopleSourceEligible }) || "当前没有适合在此会话展示的人物长期记忆。"
       : personControl?.suppressesLegacy ? "该人物档案已被纠正、冻结、撤销或删除，旧群画像不会作为备用内容显示。"
         : compactUserMemory(gm, targetUserId, config, fallbackName);
     await sendLongGroupMessage(ws, event, memoryText, config, { reply: true });
@@ -14095,7 +14099,8 @@ async function main() {
       const user = String(args.personRef || "");
       if (!s.recent.some(row => String(row.user_id) === user)) return { status: "failed", applied: false, code: "OWNER_PERSON_NOT_IN_CONTEXT" };
       return toolResult(meta.target, personMemoryContext(memory, { logicalBotId: meta.target.logicalBotId, userId: user,
-        conversationId: meta.target.conversationId, now: Date.now(), understanding: true }));
+        conversationId: meta.target.conversationId, now: Date.now(), understanding: true,
+        sourceEligible: reconstructedPeopleSourceEligible }));
     },
     read_self: (_args, meta) => {
       delegationSurface(meta);
@@ -14366,6 +14371,7 @@ async function main() {
     if (!account || scope.accountId && scope.accountId !== account.id) return false;
     return !scope.userId || !personMemoryControl(memory, { logicalBotId: logicalBotId(config, account.id), userId: String(scope.userId) }).suppressesLegacy;
   }
+  reconstructedPeopleSourceEligible = reconstructionEligible;
   function reconstructionBudget() {
     const day = new Date(Date.now() + 28800000).toISOString().slice(0, 10);
     const remaining = configuredAccountDefinitions(config).filter(account => account.enabled && socialPolicy(account.id).enabled).map(account => {
@@ -14394,7 +14400,7 @@ async function main() {
         reconstructionHost = createPeopleReconstructionHost({ getState: () => memory, transact: ownerTransact,
           getRevision: () => memoryRuntime.revision, memoryHealth: () => memoryRuntime.status(), eligible: reconstructionEligible,
           source: { cacheDir: path.join(dataDir, "people-reconstruction-sources"), memoryFile: memoryPath, archives },
-          budget: reconstructionBudget,
+          budget: reconstructionBudget, compactSemantics: true,
           captureBinding: scope => {
             const account = reconstructionAccount(scope);
             return account ? { accountId: account.id, revision: configRevision, logicalBotId: logicalBotId(config, account.id),
@@ -14428,7 +14434,11 @@ async function main() {
             } catch (error) {
               metadata ??= error?.metadata;
               const code = ["MODEL_CONTEXT_CHANGED", "RECONSTRUCTION_STALE"].includes(error?.code)
-                ? error.code : "RECONSTRUCTION_MODEL_OUTPUT_REJECTED";
+                ? error.code : error?.name === "AbortError" && error.message === "Text completion timed out"
+                  ? "RECONSTRUCTION_MODEL_TIMEOUT"
+                  : error?.message === "Text completion output truncated" ? "RECONSTRUCTION_MODEL_TRUNCATED"
+                    : Number.isInteger(error?.metadata?.httpStatus) && error.metadata.httpStatus >= 400
+                      ? "RECONSTRUCTION_MODEL_HTTP_REJECTED" : "RECONSTRUCTION_MODEL_OUTPUT_REJECTED";
               const failure = Object.assign(new Error(code), { code });
               if (metadata?.usage) failure.metadata = { usage: metadata.usage };
               throw failure;
@@ -14899,13 +14909,18 @@ async function main() {
         }
         if (req.method === "POST" && url.pathname === "/api/owner/reconstruction/control") {
           const body = await readBody();
-          if (body.expectedConfigRevision !== configRevision || !reconstructionHost || !["pause", "resume", "cancel", "resume_semantics", "preview_unknown", "adopt_unknown", "skip_unknown"].includes(body.operation)
+          if (body.expectedConfigRevision !== configRevision || !reconstructionHost || !["pause", "resume", "cancel", "resume_semantics", "preview_unknown", "adopt_unknown", "skip_unknown", "publish_archive_evidence"].includes(body.operation)
+            || body.operation === "publish_archive_evidence" && Object.hasOwn(body, "maxSemanticCalls")
             || Object.keys(body).some(key => !["expectedConfigRevision", "expectedRevision", "operation", "maxSemanticCalls"].includes(key)))
             return replyJson(409, { ok: false, code: "RECONSTRUCTION_CONFLICT" });
           try {
             const args = { authorized: true, expectedRevision: body.expectedRevision };
             const result = body.operation === "preview_unknown" ? await reconstructionHost.dryRunUnknownRecovery(args)
               : body.operation === "adopt_unknown" ? await reconstructionHost.adoptUnknownRecovery(args)
+              : body.operation === "publish_archive_evidence" ? await reconstructionHost.publishArchiveEvidence({ ...args, isCurrent: () => {
+                const policy = normalizeAutonomousSocialPolicy(config.autonomousSocial || {});
+                return body.expectedConfigRevision === configRevision && policy.enabled && policy.reconstruction && !policy.paused && !policy.optOut;
+              } })
                 : await reconstructionHost.control({ ...args, operation: body.operation,
                   ...(body.maxSemanticCalls !== undefined ? { maxSemanticCalls: body.maxSemanticCalls } : {}) });
             return replyJson(200, { ok: true, result });
@@ -14933,7 +14948,8 @@ async function main() {
           if (!accountById(config, id) || !/^[1-9]\d{4,19}$/.test(userId || "") || !/^(group|private):[1-9]\d{4,19}$/.test(conversationId || "")
             || conversationId.startsWith("group:") && !accountScopeAllows(accountById(config, id), "group", conversationId.slice(6))) return replyJson(400, { ok: false, error: "请选择明确账号、QQ与允许的会话" });
           return replyJson(200, { ok: true, revision: configRevision,
-            profile: queryPersonMemory(memory, { logicalBotId: logicalBotId(config, id), userId, conversationId, now: Date.now() }) });
+            profile: queryPersonMemory(memory, { logicalBotId: logicalBotId(config, id), userId, conversationId, now: Date.now(),
+              sourceEligible: reconstructedPeopleSourceEligible }) });
         }
         if (req.method === "POST" && url.pathname === "/api/people/admin") {
           try {
