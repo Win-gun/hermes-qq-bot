@@ -8,6 +8,19 @@ import { TaskRuntime } from "../src/task-runtime.js";
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "qq-bot-agent-test-"));
 
+async function waitForCompletion(runtime, notices, taskIds) {
+  const deadline = performance.now() + 5_000;
+  const complete = (id) => runtime.get(id).status === "completed"
+    && notices.some((notice) => notice.taskId === id && notice.type === "completed");
+  while (!taskIds.every(complete)) {
+    const statuses = taskIds.map((id) => runtime.get(id).status);
+    assert.ok(!statuses.some((status) => ["failed", "cancelled", "waiting_permission"].includes(status)),
+      `任务提前退出：${statuses.join(", ")}`);
+    assert.ok(performance.now() < deadline, `任务未在时限内完成并发出通知：${statuses.join(", ")}`);
+    await delay(10);
+  }
+}
+
 try {
   const first = { aliases: ["小明"], profile: ["喜欢做模型"] };
   const second = { aliases: ["小明"] };
@@ -77,7 +90,7 @@ try {
   const local = runtime.createOffer({ conversationId: "group:other", messageType: "group", groupId: "group:test", userId: "member", objective: "读取文件", requiresLocalFiles: true });
   assert.equal(runtime.confirm(local.id, { userId: "member" }).ok, false, "群友不能确认本地文件任务");
   assert.equal(runtime.confirm(local.id, { userId: "owner", source: "admin" }).ok, true, "主人可确认后续等待具体授权");
-  await delay(160);
+  await waitForCompletion(runtime, notices, [isolated.id, local.id]);
   assert.equal(runtime.get(isolated.id).status, "completed");
   assert.equal(runtime.get(local.id).status, "completed");
   assert.equal(runtime.get(isolated.id).currentStage, "已完成");
@@ -91,7 +104,7 @@ try {
   retryable.lastError = "simulated failure";
   runtime.persist(retryable);
   assert.equal(runtime.resume(retryable.id, { userId: "owner", source: "admin" }).ok, true, "失败任务应允许由主人恢复执行");
-  await delay(100);
+  await waitForCompletion(runtime, notices, [retryable.id]);
   assert.equal(runtime.get(retryable.id).status, "completed", "恢复后的失败任务应重新进入执行队列");
 
   console.log(JSON.stringify({ ok: true, memoryEntries: integrity.totals.entries, tasks: runtime.list().length }));

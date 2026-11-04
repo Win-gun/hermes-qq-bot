@@ -155,10 +155,10 @@ function broadcast(options) {
 }
 
 const sent = (group) => actions.filter((item) => item.action === "send_group_msg" && String(item.params.group_id) === group);
-const hermesCalls = () => {
-  const file = path.join(home, "hermes-calls.jsonl");
-  return fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) : [];
-};
+const hermesCallDir = path.join(home, "hermes-calls");
+const hermesCallNames = () => fs.readdirSync(hermesCallDir).filter((name) => name.endsWith(".json"));
+const newHermesCallNames = (seen) => hermesCallNames().filter((name) => !seen.has(name));
+const readHermesCall = (name) => JSON.parse(fs.readFileSync(path.join(hermesCallDir, name), "utf8"));
 const archive = (...parts) => {
   const file = path.join(home, "data", "chat-archive", ...parts, "messages.jsonl");
   return fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) : [];
@@ -173,9 +173,13 @@ require("node:fs").appendFileSync(${JSON.stringify(dockerLog)}, JSON.stringify(p
 process.stderr.write("fixture: real Docker forbidden\\n"); process.exit(97);
 `, { mode: 0o700 });
   const hermes = path.join(home, "bin", "hermes");
+  fs.mkdirSync(hermesCallDir);
   fs.writeFileSync(hermes, `#!${process.execPath}
-const fs = require("node:fs"), file = ${JSON.stringify(path.join(home, "hermes-calls.jsonl"))};
-fs.appendFileSync(file, JSON.stringify(process.argv.slice(2))+"\\n");
+const fs = require("node:fs"), path = require("node:path"), { randomUUID } = require("node:crypto");
+const file = path.join(${JSON.stringify(hermesCallDir)}, randomUUID());
+// Publish only complete records; readers can poll while several fake models run.
+fs.writeFileSync(file+".tmp", JSON.stringify(process.argv.slice(2)), { flag: "wx" });
+fs.renameSync(file+".tmp", file+".json");
 const slowRoute=process.argv.some(arg=>arg.includes("CONCURRENT_BOTH_SWITCH"));
 setTimeout(()=>process.stdout.write("fixture text reply "+Date.now()+"-"+process.pid+(slowRoute?" CONCURRENT_BOTH_SWITCH":"")+"\\n"),slowRoute?1500:0);
 `, { mode: 0o700 });
@@ -516,7 +520,7 @@ setTimeout(()=>process.stdout.write("fixture text reply "+Date.now()+"-"+process
     const snapshot = await current();
     assert.deepEqual(snapshot.statuses.filter((item) => item.active).map((item) => item.id).sort(), [...expected].sort(),
       `${marker}: elections must not collapse into one global active account`);
-    const actionOffset = actions.length, promptOffset = hermesCalls().length;
+    const actionOffset = actions.length, seenCalls = new Set(hermesCallNames());
     const names = [...snapshot.items.map((item) => item.displayName), ...snapshot.failoverGroups.map((group) => group.policy.displayName)].join(" ");
     broadcast({ group: GROUP, text: `${names} ${marker}`, messageId: marker });
     const newReplies = () => actions.slice(actionOffset).filter((item) => item.action === "send_group_msg" && String(item.params.group_id) === GROUP);
@@ -524,7 +528,7 @@ setTimeout(()=>process.stdout.write("fixture text reply "+Date.now()+"-"+process
     const fakeAckMs=marker==='CONCURRENT_BOTH_SWITCH'?2000:0;
     const wireBudgetMs=Number(config.ai.timeoutMs)+expected.length*Math.max(1000,fakeAckMs)+1000;
     try {
-      await until(()=>hermesCalls().length-promptOffset>=expected.length,`${marker}: all selected routes start generation`,generationBudgetMs);
+      await until(()=>newHermesCallNames(seenCalls).length>=expected.length,`${marker}: all selected routes start generation`,generationBudgetMs);
       await until(() => newReplies().length >= expected.length, `${marker}: all selected routes reply`,wireBudgetMs);
       await until(()=>newReplies().every(item=>acknowledged.has(item.echo)),`${marker}: actual fake transport ACKs`,fakeAckMs+2000);
     }
@@ -534,12 +538,12 @@ setTimeout(()=>process.stdout.write("fixture text reply "+Date.now()+"-"+process
       const health=(await request('/health')).data;
       const lines=output.split('\n').filter(line=>line.includes(marker)||/duplicate|skipped|cancelled|discard|blocked|failed/i.test(line)).slice(-12);
       error.message += ` ${JSON.stringify({expected,replied:newReplies().map(item=>item.id),
-        promptCalls:hermesCalls().length-promptOffset,coordinator:health.replyCoordinator,lines})}`;
+        promptCalls:newHermesCallNames(seenCalls).length,coordinator:health.replyCoordinator,lines})}`;
       throw error;
     }
     await pause(200);
     assert.deepEqual(newReplies().map((item) => item.id).sort(), [...expected].sort(), `${marker}: exactly the two selected members and independent bots must send`);
-    const prompts = hermesCalls().slice(promptOffset).map((args) => args.join("\n"));
+    const prompts = newHermesCallNames(seenCalls).map((name) => readHermesCall(name).join("\n"));
     for (const [groupIndex, memberIndex] of [[0, expected.includes(ids[0]) ? 0 : 1], [1, expected.includes(ids[2]) ? 2 : 3]]) {
       const sharedName = routeGroups[groupIndex].policy.displayName;
       assert.ok(prompts.some((prompt) => prompt.includes(`「${sharedName}」（QQ ${qqs[memberIndex]}）`)
@@ -578,7 +582,7 @@ setTimeout(()=>process.stdout.write("fixture text reply "+Date.now()+"-"+process
   }
 
   await test("model reply awaits real ack and negative ack never creates a bot reply archive", async () => {
-    const modelOffset = hermesCalls().length, actionOffset = actions.length;
+    const seenCalls = new Set(hermesCallNames()), actionOffset = actions.length;
     const replies = () => archive("groups", NEGATIVE_ACK_GROUP).filter((item) => item.type === "bot_reply");
     assert.equal(replies().length, 0, "dedicated negative-ack conversation must start empty");
     const pending = negativeAck = {};
@@ -590,7 +594,7 @@ setTimeout(()=>process.stdout.write("fixture text reply "+Date.now()+"-"+process
     try {
       sendMention("NEGATIVE_ACK_MODEL");
       await until(() => pending.action, "model reply reaches fake socket before ack");
-      assert.ok(hermesCalls().slice(modelOffset).some((args) => args.join("\n").includes("NEGATIVE_ACK_MODEL")),
+      assert.ok(newHermesCallNames(seenCalls).some((name) => readHermesCall(name).join("\n").includes("NEGATIVE_ACK_MODEL")),
         "negative-ack attempt must originate from a generated model reply, not a manual send");
       failedText = String(pending.action.params.message).match(/fixture text reply \d+/)?.[0];
       assert.ok(failedText, "fake model output must be present in the attempted send");
@@ -642,7 +646,7 @@ setTimeout(()=>process.stdout.write("fixture text reply "+Date.now()+"-"+process
     }
   });
   await test("empty v2 items cold startup has responsive health/status and no ghost accounts", async () => {
-    const callsBefore = hermesCalls().length;
+    const callsBefore = hermesCallNames().length;
     await stopBridge();
     assert.ok(hasExited(child), "old isolated bridge must exit before restarting");
     const empty = stored(); empty.accounts.items = []; empty.accounts.failoverGroups = [];
@@ -659,13 +663,13 @@ setTimeout(()=>process.stdout.write("fixture text reply "+Date.now()+"-"+process
       assert.deepEqual(health?.accounts, [], `${route} must not invent a legacy account on cold startup`);
       if (route === "/api/status") assert.deepEqual(response.data.config?.accounts?.items, [], "cold status config must have no ghost accounts");
     }
-    assert.equal(hermesCalls().length, callsBefore, "empty-account startup must not invoke a model");
+    assert.equal(hermesCallNames().length, callsBefore, "empty-account startup must not invoke a model");
   });
   await test("no Docker mutation was attempted and no credentials escaped", async () => {
     const attempts = fs.existsSync(dockerLog) ? fs.readFileSync(dockerLog, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) : [];
     assert.equal(attempts.some((args) => ["run", "start", "stop", "pull", "restart", "rm", "rename", "update"].includes(args[0])), false);
     assert.equal(JSON.stringify(await current()).includes(token), false);
-    const calls = fs.readFileSync(path.join(home, "hermes-calls.jsonl"), "utf8").trim().split("\n");
+    const calls = hermesCallNames().map(readHermesCall);
     assert.ok(calls.length >= 5, "ordinary replies must use the local fake Hermes, never a model provider");
   });
 } catch (error) { results.push({ name: "fixture setup/runtime", ok: false, error: clean(error.message) }); }
