@@ -12,7 +12,7 @@ const center = normalizeApiCenter(config);
 const prior = Object.fromEntries(['vision', 'asr', 'tts', 'search'].map(kind => [kind, resolveApiCapability(config, kind)]));
 center.connections.push({ id: 'conn-bupt-campus', name: '北邮校园 API', provider: 'custom',
   baseUrl: 'https://myai.bupt.edu.cn/llm-gw/v1', credentialSource: 'keychain', apiKeyEnv: 'BUPT_API_KEY',
-  credentialRef: 'aabbccdd-1234-4567-89ab-123456789abc' });
+  credentialRef: '00000000-0000-4000-8000-000000000000' });
 center.profiles.push({ id: 'bupt-campus-text', name: '北邮 DeepSeek 文本', kind: 'chat',
   connectionId: 'conn-bupt-campus', model: 'deepseek-v4-flash', reasoningEffort: 'none', timeoutMs: 120000 });
 center.bindings.chat = 'bupt-campus-text';

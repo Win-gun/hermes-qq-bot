@@ -292,7 +292,7 @@ function decision(value) {
  *    objective}, freshOwnerActor): a NEW explicit objective, not the old summary.
  *    It creates a new executionGeneration and keeps old receipts/cumulative costs.
  *    Host resetContext({taskId,target,executionGeneration}) MUST synchronously
- *    return true after dropping all task-keyed offers, private/QZone context and
+ *    return true after dropping all offers for this task, private/QZone context and
  *    prepared content grants. Missing/async acknowledgement fails closed. No
  *    authority may be restored from an older tool's guard, signal or grant.
  *    TaskRuntime store revokes old tool grants atomically with this transition.
