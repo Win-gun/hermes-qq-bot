@@ -149,6 +149,14 @@ setTimeout(()=>{clearInterval(timer);process.exit(2);},10000).unref();\n`, { mod
   assert.deepEqual(saved.profile, ["fixture original profile"]);
   assert(saved.canonicalMemory.entries.some((item) => item.id === originalEntry.id && item.status === "rejected"));
   assert.equal((await request("/health")).data.memoryStorage.writer, true);
+  // An external change to the disposable snapshot must poison this writer,
+  // and connected QQ sockets cannot make the aggregate health look healthy.
+  fs.appendFileSync(memoryPath, " ");
+  await request("/api/memory/integrity");
+  const protectedHealth = (await request("/health")).data;
+  assert.equal(protectedHealth.memoryStorage.writable, false);
+  assert.equal(protectedHealth.memoryStorage.recoveryRequired, true);
+  assert.equal(protectedHealth.ok, false);
   await stop();
 
   const corrupt = '{"fixture-private-sentinel":';

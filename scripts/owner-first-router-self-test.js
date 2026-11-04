@@ -263,20 +263,22 @@ for (const [text, action, expected] of queryCases) {
   deep(revoked.intent, { action: 'revoke_directive', directiveId: 'a'.repeat(32) }, 'revoke intent bounded');
 }
 
-// ── 3. Ordinary owner chat is unmatched and costs zero model calls ───────────
+// ── 3. Generic semantic entry classifies ordinary chat once; no host action ──
 {
   const f = makeService({ policy: { enabled: true, naturalLanguage: true },
-    parseIntent: () => async () => { f.state.modelCalls += 1; return { action: 'status' }; } });
+    parseIntent: () => async () => { f.state.modelCalls += 1; return {}; } });
   for (const text of ['晚上吃什么好', '今天天气不错啊', '你觉得这个梗好笑吗', '夸夸我']) {
     const result = await f.service.router.handle(f.envelope(), text);
     equal(result.matched, false, `ordinary chat is not a command: ${text}`);
     equal(result.status, 'unmatched', `ordinary chat returns unmatched: ${text}`);
   }
-  equal(f.state.modelCalls, 0, 'ordinary chat never invokes the model parser');
+  equal(f.state.modelCalls, 4, 'each natural utterance uses one generic classification, without keyword gating');
   equal(f.state.wires.length, 0, 'ordinary chat performs no action');
   const unknown = await f.service.router.handle(f.envelope(), '/owner frobnicate');
   equal(unknown.status, 'not_supported', 'explicit /owner with an unknown verb stays not_supported');
-  equal(f.state.modelCalls, 0, 'explicit unknown command does not fall through to a model');
+  equal(f.state.modelCalls, 4, 'explicit unknown command does not fall through to a model');
+  equal((await f.service.router.handle(f.envelope(), '/bot social status')).matched, false, 'bot commands remain on their deterministic route');
+  equal(f.state.modelCalls, 4, 'bot commands do not incur semantic parsing');
 }
 
 // ── 4. lowRiskDirect: legacy default false, opt-in true, always bounded ──────

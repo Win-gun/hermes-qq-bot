@@ -331,9 +331,10 @@ const stale = issue('请将幽默程度设为轻微');
 const stalePlan = await prepareOwnerGuidance({ root, ...stale, verifyActor, eligible: true, parse: async () => {
   configRevision = 'r2'; return { operations: [opCreate(GROUP, 'humor', { level: 'light' }, '轻微')] };
 } });
-check(stalePlan.ok, 'plan is only a provisional candidate');
+check(!stalePlan.ok && !stalePlan.plan, 'revoked parser source cannot return even a provisional plan');
+equal(stalePlan.code, 'OWNER_GUIDANCE_ACTOR_UNVERIFIED', 'post-model source recheck');
 const staleBefore = JSON.stringify(root);
-check(!applyOwnerGuidance(root, { ...stalePlan.plan, verifyActor, now }).ok, 'authority revoked while parsing rejected in writer');
+check(!run(root, stale, [opCreate(GROUP, 'humor', { level: 'light' }, '轻微')]).ok, 'writer independently rejects the revoked original source');
 equal(JSON.stringify(root), staleBefore, 'stale plan no effect');
 const ttl = issue('幽默一点');
 rejected(root, ttl, [opCreate(GROUP, 'humor', { level: 'light' }, '幽默')], 'TTL inside writer', { now: ttl.now + 120_001 });

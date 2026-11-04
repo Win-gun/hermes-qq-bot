@@ -3,6 +3,7 @@ import { test } from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { TaskRuntime } from "../src/task-runtime.js";
 import { applyDelegationControl, createAgentExecutionLoop, createCapabilityRegistry, createDelegationGoal,
@@ -576,7 +577,7 @@ async function realDelegation(run, options = {}) {
     f.host.clock = Date.now; f.state.budget.deadline = Date.now() + 60000;
     const config = { taskMode: { workspaceBaseDir: "tasks", ownerUserIds: [owner.userId], maxTurns: 50 } };
     let loop, customExecute;
-    tasks = new TaskRuntime({ rootDir, config, validateDelegationActor: options.verify,
+    tasks = new TaskRuntime({ rootDir, config, validateDelegationActor: options.verify, ownerForAccount: options.ownerForAccount,
       execute: (task, runtime) => { executions.push(task.attemptId); return customExecute ? customExecute(task, runtime) : loop.execute(task, runtime); },
       notify: async (_task, notice) => { notices.push(notice); return true; } });
     loop = createAgentExecutionLoop({ ...f.host, store: createTaskDelegationStore(tasks) });
@@ -841,4 +842,423 @@ test("legacy formal-work supplement passes and confirmation semantics stay uncha
     await until(() => !tasks.running.size && !tasks.queue.length);
     assert.equal(calls, 2); assert.equal(task.status, "completed");
   } finally { if (tasks) await until(() => !tasks.running.size); fs.rmSync(rootDir, { recursive: true, force: true }); }
+});
+
+function renewalLoop(h, extra = {}) {
+  return createAgentExecutionLoop({ ...h.host, store: createTaskDelegationStore(h.tasks), resetContext: () => true, ...extra });
+}
+const argumentDigest = args => createHash("sha256").update(JSON.stringify(args)).digest("hex");
+const renewalCommand = task => ({ action: "reauthorize", expectedRevision: task.socialDelegation.revision, objective: "新的明确公开目标" });
+
+test("reauthorization requires fresh owner, exact CAS/objective and synchronous context-reset acknowledgement", async () => {
+  const f = fixture({ extra: { authorize: () => true, resetContext: () => true } }); await f.start();
+  await f.control("pause");
+  const command = renewalCommand(f.store.read("one"));
+  for (const actor of [{ ...owner, source: "host_event", kind: "event" }, { ...owner, source: "model" },
+    { ...owner, kind: "model" }, { ...owner, verified: false }]) {
+    await assert.rejects(f.loop.control("one", command, actor), /AUTHORITY_REQUIRED/);
+  }
+  await assert.rejects(f.loop.control("one", { ...command, expectedRevision: 0 }, owner), /CONTROL_CONFLICT/);
+  await assert.rejects(f.loop.control("one", { action: "reauthorize", expectedRevision: command.expectedRevision }, owner), /TEXT_INVALID/);
+  await assert.rejects(f.loop.control("one", { ...command, target: target("b") }, owner), /CONTROL_CONFLICT/);
+  for (const resetContext of [undefined, () => false, async () => true]) {
+    const loop = createAgentExecutionLoop({ ...f.host, resetContext });
+    await assert.rejects(loop.control("one", command, owner), /CONTEXT_RESET_REQUIRED/);
+  }
+  const renewed = await f.loop.control("one", command, owner);
+  assert.equal(renewed.executionGeneration, 2);
+  await assert.rejects(f.loop.control("one", command, owner), /CONTROL_CONFLICT/);
+  assert.equal(f.state.plans.length, 0); assert.equal(f.state.wires.length, 0);
+});
+
+test("reauthorization rechecks identity/policy/quiet and capability revision after resetting host context", async () => {
+  for (const change of ["quiet", "config", "capability", "target", "owner", "no-capabilities"]) {
+    const f = fixture(); await f.start(); await f.control("pause");
+    const loopRegistry = { snapshot: dest => f.host.registry.snapshot(dest) };
+    let calls = 0;
+    const loop = createAgentExecutionLoop({ ...f.host, resetContext: () => {
+      calls++;
+      if (change === "quiet") f.state.quiet.a = true;
+      if (change === "config") f.state.revision.a = 1;
+      if (change === "target") f.store.updateTask("one", { logicalBotId: "account:changed" });
+      if (change === "owner") f.store.updateTask("one", { socialOwnerUserId: "90002" });
+      if (change === "no-capabilities") for (const d of f.descriptors) f.state.unavailable.add(d.id);
+      if (change === "capability") {
+        // First snapshot after reset pins one revision; latest-draft check sees
+        // a newer registry. Never dispatch from either stale catalogue.
+        const old = f.host.registry.snapshot; let n = 0;
+        loopRegistry.snapshot = dest => { const rows = old(dest); if (++n === 1) f.descriptors[0].revision = 2; return rows; };
+      }
+      return true;
+    }, registry: loopRegistry });
+    const command = renewalCommand(f.store.read("one"));
+    await assert.rejects(loop.control("one", command, owner), /STALE_HOST|CAPABILITY_CHANGED|TARGET_MISMATCH|AUTHORITY_REQUIRED|NO_CAPABILITY/);
+    assert.equal(calls, 1); assert.equal(f.store.read("one").socialDelegation.executionGeneration, 1, change);
+    assert.equal(f.state.wires.length, 0);
+  }
+});
+
+test("restart regrant isolates old claims/private observations and revokes old tool grants durably", async () => {
+  for (const oldStatus of ["claimed", "accepted", "uncertain", "succeeded"]) {
+    await realDelegation(async h => {
+      const grant = h.tasks.grant(h.task.id, { type: "read", target: h.tasks.outputsDir(h.task.id) }, owner);
+      assert.equal(grant.ok, true);
+      const oldStep = { operationId: `old-${oldStatus}`, capability: "send", effect: "write", status: oldStatus,
+        argumentDigestVersion: 1, argumentDigest: argumentDigest({ text: "旧动作" }), observation: "OLD_PRIVATE_QZONE_OBSERVATION", controlRevision: 1 };
+      h.tasks.mutateDelegation(h.task.id, goal => ({ ...goal, status: "running", runId: "old-process",
+        objective: "OLD_PRIVATE_OBJECTIVE", summary: "OLD_PRIVATE_SUMMARY", supplements: ["OLD_PRIVATE_SUPPLEMENT"],
+        steps: [oldStep], spent: { steps: 1, plannerCalls: 2, units: 1 } }));
+      h.task.socialPrivateContext = true; h.task.supplements = [{ text: "OLD_PRIVATE_SUPPLEMENT" }];
+      h.tasks.persist(h.task);
+      const notices = [], cache = new Map([[h.task.id, { privateQzoneRead: true }]]);
+      let loop;
+      const next = new TaskRuntime({ rootDir: h.rootDir, config: h.config, execute: (task, runtime) => loop.execute(task, runtime),
+        notify: async (_task, notice) => { notices.push(notice); return true; } });
+      const task = next.get(h.task.id);
+      loop = renewalLoop({ ...h, tasks: next }, { resetContext: meta => {
+        assert.equal(meta.executionGeneration, 2); cache.delete(meta.taskId); return true;
+      } });
+      try {
+        assert.equal(task.socialDelegation.recoveryReadOnly, true);
+        assert(task.grants.every(g => g.revokedAt));
+        await next.pump(); assert.equal(next.running.size, 0); assert.equal(h.state.plans.length, 0);
+        const result = await loop.control(task.id, renewalCommand(task), owner);
+        assert.equal(cache.size, 0); assert.equal(task.socialPrivateContext, false);
+        assert.equal(task.socialDelegation.recoveryReadOnly, false); assert.equal(task.socialDelegation.executionGeneration, 2);
+        assert.deepEqual(task.socialDelegation.steps[0], oldStep);
+        assert.deepEqual(task.socialDelegation.spent, { steps: 1, plannerCalls: 2, units: 1 });
+        assert.equal(next.queue.length, 0, "reauthorize never creates a second queue or self-enqueues");
+        h.setPlan([tool("send", { text: "新的公开动作" }), done()]);
+        assert.equal(next.resume(task.id, { ...owner, expectedDelegationRevision: result.revision }).ok, true);
+        await until(() => !next.running.size && !next.queue.length);
+        assert.equal(task.status, "completed", oldStatus); assert.equal(h.state.wires.length, 1);
+        assert(h.state.plans.every(p => !JSON.stringify(p).includes("OLD_PRIVATE")));
+        assert(h.state.plans[0].capabilities.some(c => c.effect === "write"));
+        assert.equal(task.socialDelegation.steps[1].executionGeneration, 2);
+        assert.notEqual(task.socialDelegation.steps[1].operationId, oldStep.operationId);
+        const disk = JSON.parse(fs.readFileSync(next.taskPath(task.id), "utf8"));
+        assert.deepEqual(disk.socialDelegation.steps[0], oldStep); assert(disk.grants.every(g => g.revokedAt));
+        assert(!notices.some(n => /OLD_PRIVATE/.test(JSON.stringify(n))));
+      } finally { for (const c of next.controllers.values()) c.abort(); await until(() => !next.running.size); }
+    });
+  }
+});
+
+test("regrant cannot auto-repeat old accepted/unknown/ACK writes, including hashless legacy claims", async () => {
+  for (const status of ["claimed", "accepted", "uncertain", "succeeded"]) {
+    for (const hashed of [true, false]) {
+      await realDelegation(async h => {
+        const prior = { operationId: "prior-act", capability: "send", effect: "write", status,
+          ...(hashed ? { argumentDigest: argumentDigest({ text: "same action" }) } : {}) };
+        h.tasks.mutateDelegation(h.task.id, goal => ({ ...goal, status: "uncertain", steps: [prior] }));
+        const loop = renewalLoop(h); h.executeWith((task, runtime) => loop.execute(task, runtime));
+        await loop.control(h.task.id, renewalCommand(h.task), owner);
+        h.setPlan([tool("send", { text: "same action" }), done()]);
+        assert.equal(h.tasks.resume(h.task.id, owner).ok, true); await h.idle();
+        assert.equal(h.task.socialDelegation.code, "DELEGATION_PRIOR_EFFECT_REPLAY");
+        assert.equal(h.state.wires.length, 0); assert.deepEqual(h.task.socialDelegation.steps, [prior]);
+      });
+    }
+  }
+});
+
+test("pause immediately aborts old context; regrant and late model result cannot revive it", async () => {
+  const entered = deferred(), late = deferred();
+  await realDelegation(async h => {
+    let oldSignal, fresh = false;
+    const loop = renewalLoop(h, { planner: async (ctx, meta) => {
+      if (!fresh) { oldSignal = meta.signal; entered.resolve(); return late.promise; }
+      return ctx.observations.length ? done() : tool("send", { text: "fresh-generation" });
+    } });
+    h.executeWith((task, runtime) => loop.execute(task, runtime));
+    h.tasks.confirm(h.task.id, owner); await entered.promise;
+    await loop.control(h.task.id, { action: "pause", expectedRevision: h.task.socialDelegation.revision }, owner);
+    assert.equal(oldSignal.aborted, true); await h.idle(); assert.equal(h.task.status, "paused");
+    await loop.control(h.task.id, renewalCommand(h.task), owner); fresh = true;
+    h.tasks.resume(h.task.id, owner); await h.idle();
+    const beforeLate = clone(h.task.socialDelegation);
+    late.resolve(tool("send", { text: "OLD_LATE_PRIVATE_RESULT" })); await delay(5);
+    assert.deepEqual(h.task.socialDelegation, beforeLate); assert.equal(h.state.wires.length, 1);
+  });
+});
+
+test("revoke parks delegation; regrant ignores late tool ACK and cannot restore earlier local grants", async () => {
+  const entered = deferred(), late = deferred();
+  await realDelegation(async h => {
+    const issued = h.tasks.grant(h.task.id, { type: "read", target: h.tasks.outputsDir(h.task.id) }, owner);
+    assert.equal(issued.ok, true);
+    assert.equal(h.tasks.grant(h.task.id, { type: "read", target: h.rootDir }, owner).ok, true);
+    const loop = renewalLoop(h); h.executeWith((task, runtime) => loop.execute(task, runtime));
+    let oldMeta, first = true;
+    h.tools.send = async (_args, meta) => {
+      if (first) { first = false; oldMeta = meta; entered.resolve(); return late.promise; }
+      meta.guard(); h.state.wires.push(meta.target);
+      return { status: "succeeded", scope: meta.target, receiptId: "new-ack" };
+    };
+    h.setPlan([tool("send", { text: "old-queued-action" })]);
+    h.tasks.confirm(h.task.id, owner); await entered.promise;
+    const oldAttempt = h.task.attemptId;
+    assert.equal(h.tasks.revoke(h.task.id, issued.grant.id, owner).ok, true);
+    assert(h.task.grants.every(g => g.revokedAt), "parking also expires other grants from the old execution");
+    assert.equal(oldMeta.signal.aborted, true); assert.throws(() => oldMeta.guard());
+    await h.idle(); assert.equal(h.task.status, "paused");
+    assert.equal(h.task.socialDelegation.steps[0].status, "uncertain");
+    assert.equal(h.tasks.resume(h.task.id, h.event()).ok, false);
+    await loop.control(h.task.id, renewalCommand(h.task), owner);
+    h.setPlan([tool("send", { text: "new-separate-action" }), done()]);
+    assert.equal(h.tasks.resume(h.task.id, owner).ok, true); await h.idle();
+    assert.notEqual(h.task.attemptId, oldAttempt); assert.equal(h.state.wires.length, 1);
+    const beforeLate = clone(h.task.socialDelegation);
+    late.resolve({ status: "succeeded", scope: oldMeta.target, receiptId: "LATE_OLD_ACK", value: "OLD_PRIVATE_QZONE" }); await delay(5);
+    assert.deepEqual(h.task.socialDelegation, beforeLate); assert.throws(() => oldMeta.guard(), /CALL_CLOSED/);
+    assert(h.task.grants.every(g => g.revokedAt));
+  });
+});
+
+test("queued/running attempts cannot be reauthorized; changed logical identity blocks both regrant and resume", async () => {
+  let logicalBotId = "account:a";
+  await realDelegation(async h => {
+    const loop = renewalLoop(h);
+    h.task.status = "queued"; h.tasks.persist(h.task);
+    await assert.rejects(loop.control(h.task.id, renewalCommand(h.task), owner), /EXECUTION_ACTIVE/);
+    h.tasks.mutateDelegation(h.task.id, goal => ({ ...goal, status: "paused" }));
+    h.tasks.running.add(h.task.id);
+    await assert.rejects(loop.control(h.task.id, renewalCommand(h.task), owner), /EXECUTION_ACTIVE/);
+    h.tasks.running.delete(h.task.id);
+    logicalBotId = "account:changed";
+    await assert.rejects(loop.control(h.task.id, renewalCommand(h.task), owner), /IDENTITY_CHANGED/);
+    assert.equal(h.tasks.resume(h.task.id, owner).code, "DELEGATION_IDENTITY_CHANGED");
+    assert.equal(h.state.wires.length, 0); assert.equal(h.task.socialDelegation.executionGeneration, 1);
+  }, { ownerForAccount: () => logicalBotId });
+});
+
+test("regrant pins config and fresh capabilities until dispatch; subsequent restart stays read-only", async () => {
+  await realDelegation(async h => {
+    h.tasks.mutateDelegation(h.task.id, goal => ({ ...goal, status: "paused" }));
+    const loop = renewalLoop(h); h.executeWith((task, runtime) => loop.execute(task, runtime));
+    await loop.control(h.task.id, renewalCommand(h.task), owner);
+    h.state.revision.a = 1;
+    h.setPlan([tool("send", { text: "not-current" })]);
+    h.tasks.resume(h.task.id, owner); await h.idle();
+    assert.equal(h.state.plans.length, 0); assert.equal(h.state.wires.length, 0);
+    await loop.control(h.task.id, renewalCommand(h.task), owner);
+    h.descriptors.find(d => d.id === "send").revision = 2;
+    h.tasks.resume(h.task.id, owner); await h.idle();
+    assert.equal(h.task.socialDelegation.code, "DELEGATION_CAPABILITY_CHANGED"); assert.equal(h.state.wires.length, 0);
+    h.state.revision.a = 2;
+    let recovered;
+    const next = new TaskRuntime({ rootDir: h.rootDir, config: h.config, execute: (task, runtime) => recovered.execute(task, runtime), notify: async () => true });
+    recovered = renewalLoop({ ...h, tasks: next });
+    try {
+      h.setPlan([tool("read_history"), { action: "wait", summary: "read only" }]);
+      assert.equal(next.resume(h.task.id, owner).ok, true);
+      await until(() => !next.running.size && !next.queue.length);
+      assert.equal(next.get(h.task.id).status, "waiting");
+      assert(h.state.plans.every(p => p.capabilities.every(c => c.effect === "read")));
+      assert.equal(h.state.wires.length, 0);
+    } finally { for (const c of next.controllers.values()) c.abort(); await until(() => !next.running.size); }
+  });
+});
+
+test("terminal cancellation and unresolved broker operations are not erased by regrant", async () => {
+  await realDelegation(async h => {
+    h.tasks.mutateDelegation(h.task.id, goal => ({ ...goal, status: "paused" }));
+    h.task.operationLedger = [{ sideEffect: true, status: "uncertain", operationId: "broker-unknown" }]; h.tasks.persist(h.task);
+    const loop = renewalLoop(h);
+    await assert.rejects(loop.control(h.task.id, renewalCommand(h.task), owner), /UNRESOLVED_SIDE_EFFECT/);
+    assert.equal(h.task.socialDelegation.executionGeneration, 1);
+    assert.equal(h.tasks.cancel(h.task.id, owner).ok, true);
+    await assert.rejects(loop.control(h.task.id, renewalCommand(h.task), owner), /NOT_RESUMABLE/);
+    assert.equal(h.task.operationLedger[0].status, "uncertain");
+  });
+});
+
+test("later resume preserves archived claimed writes verbatim and old ACK cannot prove new completion", async () => {
+  await realDelegation(async h => {
+    const prior = { operationId: "archived-claimed", capability: "send", effect: "write", status: "claimed", controlRevision: 1 };
+    h.tasks.mutateDelegation(h.task.id, goal => ({ ...goal, status: "uncertain", steps: [prior] }));
+    const loop = renewalLoop(h); h.executeWith((task, runtime) => loop.execute(task, runtime));
+    await loop.control(h.task.id, renewalCommand(h.task), owner);
+    h.setPlan([{ action: "wait", summary: "wait for fresh context" }]);
+    h.tasks.resume(h.task.id, owner); await h.idle();
+    h.setPlan([done("not based on old ACK")]);
+    h.tasks.resume(h.task.id, owner); await h.idle();
+    assert.equal(h.task.socialDelegation.code, "DELEGATION_NO_COMPLETION_EVIDENCE");
+    assert.deepEqual(h.task.socialDelegation.steps[0], prior); assert.equal(h.state.wires.length, 0);
+  });
+});
+
+test("regrant publication uncertainty blocks authority, does not retry or enqueue, even if rename reached disk", async () => {
+  await realDelegation(async h => {
+    const issued = h.tasks.grant(h.task.id, { type: "read", target: h.tasks.outputsDir(h.task.id) }, owner);
+    assert.equal(issued.ok, true);
+    h.tasks.mutateDelegation(h.task.id, goal => ({ ...goal, status: "paused", recoveryReadOnly: true }));
+    h.task.socialWake = { eventId: "followup:uncertain-boundary", status: "claimed", revision: 0,
+      runAt: 0, expiresAt: Date.now() + 60000 };
+    h.tasks.persist(h.task);
+    const before = clone(h.task.socialDelegation), loop = renewalLoop(h), originalFsync = fs.fsyncSync;
+    let fsyncs = 0;
+    try {
+      fs.fsyncSync = fd => { if (++fsyncs === 2) throw new Error("synthetic directory durability uncertainty"); return originalFsync(fd); };
+      await assert.rejects(loop.control(h.task.id, renewalCommand(h.task), owner), /DURABILITY_UNKNOWN/);
+    } finally { fs.fsyncSync = originalFsync; }
+    assert.equal(fsyncs, 2); assert.equal(h.task.authorityBlocked, true);
+    assert.deepEqual(h.task.socialDelegation, before);
+    assert.equal(h.tasks.resume(h.task.id, owner).ok, false); assert.equal(h.tasks.queue.length, 0);
+    assert.equal(h.state.plans.length, 0); assert.equal(h.state.wires.length, 0);
+    const disk = JSON.parse(fs.readFileSync(h.tasks.taskPath(h.task.id), "utf8"));
+    assert.equal(disk.socialDelegation.executionGeneration, 2, "rename is not proof of durable authority");
+    assert(disk.grants.every(g => g.revokedAt));
+    assert.equal(disk.socialWake.status, "revoked"); assert.equal(disk.socialWake.reason, "execution-boundary");
+  });
+});
+
+test("a completed read-only recovery may be explicitly reauthorized; ordinary completed work cannot", async () => {
+  await realDelegation(async h => {
+    h.tasks.mutateDelegation(h.task.id, goal => ({ ...goal, status: "completed", recoveryReadOnly: true }));
+    const loop = renewalLoop(h); h.executeWith((task, runtime) => loop.execute(task, runtime));
+    await loop.control(h.task.id, renewalCommand(h.task), owner);
+    h.setPlan([tool("send", { text: "new explicit action" }), done()]);
+    h.tasks.resume(h.task.id, owner); await h.idle();
+    assert.equal(h.task.status, "completed"); assert.equal(h.state.wires.length, 1);
+    await assert.rejects(loop.control(h.task.id, renewalCommand(h.task), owner), /NOT_RESUMABLE/);
+  });
+});
+
+test("new delegation completion never auto-delivers old private task artifacts", async () => {
+  await realDelegation(async h => {
+    fs.writeFileSync(path.join(h.tasks.outputsDir(h.task.id), "old-private.txt"), "SYNTHETIC_PRIVATE_ARTIFACT", { mode: 0o600 });
+    h.tasks.mutateDelegation(h.task.id, goal => ({ ...goal, status: "paused" }));
+    const loop = renewalLoop(h); h.executeWith((task, runtime) => loop.execute(task, runtime));
+    await loop.control(h.task.id, renewalCommand(h.task), owner);
+    h.setPlan([tool("read_history"), done()]);
+    h.tasks.resume(h.task.id, owner); await h.idle();
+    assert.equal(h.task.status, "completed");
+    assert.equal(h.tasks.artifacts(h.task.id).length, 1, "old audit artifacts are retained, not deleted");
+    assert(h.notices.filter(n => n.type === "completed").every(n => n.artifacts.length === 0));
+  });
+});
+
+test("reordered nested model arguments cannot replay an unknown write in a new generation", async () => {
+  await realDelegation(async h => {
+    h.descriptors.find(d => d.id === "send").argumentKeys = ["body", "style"];
+    h.descriptors.find(d => d.id === "send").validate = () => true;
+    let first = true;
+    h.tools.send = async (_args, meta) => {
+      meta.guard();
+      if (first) { first = false; return { status: "accepted" }; }
+      assert.fail("canonical duplicate must not dispatch");
+    };
+    h.setPlan([tool("send", { style: "plain", body: { second: "b", first: "a" } })]);
+    h.tasks.confirm(h.task.id, owner); await h.idle();
+    assert.equal(h.task.status, "accepted");
+    const loop = renewalLoop(h); h.executeWith((task, runtime) => loop.execute(task, runtime));
+    await loop.control(h.task.id, renewalCommand(h.task), owner);
+    h.setPlan([tool("send", { body: { first: "a", second: "b" }, style: "plain" })]);
+    h.tasks.resume(h.task.id, owner); await h.idle();
+    assert.equal(h.task.socialDelegation.code, "DELEGATION_PRIOR_EFFECT_REPLAY");
+    assert.equal(h.task.socialDelegation.steps.length, 1); assert.equal(first, false);
+  });
+});
+
+test("missing or corrupt prior argument hashes fail closed across regrant", async () => {
+  for (const status of ["claimed", "accepted", "uncertain", "succeeded"]) {
+    for (const argumentDigest of [undefined, "", "invalid", "G".repeat(64)]) {
+      await realDelegation(async h => {
+        const prior = { operationId: "old-incomplete-hash", capability: "send", effect: "write",
+          status, argumentDigestVersion: 1, ...(argumentDigest === undefined ? {} : { argumentDigest }) };
+        h.tasks.mutateDelegation(h.task.id, goal => ({ ...goal, status: "paused", steps: [prior] }));
+        const loop = renewalLoop(h); h.executeWith((task, runtime) => loop.execute(task, runtime));
+        await loop.control(h.task.id, renewalCommand(h.task), owner);
+        h.setPlan([tool("send", { text: "same action" }), done()]);
+        h.tasks.resume(h.task.id, owner); await h.idle();
+        assert.equal(h.task.socialDelegation.code, "DELEGATION_PRIOR_EFFECT_REPLAY");
+        assert.equal(h.state.wires.length, 0); assert.deepEqual(h.task.socialDelegation.steps, [prior]);
+      });
+    }
+  }
+});
+
+test("execution boundaries durably revoke pending/claimed old wakes without relying on config changes", async () => {
+  for (const status of ["pending", "claimed"]) {
+    for (const boundary of ["pause", "reauthorize", "restart", "revoke", "cancel"]) {
+      await realDelegation(async h => {
+        h.state.revision.a = 7;
+        const wake = { eventId: `followup:old-${status}`, runAt: 0, expiresAt: Date.now() + 60000,
+          revision: h.state.revision.a, status, executionGeneration: 1 };
+        h.tasks.mutateDelegation(h.task.id, goal => ({ ...goal, status: "waiting" }));
+        const grant = boundary === "revoke" ? h.tasks.grant(h.task.id, { type: "read", target: h.rootDir }, owner) : null;
+        h.task.socialWake = clone(wake); h.tasks.persist(h.task);
+        const loop = renewalLoop(h);
+        let runtime = h.tasks;
+        if (boundary === "pause") await loop.control(h.task.id,
+          { action: "pause", expectedRevision: h.task.socialDelegation.revision }, owner);
+        if (boundary === "reauthorize") await loop.control(h.task.id, renewalCommand(h.task), owner);
+        if (boundary === "revoke") assert.equal(h.tasks.revoke(h.task.id, grant.grant.id, owner).ok, true);
+        if (boundary === "cancel") assert.equal(h.tasks.cancel(h.task.id, owner).ok, true);
+        if (boundary === "restart") runtime = new TaskRuntime({ rootDir: h.rootDir, config: h.config,
+          execute: async () => assert.fail("restart must not run an old wake"), notify: async () => assert.fail("no wake notice") });
+        const task = runtime.get(h.task.id), revoked = clone(task.socialWake);
+        assert.deepEqual(revoked, { ...wake, status: "revoked", revokedFrom: status,
+          revokedAt: revoked.revokedAt, reason: "execution-boundary" }, `${boundary}:${status}`);
+        assert(Number.isSafeInteger(revoked.revokedAt));
+        assert.equal(h.state.revision.a, wake.revision, "same config revision cannot preserve a wake");
+        assert.deepEqual(JSON.parse(fs.readFileSync(runtime.taskPath(task.id), "utf8")).socialWake, revoked);
+        // Both scheduler admission (pending) and a previously claimed wake's
+        // deferred current() proof must fail against the latest durable task.
+        assert.equal(task.socialWake.status === "pending" && task.socialWake.revision === h.state.revision.a, false);
+        assert.equal(task.socialWake.status === "claimed" && task.socialWake.revision === h.state.revision.a, false);
+        assert.equal(runtime.queue.length, 0); assert.equal(h.state.plans.length, 0); assert.equal(h.state.wires.length, 0);
+        await runtime.stateBarrier();
+      });
+    }
+  }
+});
+
+test("pause/regrant leaves the new generation waiting; a same-config old wake cannot resume it", async () => {
+  for (const status of ["pending", "claimed"]) {
+    const attested = new WeakSet();
+    await realDelegation(async h => {
+      h.state.revision.a = 7;
+      h.tasks.mutateDelegation(h.task.id, goal => ({ ...goal, status: "waiting" }));
+      h.task.socialWake = { eventId: "followup:old-generation", runAt: 0, expiresAt: Date.now() + 60000,
+        revision: h.state.revision.a, status, executionGeneration: 1 };
+      h.tasks.persist(h.task);
+      const loop = renewalLoop(h); h.executeWith((task, runtime) => loop.execute(task, runtime));
+      // Simulate the host's already-issued scheduled actor/current proof. Keep
+      // config unchanged and refresh its CAS after renewal to isolate this fence.
+      const currentWake = () => h.task.socialWake?.status === "claimed" && h.task.socialWake.revision === h.state.revision.a;
+      await loop.control(h.task.id, { action: "pause", expectedRevision: h.task.socialDelegation.revision }, owner);
+      const revoked = clone(h.task.socialWake);
+      await loop.control(h.task.id, renewalCommand(h.task), owner);
+      h.setPlan([{ action: "wait", summary: "new generation waiting for new evidence" }]);
+      assert.equal(h.tasks.resume(h.task.id, owner).ok, true); await h.idle();
+      assert.equal(h.task.socialDelegation.executionGeneration, 2); assert.equal(h.task.status, "waiting");
+      const priorExecutions = h.executions.length;
+      const actor = h.event(h.task.socialWake.eventId); attested.add(actor);
+      assert.equal(currentWake(), false);
+      assert.equal(h.tasks.resume(h.task.id, actor).ok, false, "latest wake proof must reject even a fresh CAS and unchanged config");
+      await h.idle();
+      assert.deepEqual(h.task.socialWake, revoked, "reauthorize does not rewrite its historical revocation");
+      assert.equal(h.state.revision.a, 7); assert.equal(h.executions.length, priorExecutions); assert.equal(h.state.wires.length, 0);
+    }, { verify: (actor, task, context) => !context.event || attested.has(actor)
+      && task.socialWake?.status === "claimed" && task.socialWake.eventId === actor.eventId && task.socialWake.revision === 7 });
+  }
+});
+
+test("execution boundary preserves terminal wake history and permits only a newly scheduled wake", async () => {
+  await realDelegation(async h => {
+    const loop = renewalLoop(h);
+    h.tasks.mutateDelegation(h.task.id, goal => ({ ...goal, status: "waiting" }));
+    h.task.socialWake = { eventId: "followup:expired", runAt: 0, expiresAt: 1, revision: 0, status: "expired" };
+    h.tasks.persist(h.task);
+    const historical = clone(h.task.socialWake);
+    await loop.control(h.task.id, renewalCommand(h.task), owner);
+    assert.deepEqual(h.task.socialWake, historical);
+    h.task.socialWake = { eventId: "followup:new-generation", runAt: Date.now() + 60000,
+      expiresAt: Date.now() + 120000, revision: 0, status: "pending", executionGeneration: 2 };
+    h.tasks.persist(h.task);
+    assert.equal(h.task.socialWake.status, "pending"); assert.equal(h.task.socialWake.executionGeneration, 2);
+    assert.equal(h.tasks.queue.length, 0, "scheduling alone is not execution or a second queue");
+  });
 });

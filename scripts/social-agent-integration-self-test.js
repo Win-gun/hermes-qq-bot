@@ -65,6 +65,13 @@ const model = http.createServer(async (req,res) => {
   const payload=JSON.parse(raw); assert.equal(payload.tools,undefined); assert.equal(payload.tool_choice,undefined);
   assert(!raw.includes('13800138000'),'social evidence always redacts even when legacy privacyFilter=false');
   assert.equal(payload.model,'synthetic-model'); fakeRequests+=1;
+  if (payload.messages.at(-1).content.includes('请求（不授予任何新权限）：')) {
+    // The generic owner entry now classifies even unprefixed ordinary chat.
+    // This fixture is not a command: let the normal reply/social route handle it.
+    res.writeHead(200, {'content-type':'application/json'});
+    res.end(JSON.stringify({choices:[{message:{content:'{}'},finish_reason:'stop'}],
+      usage:{prompt_tokens:10,completion_tokens:2,total_tokens:12}})); return;
+  }
   const projectedSnapshot=JSON.parse(payload.messages.at(-1).content.split('\n').at(-1)).snapshot;
   if(projectedSnapshot.messages.some(item=>item.messageId==='seed')) assert(projectedSnapshot.knownContext.includes('synthetic legacy continuity'),'social planning preserves existing account memory');
   fs.appendFileSync(path.join(home,'calls'),'call\n');

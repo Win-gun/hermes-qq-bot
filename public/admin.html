@@ -8373,7 +8373,9 @@
         return [`重建：${phase} · 后台：${value?.busy === true ? "忙碌" : value?.busy === false ? "空闲" : "未知"}${value?.code && !["READY", "OK"].includes(value.code) ? ` · ${reason(value.code)}` : ""}`,
           `扫描 ${count(stats?.scanned)} · 恢复来源 ${count(stats?.recoveredSources)} · 人物 ${count(stats?.people)} · 归属待核实 ${count(stats?.unattributed)}`,
           `已核验 Verified ${count(stats?.tiers?.Verified)} · 支持类 Supported ${count(stats?.tiers?.Supported)} · 待核实 Tentative ${count(stats?.tiers?.Tentative)} · 冲突 Conflicted ${count(stats?.tiers?.Conflicted)} · 已抑制 Suppressed ${count(stats?.tiers?.Suppressed)}`,
-          `模型尝试 ${count(stats?.modelAttempts)} · 用量未知调用 ${count(stats?.unknownCalls)} · 已知 Token：输入 ${count(stats?.usage?.inputTokens)} / 输出 ${count(stats?.usage?.outputTokens)} / 合计 ${count(stats?.usage?.totalTokens)}（非完整账单）`];
+          `模型尝试 ${count(stats?.modelAttempts)} · 用量未知调用 ${count(stats?.unknownCalls)} · 已知 Token：输入 ${count(stats?.usage?.inputTokens)} / 输出 ${count(stats?.usage?.outputTokens)} / 合计 ${count(stats?.usage?.totalTokens)}（非完整账单）`,
+          job?.semanticStage ? `语义整理：${job.semanticStage.cursor?.phase === "done" ? "已遍历" : "尚未遍历完成"} · 已处理 ${count(job.semanticStage.processed)} · 提案 ${count(job.semanticStage.proposed)}（含精确去重复用 ${count(job.semanticStage.reused)}） · 本轮调用上限 ${count(job.semanticStage.maxCalls)}` : "语义整理：尚未开始独立整理阶段；扫描完成不等于语义完成。",
+          `实际人物记忆发布 ${count(stats?.published)} · 未知批次 ${count(job?.unknownBatches)}（不重放）；模型提案不会自动升级为已核实事实。`];
       }
       function render() {
         if (!views.owner) return;

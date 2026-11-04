@@ -75,4 +75,21 @@ check((await delayed.handle({...envelope,messageId:'publish-confirm'},`/owner co
 delayAfter=false;
 const maliciousParser=createOwnerCommandRouter({...host,parseIntent:async()=>({action:'confirm',commandId:pendingPublish.id})});
 check((await maliciousParser.handle({...envelope,messageId:'parser-confirm'},'请继续')).code==='OWNER_PARSE_REJECTED','model cannot confirm on behalf of owner');
+let semanticCalls=0,semanticParses=0,candidateCurrent=true;
+const semantic=createOwnerCommandRouter({...host,isCurrent:()=>true,authorize:()=>true,allowDirect:()=>true,
+  parseIntent:async()=>{semanticParses++;return{action:'status'};},
+  execute:async(intent,ctx)=>{check(ctx.guard(),'native wire retains candidate lifetime');semanticCalls++;return{status:'confirmed',resultId:'synthetic-receipt'};},
+  query:async()=>{candidateCurrent=false;return{mustNotLeak:'synthetic-private-query'};}});
+const semanticEnvelope={...envelope,messageId:'semantic-native'};
+const candidate={action:'send_text',accountId:'alpha',groupId:'31001',text:'synthetic hello'};
+const opts={semanticCandidate:candidate,guard:()=>candidateCurrent};
+check((await semantic.handle(semanticEnvelope,'这个群还差一句问候，替我说一下',opts)).status==='confirmed','native semantic candidate executes original broker');
+check(semanticCalls===1&&semanticParses===0,'one classification reused without another model parse');
+await semantic.handle(semanticEnvelope,'这个群还差一句问候，替我说一下',opts);
+check(semanticCalls===1,'semantic command duplicate cannot resend');
+check((await semantic.handle({...envelope,messageId:'semantic-spoof',ownerUserId:'21002'},'指令',opts)).status==='blocked','candidate carries no owner authority');
+check((await semantic.handle({...envelope,messageId:'semantic-confirm'},'确认',{semanticCandidate:{action:'confirm',commandId:pendingPublish.id}})).code==='OWNER_PARSE_REJECTED','semantic model cannot manufacture confirmation');
+check((await semantic.handle({...envelope,messageId:'semantic-chat'},'今天挺开心',{skipSemanticParse:true})).matched===false&&semanticParses===0,'already classified ordinary chat avoids a second parse');
+check((await semantic.handle({...envelope,messageId:'semantic-query'},'现在的情况',{semanticCandidate:{action:'status'},guard:()=>candidateCurrent})).code==='OWNER_STALE_SOURCE','query revoked during await returns no private data');
+check(semanticCalls===1,'query guard failure cannot dispatch a write');
 console.log(JSON.stringify({ok:true,checks,fakeCarrier:true,realQQ:false,modelCalls:0}));

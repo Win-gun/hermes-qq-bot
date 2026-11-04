@@ -355,6 +355,9 @@ export async function prepareOwnerGuidance({ root, actor, text, now, verifyActor
       schema: Object.fromEntries((a.role === 'owner' ? OWNER_GUIDANCE_FIELDS : REVIEW_FIELDS).map(f => [f,
         { ...ENUMS[f], ...(NUMBERS[f] || {}), instruction: 'optional safe text <=320' }])),
       operations: ['create', 'update', 'supersede', 'revoke', 'query'], current }) });
+    // The source may have been revoked/rebound while the semantic model was
+    // running. Even a provisional plan/query must not outlive that host proof.
+    actorOf(a, text, now, verifyActor);
     if (parsed === null) return { ok: true, matched: false, code: 'OWNER_GUIDANCE_NOT_GUIDANCE' };
     data(parsed); demand(exact(parsed, ['operations']) && Buffer.byteLength(JSON.stringify(parsed), 'utf8') <= L.modelBytes, 'PARSE');
     // Validate against a disposable state before giving anything to the writer.

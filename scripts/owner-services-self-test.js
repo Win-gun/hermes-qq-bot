@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createOwnerServices, ownerQueryRange, normalizeOwnerControl, formatOwnerQueryResult } from '../src/owner-services.js';
+import { createOwnerServices, ownerQueryRange, normalizeOwnerControl, formatOwnerQueryResult, formatOwnerCommandResult } from '../src/owner-services.js';
 
 let checks=0;const check=(v,m)=>{assert(v,m);checks++;};
 const now=Date.parse('2026-03-08T20:00:00Z');
@@ -65,4 +65,15 @@ const report=formatOwnerQueryResult('tokens',service.query({action:'tokens'}));
 check(report.includes('费用未知')&&report.includes('下界')&&report.includes('时区'),'QQ report retains price/coverage/range rather than truncating raw JSON');
 check(!report.includes('fixture-model')&&!report.includes('intent'),'QQ report does not dump raw ledger data or proposals');
 check(formatOwnerQueryResult('status',service.query({action:'status',accountId:'beta'})).includes('beta'),'status report uses actual selected account');
+const semanticReport=formatOwnerCommandResult({status:'confirmed',action:'tokens',data:service.query({action:'tokens'})});
+check(semanticReport.includes('费用未知')&&semanticReport.includes('已记录调用'),'semantic query shows actual host data, not just saved acknowledgement');
+check(formatOwnerCommandResult({status:'uncertain',code:'OWNER_EXECUTION_UNCONFIRMED'}).includes('不会自动重试'),'semantic uncertain reply remains honest');
+check(formatOwnerCommandResult({status:'accepted',code:'OWNER_CONFIRM_REQUIRED',id:'fixture-id',change:{action:'autonomy',accountId:'alpha',enabled:false}}).includes('/owner confirm fixture-id'),'native confirmation is returned intact');
+let genericParses=0;
+const generic=createOwnerServices({...host,getConfig:()=>({...config,ownerControl:{...config.ownerControl,enabled:true,naturalLanguage:true}}),
+  parseIntent:async text=>{genericParses++;return text.includes('数字')?{action:'tokens',days:1}:{};}});
+check((await generic.router.handle({...envelope,messageId:'generic-no-prefix'},'账本那栏，我想看看数字')).action==='tokens'&&genericParses===1,'generic owner entry works without a fixed imperative prefix or social agent');
+check((await generic.router.handle({...envelope,messageId:'generic-chat'},'今天天气不错')).matched===false&&genericParses===2,'ordinary chat classification cannot invent an action');
+await generic.router.handle({...envelope,messageId:'generic-already-classified'},'今天天气不错',{skipSemanticParse:true});
+check(genericParses===2,'social classification is not repeated by native router');
 console.log(JSON.stringify({ok:true,checks,productionIO:false,actualModelCalls:0,actualQQ:0}));

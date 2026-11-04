@@ -100,7 +100,20 @@ async function respondModel(request, response) {
       if (text.includes('HOLD_SOURCE')) {
         const hold = holds.get('source'); hold.entered.resolve(); await hold.release.promise;
       }
-      if (text.includes('少套话')) output = { kind: 'guidance', guidance: { operations: [{ op: 'create', scope: { kind: 'bot' },
+      if (text.includes('PUBLIC_REGRANT_ALPHA')) {
+        const task = input.activeGoals.find(g => text.includes(g.id));
+        assert(task && input.hostRegrantConfirmation.eligible);
+        output = { kind: 'control', action: 'reauthorize', objective: 'PUBLIC_REGRANT_ALPHA',
+          evidence: input.hostRegrantConfirmation.evidence, taskId: task.id, taskEvidence: task.id };
+      }
+      else if (text.includes('NATIVE_QUERY')) output = { kind: 'owner_command', intent: { action: 'tokens', days: 1 }, evidence: 'NATIVE_QUERY' };
+      else if (text.includes('NATIVE_COMMAND_PAYLOAD')) {
+        const target = input.targets.find(t => t.accountId === account && t.groupId === GROUP);
+        output = { kind: 'owner_command', intent: { action: 'send_text', text: 'NATIVE_COMMAND_PAYLOAD' },
+          evidence: '放进去', targetId: target.targetId, targetEvidence: `${account}:${GROUP}` };
+      }
+      else if (text.includes('CLASSIFIED_ORDINARY_CHAT')) output = { kind: 'chat' };
+      else if (text.includes('少套话')) output = { kind: 'guidance', guidance: { operations: [{ op: 'create', scope: { kind: 'bot' },
         field: 'style', value: { tone: 'natural', verbosity: 'concise', instruction: '少套话，保持简洁' }, evidence: '少套话' }] } };
       else if (text.includes('改成开心')) output = { kind: 'control', action: 'correct', objective: 'PRIVATE_OWNER_GOAL_STICKER' };
       else if (text.includes('取消这个委托')) output = { kind: 'control', action: 'cancel' };
@@ -112,7 +125,14 @@ async function respondModel(request, response) {
     } else if (kind === 'plan') {
       const obs = input.observations;
       const tool = (capability, args = {}) => ({ action: 'tool', capability, args });
-      if (input.objective.includes('CANCEL')) {
+      if (input.objective === 'PUBLIC_REGRANT_ALPHA') {
+        assert(!content.includes('PRIVATE_QZONE_SENTINEL') && !content.includes('PRIVATE_OWNER_GOAL_QZONE'),
+          'new generation cannot inherit private observations or the old objective');
+        output = !obs.some(o => o.capability === 'read_context') ? tool('read_context')
+          : !obs.some(o => o.capability === 'express') ? tool('express', { messages: [{ type: 'text', content: 'PUBLIC_REGRANT_REPLY' }] })
+            : { action: 'complete', summary: 'PUBLIC_REGRANT_DONE' };
+      }
+      else if (input.objective.includes('CANCEL')) {
         const hold = holds.get('cancel'); hold.entered.resolve(); await hold.release.promise;
         output = tool('express', { messages: [{ type: 'text', content: 'CANCEL_MUST_NOT_SEND' }] });
       } else if (input.objective.includes('QUEUE')) output = obs.length
@@ -191,6 +211,7 @@ dns.lookup=async host=>{if(!['memecub.com','cdn.memecub.com'].includes(host))ret
 const fetch=global.fetch;global.fetch=(input,options)=>{const u=new URL(String(input));if(u.origin==='https://memecub.com'&&u.pathname==='/api/v1/search'){record('search',u.searchParams.get('q'));return Promise.resolve(new Response(JSON.stringify({data:[{title:'开心合成表情',kind:'meme',width:1,height:1,url:'https://cdn.memecub.com/happy.png',page_url:'https://memecub.com/meme/fictional',markdown:'synthetic metadata only',license:{code:'synthetic-test-only',commercial_use:false,attribution_required:false},private:false,profane:false}]}),{headers:{'content-type':'application/json'}}));}if(u.protocol!=='http:'||u.hostname!=='127.0.0.1'||!allow.has(Number(u.port)))return denied();return fetch(input,options);};
 https.request=(url,options,callback)=>{if(url.hostname!=='cdn.memecub.com')return denied();record('download','synthetic-png');const req=new EventEmitter();req.destroy=()=>req.emit('close');req.end=()=>setImmediate(()=>{const res=new PassThrough();res.statusCode=200;res.headers={'content-type':'image/png'};callback(res);res.end(Buffer.from(${JSON.stringify(png.toString('base64'))},'base64'));res.once('end',()=>req.emit('close'));});return req;};require('node:module').syncBuiltinESMExports();
 `);
+  const launchBridge = async () => {
   child = spawn(process.execPath, [path.join(root, 'src/bridge.js')], { cwd: root, env: {
     HOME: home, TMPDIR: path.join(home, 'tmp'), PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`,
     HERMES_QQ_HOME: home, HERMES_QQ_RESOURCE_ROOT: root, HERMES_QQ_LOG_DIR: path.join(home, 'logs'), HERMES_HOME: path.join(home, 'hermes'),
@@ -216,6 +237,8 @@ https.request=(url,options,callback)=>{if(url.hostname!=='cdn.memecub.com')retur
       self_id: 11001 + index, status: { online: true, good: true } }));
   }
   await until(async () => (await api('/api/accounts')).body.statuses.filter(s => s.connected).length === 2, 'two genuine fixture carriers');
+  };
+  await launchBridge();
   const vision = (await api('/api/config')).body;
   assert.equal((await api('/api/config', 'PATCH', { expectedRevision: vision.revision, vision: { enabled: true, preferChatModel: true } })).status, 200);
   await test('owner original Chinese event -> persistent guidance -> authenticated read API and peer isolation', async () => {
@@ -228,6 +251,33 @@ https.request=(url,options,callback)=>{if(url.hostname!=='cdn.memecub.com')retur
     assert.equal(read.body.guidance.accounts.find(a => a.accountId === 'alpha').ruleCount, 1);
     assert.equal(read.body.guidance.accounts.find(a => a.accountId === 'beta').ruleCount, 0);
     assert.equal((await api('/api/owner/autonomy', 'GET', undefined, false)).status, 403); assert.equal(groups().length, before);
+  });
+  await test('unprefixed semantic owner query reaches actual ledger once and displays host facts', async () => {
+    const before = { models: calls.length, privates: privates().length, groups: groups().length };
+    await owner('账本那一栏，我想看看数字 NATIVE_QUERY');
+    const reply = privates().slice(before.privates).find(row => textOf(row).includes('已记录调用尝试'));
+    assert(reply, 'host ledger data reaches owner instead of a generic saved acknowledgement');
+    assert(textOf(reply).includes('费用未知'));
+    assert.equal(calls.slice(before.models).filter(row => row.kind === 'classify').length, 1);
+    assert.equal(calls.slice(before.models).filter(row => row.kind === 'plan').length, 0);
+    assert.equal(groups().length, before.groups);
+  });
+  await test('unprefixed semantic owner command reuses native claims and sends exactly once', async () => {
+    const before = { groups: groups().length, tasks: tasks().length, models: calls.length };
+    const sent = await owner(`alpha:${GROUP} 那里，把 NATIVE_COMMAND_PAYLOAD 放进去。`);
+    await until(() => groups().slice(before.groups).some(row => textOf(row) === 'NATIVE_COMMAND_PAYLOAD'), 'native semantic host wire');
+    assert.equal(groups().slice(before.groups).length, 1);
+    assert.equal(tasks().length, before.tasks, 'one-shot command is not a second delegation');
+    assert.equal(calls.slice(before.models).filter(row => row.kind === 'classify').length, 1);
+    sockets[0].send(JSON.stringify(sent)); await pause(300);
+    assert.equal(groups().slice(before.groups).length, 1, 'original Carrier replay never sends twice');
+  });
+  await test('classified ordinary owner chat never starts a second command parse', async () => {
+    const before = calls.length, sent = privates().length;
+    emit('alpha', '今天挺开心 CLASSIFIED_ORDINARY_CHAT');
+    await until(() => calls.slice(before).some(row => row.kind === 'chat') && privates().length > sent, 'ordinary owner chat response');
+    assert.equal(calls.slice(before).filter(row => row.kind === 'classify').length, 1);
+    assert.equal(calls.slice(before).filter(row => row.kind === 'plan').length, 0);
   });
   let firstTask;
   await test('continuous goal -> real registry read_context -> correction without private goal leaking to group', async () => {
@@ -305,6 +355,28 @@ https.request=(url,options,callback)=>{if(url.hostname!=='cdn.memecub.com')retur
     assert.equal(row.source.actorUserId, PERSON);
     assert.equal(row.operations[0].scope.kind, 'group'); assert.equal(row.operations[0].scope.groupId, GROUP);
     assert.equal(memory().ownerGuidance.bots['account:beta'], undefined);
+  });
+  await test('actual bridge restart fences old delegation; explicit fresh regrant resets private context', async () => {
+    const old = tasks().find(t => t.socialDelegation?.objective.includes('QZONE'));
+    const oldSteps = structuredClone(old.socialDelegation.steps), before = groups().length;
+    for (const ws of sockets.splice(0)) ws.terminate();
+    const exited = new Promise(resolve => child.once('exit', resolve)); child.kill('SIGTERM');
+    await Promise.race([exited, pause(4000)]);
+    if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await exited; }
+    await launchBridge();
+    const recovered = tasks().find(t => t.id === old.id);
+    assert.equal(recovered.socialDelegation.recoveryReadOnly, true);
+    assert.deepEqual(recovered.socialDelegation.steps, oldSteps);
+    await pause(250); assert.equal(groups().length, before, 'restart never replays an old write');
+    await owner(`我确认重新授权 ${old.id}：PUBLIC_REGRANT_ALPHA。`);
+    await until(() => tasks().find(t => t.id === old.id)?.socialDelegation.status === 'completed', 'new generation complete', 25000);
+    const fresh = tasks().find(t => t.id === old.id);
+    assert.equal(fresh.socialDelegation.executionGeneration, 2);
+    assert.equal(fresh.socialDelegation.recoveryReadOnly, false);
+    assert.equal(fresh.socialPrivateContext, false);
+    assert.deepEqual(fresh.socialDelegation.steps.slice(0, oldSteps.length), oldSteps);
+    const sent = groups().slice(before);
+    assert.equal(sent.length, 1); assert(textOf(sent[0]).includes('PUBLIC_REGRANT_REPLY'));
   });
   await test('privacy and boundary audit', async () => {
     assert(groups().every(row => !/PRIVATE_OWNER_GOAL|OWNER_RESULT_|PRIVATE_QZONE_SENTINEL/.test(JSON.stringify(row.params))));

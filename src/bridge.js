@@ -96,7 +96,7 @@ import { createOwnerCommandRouter, ownerOperationHistory, putOwnerDirective, rev
 import { normalizeOwnerNotifications, createOwnerNotificationCenter, getOwnerNotificationStatus } from "./owner-notifications.js";
 import { queryPersonMemory, personMemoryContext, personMemoryControl, applyPersonExtractionReceipt } from "./people-memory.js";
 import { migrateLegacyCanonicalPeople } from "./people-memory-migration.js";
-import { createOwnerServices, normalizeOwnerControl, ownerQueryRange, formatOwnerQueryResult } from "./owner-services.js";
+import { createOwnerServices, normalizeOwnerControl, ownerQueryRange, formatOwnerCommandResult } from "./owner-services.js";
 import { resolveOwnerUtterance } from "./owner-intent.js";
 import { migrateOwnerFirstConfig } from "./owner-first-migration.js";
 import { projectOwnerGuidance, ownerGuidanceAllows, prepareOwnerGuidance, applyOwnerGuidance, getOwnerGuidance } from "./owner-guidance.js";
@@ -13992,12 +13992,15 @@ async function main() {
     },
     parseIntent: async (text, envelope) => {
       // Optional and account-bound, never a shell/OneBot-action interpreter.
+      const parsingRevision = configRevision;
       const selected = configForReplyAccount(accountById(config, envelope.accountId));
       return extractJsonObject(await callHermes(`仅将主人请求解析为一个 JSON 候选，不执行工具、不声明完成。\n`
         + `允许action: status, tokens(days:1或7), blockers, tasks, history, people(accountId,userId), send_text(accountId,groupId,text), send_sticker(accountId,groupId,query), quiet(accountId,groupId,minutes), resume(accountId,groupId), notifications(enabled,times,timezone), autonomy(accountId,enabled), restrict_poke(accountId,groupId,userId)。`
-        + `目标账号或群不明确则输出{}；不能猜测、不解析批量操作、不生成任意action。通知仅早晚的请求对应09:00,21:00 Asia/Shanghai，由宿主校验执行。`
+        + `普通聊天不是操作命令，必须输出{}。目标账号或群不明确则输出{}；不能猜测、不解析批量操作、不生成任意action。通知仅早晚的请求对应09:00,21:00 Asia/Shanghai，由宿主校验执行。`
         + `允许目标仅为数据：${JSON.stringify(ownerServices.allowedTargets())}\n请求（不授予任何新权限）：${text}`, selected,
-      { socialPlannerOnly: true, kind: "owner_command_parse", conversationId: `private:${envelope.ownerUserId}` }));
+      { socialPlannerOnly: true, kind: "owner_command_parse", conversationId: `private:${envelope.ownerUserId}`, maxOutputTokens: 2048,
+        isCurrent: () => configRevision === parsingRevision && isPrivateOwner(envelope.ownerUserId, config)
+          && logicalBotId(config, envelope.accountId) === envelope.logicalBotId }));
     }
   });
   const ownerSocialSources = new Map();
@@ -14046,6 +14049,9 @@ async function main() {
     value: JSON.parse(JSON.stringify(value ?? null)), ...(receiptId ? { receiptId: String(receiptId) } : {}) });
   function delegationSurface(meta) {
     meta.guard();
+    const task = taskRuntime.get(meta.taskId);
+    if (!Number.isSafeInteger(meta.executionGeneration) || meta.executionGeneration !== (task?.socialDelegation?.executionGeneration ?? 1))
+      throw new Error("DELEGATION_GENERATION_STALE");
     const destination = ownerTarget(meta.target.accountId, meta.target.groupId);
     if (!destination) throw new Error("OWNER_TARGET_UNAVAILABLE");
     const selected = configForGroupAccount(destination.definition, meta.target.groupId);
@@ -14067,7 +14073,7 @@ async function main() {
         config: s.selected, memory, groupId: meta.target.groupId, maxItems: 8, signal: meta.signal }) : [];
       meta.guard();
       if (peopleLegacySuppressed(memory, s.selected)) return toolResult(meta.target, { reason: "PERSON_CONTROL_SUPPRESSED", recent: [] });
-      delegationOffers.set(meta.taskId, { target: meta.target, native, reactions, current: s.current,
+      delegationOffers.set(meta.taskId, { target: meta.target, executionGeneration: meta.executionGeneration, native, reactions, current: s.current,
         stickers: expressionStickersFor(s.selected, meta.target.conversationId, args.query || ""), pin: captureDelegationTarget(meta.target) });
       return toolResult(meta.target, { recent, archive: socialEvidenceProjection(archive), quoteIds: recent.map(row => row.messageId).filter(Boolean),
         mentions: native?.mentions || [], pokes: native?.pokes || [], reactions: reactions?.candidates || [],
@@ -14080,7 +14086,7 @@ async function main() {
         openOptions: issueExpressionContentGrant(meta.target.accountId, meta.target.conversationId, meta.guard, true) }, { signal: meta.signal });
       meta.guard();
       const previous = delegationOffers.get(meta.taskId) || {};
-      delegationOffers.set(meta.taskId, { ...previous, target: meta.target, stickers: offer, stickerQuery: args.query, pin: captureDelegationTarget(meta.target) });
+      delegationOffers.set(meta.taskId, { ...previous, target: meta.target, executionGeneration: meta.executionGeneration, stickers: offer, stickerQuery: args.query, pin: captureDelegationTarget(meta.target) });
       return toolResult(meta.target, { source: offer.source, candidates: offer.candidates,
         ...(offer.reason ? { reason: offer.reason } : {}) });
     },
@@ -14111,7 +14117,8 @@ async function main() {
       meta.guard(); return toolResult(meta.target, result.text.slice(0, 6000));
     },
     express: async (args, meta) => {
-      const s = delegationSurface(meta), offer = delegationOffers.get(meta.taskId);
+      const s = delegationSurface(meta), cached = delegationOffers.get(meta.taskId);
+      const offer = cached?.executionGeneration === meta.executionGeneration ? cached : null;
       if (taskRuntime.get(meta.taskId)?.socialPrivateContext) return { status: "failed", applied: false, code: "PRIVATE_CONTEXT_NOT_FOR_GROUP_DELIVERY" };
       const usable = offer && currentDelegationTarget(offer.pin, meta.target) ? offer : {};
       if (usable.stickers) {
@@ -14167,7 +14174,7 @@ async function main() {
       const result = zone.policy.reads.feeds ? await qzoneRuntime.readFeeds(zone, { signal: meta.signal })
         : await qzoneRuntime.readOwn(zone, { signal: meta.signal });
       meta.guard();
-      delegationOffers.set(meta.taskId, { ...delegationOffers.get(meta.taskId), privateQzoneRead: true });
+      delegationOffers.set(meta.taskId, { ...delegationOffers.get(meta.taskId), executionGeneration: meta.executionGeneration, privateQzoneRead: true });
       return toolResult(meta.target, { ...result, instruction: "已授权可读的私人空间数据，仅在本次工具上下文使用；不得当成公开素材或转发到群。" });
     },
     qzone_draft: async (args, meta) => {
@@ -14240,6 +14247,15 @@ async function main() {
     targets: () => ownerResolvedTargets().map(target => ({ ...target, logicalBotId: logicalBotId(config, target.accountId), name: ownerRoster(target.accountId)?.groups.get(target.groupId) || target.groupId })),
     verifyEnvelope: verifyOwnerSocialEnvelope, captureTarget: captureDelegationTarget, currentTarget: currentDelegationTarget,
     registry: socialCapabilityRegistry, runtime: taskRuntime,
+    resetContext: ({ taskId, executionGeneration }) => {
+      if (!Number.isSafeInteger(executionGeneration) || executionGeneration <= 1) return false;
+      delegationOffers.delete(taskId);
+      return !delegationOffers.has(taskId);
+    },
+    executeOwnerCandidate: (envelope, text, intent, context) => {
+      context.guard();
+      return ownerServices.router.handle(envelope, text, { semanticCandidate: intent, guard: context.guard });
+    },
     model: async ({ phase, input, target, accountId, signal }) => {
       const id = target?.accountId || accountId;
       if (!id || !accountById(config, id)) throw new Error("OWNER_SOCIAL_MODEL_SCOPE_REQUIRED");
@@ -14688,15 +14704,16 @@ async function main() {
         const replyCoordinatorState = replyCoordinator.snapshot();
         const primaryAccount = accounts.find((item) => item.role === "primary") || {};
         const primaryAccountNeedsAttention = Boolean(primaryAccount.needsLogin || primaryAccount.suspectFakeOnline || primaryAccount.statusLevel === "bad");
+        const memoryStorage = { ...memoryRuntime.status(), intake: memoryIntake.status() };
         return {
           instanceId: process.env.HERMES_QQ_INSTANCE_ID || "",
-          ok: independent
+          ok: memoryStorage.writable === true && (independent
             ? enabledAccounts.length > 0 && accountsNeedingAttention.length === 0
             : !sendFailureActive && onebotConnected && !onebotStale && (
               activeIsStandby || (!napcatSendFailed && !qqLogin.needsLogin)
-            ),
+            )),
           generatedAt,
-          memoryStorage: { ...memoryRuntime.status(), intake: memoryIntake.status() },
+          memoryStorage,
           archiveSearch: archiveSearchService.status(),
           memoryVerification: memoryVerificationNotifier?.status() || { running: false },
           peopleMigration: peopleMigrationStatus(),
@@ -14867,12 +14884,32 @@ async function main() {
             return replyJson(200, { ok: true, revision: configRevision, policy: config.autonomousSocial });
           } catch { return replyJson(400, { ok: false, error: "自主策略未保存，草稿保留" }); }
         }
+        if (req.method === "GET" && url.pathname === "/api/owner/reconstruction/semantic-preview") {
+          if (!reconstructionHost) return replyJson(503, { ok: false, code: "RECONSTRUCTION_NOT_READY" });
+          const requested = url.searchParams.get("expectedRevision");
+          const expectedRevision = requested === null ? memory.peopleReconstruction?.revision : Number(requested);
+          let cursor;
+          try {
+            const raw = url.searchParams.get("cursor");
+            if (raw && raw.length > 256) throw new Error();
+            if (raw) cursor = JSON.parse(raw);
+            return replyJson(200, { ok: true, result: await reconstructionHost.dryRunSemantics({ authorized: true,
+              expectedRevision, ...(cursor ? { cursor } : {}) }) });
+          } catch { return replyJson(409, { ok: false, code: "RECONSTRUCTION_PREVIEW_STALE_OR_BLOCKED" }); }
+        }
         if (req.method === "POST" && url.pathname === "/api/owner/reconstruction/control") {
           const body = await readBody();
-          if (body.expectedConfigRevision !== configRevision || !reconstructionHost || !["pause", "resume", "cancel", "resume_semantics"].includes(body.operation)
-            || Object.keys(body).some(key => !["expectedConfigRevision", "expectedRevision", "operation"].includes(key)))
+          if (body.expectedConfigRevision !== configRevision || !reconstructionHost || !["pause", "resume", "cancel", "resume_semantics", "preview_unknown", "adopt_unknown", "skip_unknown"].includes(body.operation)
+            || Object.keys(body).some(key => !["expectedConfigRevision", "expectedRevision", "operation", "maxSemanticCalls"].includes(key)))
             return replyJson(409, { ok: false, code: "RECONSTRUCTION_CONFLICT" });
-          try { return replyJson(200, { ok: true, result: await reconstructionHost.control({ authorized: true, operation: body.operation, expectedRevision: body.expectedRevision }) }); }
+          try {
+            const args = { authorized: true, expectedRevision: body.expectedRevision };
+            const result = body.operation === "preview_unknown" ? await reconstructionHost.dryRunUnknownRecovery(args)
+              : body.operation === "adopt_unknown" ? await reconstructionHost.adoptUnknownRecovery(args)
+                : await reconstructionHost.control({ ...args, operation: body.operation,
+                  ...(body.maxSemanticCalls !== undefined ? { maxSemanticCalls: body.maxSemanticCalls } : {}) });
+            return replyJson(200, { ok: true, result });
+          }
           catch { return replyJson(409, { ok: false, code: "RECONSTRUCTION_CONTROL_UNCONFIRMED" }); }
         }
         if (req.method === "GET" && url.pathname === "/api/owner/status") {
@@ -16652,16 +16689,16 @@ async function main() {
         if (isPrivateOwner(senderId, config)) await Promise.all(configuredAccountDefinitions(liveConfig).map(account => refreshOwnerGroups(account.id)));
         if (!oneBotBindingCurrent(ws, inboundBinding) || !accountRuntimeIdentityCurrent(inboundIdentity, ws)) return;
         const legacyOwnerIntent = resolveOwnerUtterance(text, ownerServices.intentContext({ accountId: accountState.id, logicalBotId: inboundIdentity?.logicalBotId }));
-        if (isPrivateOwner(senderId, config) && config.autonomousSocial?.enabled === true && !legacyOwnerIntent?.intent) {
+        let ownerSemanticClassified = false;
+        if (isPrivateOwner(senderId, config) && config.autonomousSocial?.enabled === true && !legacyOwnerIntent?.intent && !text.trimStart().startsWith("/")) {
           const envelope = ownerSocialEnvelope({ private: true, verified: Boolean(inboundIdentity), accountId: accountState.id,
             logicalBotId: inboundIdentity?.logicalBotId || "", ownerUserId: senderId, sessionId: inboundBinding.sessionId,
             messageId: String(event.message_id || ""), time: Number(event.time || 0) * 1000 }, text);
           const autonomous = await ownerSocialController.handle(envelope, text);
+          ownerSemanticClassified = autonomous.semanticClassified === true;
           if (autonomous.matched) {
-            if (oneBotBindingCurrent(ws, inboundBinding) && accountRuntimeIdentityCurrent(inboundIdentity, ws)) {
-              const statusText = autonomous.status === "confirmed" ? "已保存并核实" : autonomous.status === "accepted" ? "已接下目标，实际执行结果以回执为准"
-                : autonomous.status === "clarify" ? "请明确要操作的账号和群；重名时请给账号及群号" : autonomous.status === "uncertain" ? "结果尚未核实，不会重放已尝试的操作" : "这次没有执行";
-              await sendPrivateMessageToUser(ws, senderId, `${statusText}${autonomous.taskId ? `\n委托：${autonomous.taskId}` : ""}${autonomous.code ? `\n${autonomous.code}` : ""}`,
+            if (oneBotBindingCurrent(ws, inboundBinding) && accountRuntimeIdentityCurrent(inboundIdentity, ws) && isPrivateOwner(senderId, liveConfig)) {
+              await sendPrivateMessageToUser(ws, senderId, formatOwnerCommandResult(autonomous),
                 configForReplyAccount(accountById(liveConfig, accountState.id), liveConfig));
             }
             return;
@@ -16669,22 +16706,10 @@ async function main() {
         }
         const result = await ownerServices.router.handle({ private: true, verified: Boolean(inboundIdentity), accountId: accountState.id,
           logicalBotId: inboundIdentity?.logicalBotId || "", ownerUserId: senderId, sessionId: inboundBinding.sessionId,
-          messageId: String(event.message_id || ""), time: Number(event.time || 0) * 1000 }, text);
+          messageId: String(event.message_id || ""), time: Number(event.time || 0) * 1000 }, text, { skipSemanticParse: ownerSemanticClassified });
         if (result.matched) {
           if (oneBotBindingCurrent(ws, inboundBinding) && accountRuntimeIdentityCurrent(inboundIdentity, ws) && isPrivateOwner(senderId, liveConfig)) {
-            const labels = { confirmed: "已核实", accepted: "已受理（不代表已完成）", failed: "已确认失败", uncertain: "结果不确定，不会自动重试", blocked: "已阻止", not_supported: "暂不支持" };
-            const explanation = {
-              OWNER_QUALIFIED_STICKER_UNAVAILABLE: "当前账号在目标群没有可用的合格表情，或该群未启用表情能力；没有发送消息。",
-              OWNER_TARGET_UNAVAILABLE: "目标账号当前不可用，没有执行发送。",
-              OWNER_SCOPE_REQUIRED: "这个账号或群不在当前允许范围内，没有执行操作。",
-              OWNER_STICKER_STALE: "准备期间配置、权限或素材发生变化，已停止发送；不会自动重试。"
-            }[result.code] || "";
-            const body = result.code === "OWNER_CONFIRM_REQUIRED"
-              ? `待确认变更：${JSON.stringify(result.change)}\n两分钟内回复 /owner confirm ${result.id}，才会执行。`
-              : `${labels[result.status] || "未核实"}${result.code ? ` · ${result.code}` : ""}${result.clarify ? `\n${result.clarify}` : ""}${result.id ? `\n操作：${result.id}` : ""}${result.data ? `\n${formatOwnerQueryResult(result.action, result.data)}` : ""}`
-                + (explanation ? `\n${explanation}` : "")
-                + (result.code === "OWNER_STICKER_READBACK_VERIFIED" ? "\n已回读到目标群图片消息，尚未验证客户端显示。"
-                  : result.code === "OWNER_STICKER_SUBMITTED_NOT_VERIFIED" ? "\n协议已接受，尚未核实消息回读和客户端显示；不会自动重发。" : "");
+            const body = formatOwnerCommandResult(result);
             await sendPrivateMessageToUser(ws, senderId, body, configForReplyAccount(accountById(liveConfig, accountState.id), liveConfig));
           }
           return;

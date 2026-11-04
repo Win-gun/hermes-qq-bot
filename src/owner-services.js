@@ -14,6 +14,26 @@ const accountId = v => typeof v==='string' && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.te
 const error = code => Object.assign(new Error(code),{code});
 
 /** Deterministic host report, never a model-generated usage/status statement. */
+export function formatOwnerCommandResult(result) {
+  const labels = { confirmed: '已核实', accepted: '已受理（不代表已完成）', failed: '已确认失败',
+    uncertain: '结果不确定，不会自动重试', blocked: '已阻止', not_supported: '暂不支持', clarify: '需要明确目标' };
+  if (result.code === 'OWNER_CONFIRM_REQUIRED')
+    return `待确认变更：${JSON.stringify(result.change)}\n两分钟内回复 /owner confirm ${result.id}，才会执行。`;
+  const explanation = {
+    OWNER_QUALIFIED_STICKER_UNAVAILABLE: '当前账号在目标群没有可用的合格表情，或该群未启用表情能力；没有发送消息。',
+    OWNER_TARGET_UNAVAILABLE: '目标账号当前不可用，没有执行发送。',
+    OWNER_SCOPE_REQUIRED: '这个账号或群不在当前允许范围内，没有执行操作。',
+    OWNER_STICKER_STALE: '准备期间配置、权限或素材发生变化，已停止发送；不会自动重试。',
+    OWNER_STICKER_READBACK_VERIFIED: '已回读到目标群图片消息，尚未验证客户端显示。',
+    OWNER_STICKER_SUBMITTED_NOT_VERIFIED: '协议已接受，尚未核实消息回读和客户端显示；不会自动重发。'
+  }[result.code] || '';
+  return `${labels[result.status] || '未核实'}${result.code ? ` · ${result.code}` : ''}`
+    + (result.clarify ? `\n${result.clarify}` : '')
+    + (result.taskId ? `\n委托：${result.taskId}` : result.id ? `\n操作：${result.id}` : '')
+    + (result.data ? `\n${formatOwnerQueryResult(result.action, result.data)}` : '')
+    + (explanation ? `\n${explanation}` : '');
+}
+
 export function formatOwnerQueryResult(action, data) {
   const count=value=>Number.isSafeInteger(value)&&value>=0?String(value):'未知';
   const brief=value=>typeof value==='string'?value.replace(/[\u0000-\u001f]/g,' ').slice(0,160):'未知';
@@ -334,9 +354,11 @@ export function createOwnerServices(host) {
       }
       return parsed;
     },
-    // Only imperative owner prefixes may consult the model at all. Deterministic
-    // query phrasing is already resolved above, so ordinary chat never reaches it.
-    isLikelyCommand:text=>typeof text==='string'&&/^(?:请|帮我|以后|别再|暂停|恢复|向|给|发送|发个|发一条|撤销|取消|安静|静默|闭嘴|开启|关闭|打开|别|不要|禁止|不许|叫|称呼|减少|降低)/u.test(text.trim()),
+    // Real owner + naturalLanguage opt-in are checked before this callback.
+    // Prefixes cannot establish intent. The social classifier's skip flag
+    // reuses its decision; otherwise exactly one bounded semantic parse is
+    // available even when autonomous social participation itself is disabled.
+    isLikelyCommand:text=>typeof text==='string'&&text.trim().length>0&&text.length<=4096&&!text.trimStart().startsWith('/'),
     allowDirect:intent=>policy().enabled===true&&policy().lowRiskDirect===true,
     parseIntent:host.parseIntent?async(text,e)=>policy().enabled&&policy().naturalLanguage?host.parseIntent(text,e):null:undefined,
     execute:async(intent,ctx)=>{

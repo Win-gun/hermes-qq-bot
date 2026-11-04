@@ -22,6 +22,9 @@ function backupBeforeCommit(destination, expectedRevision) {
   try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
 }
 parentPort?.on("message", request => {
+  const progress = request?.progress instanceof SharedArrayBuffer && request.progress.byteLength === 4
+    ? new Int32Array(request.progress) : null;
+  if (progress) Atomics.store(progress, 0, 1);
   try {
     let result;
     if (request.kind === "open") {
@@ -43,10 +46,12 @@ parentPort?.on("message", request => {
       else throw Object.assign(new Error(), { code: "MEMORY_INVALID_REQUEST" });
     }
     parentPort.postMessage({ id: request.id, ok: true, result, status: repository.status() });
+    if (progress) Atomics.store(progress, 0, 2);
     if (request.kind === "close") parentPort.close();
   } catch (error) {
     parentPort.postMessage({ id: request?.id, ok: false,
       code: /^MEMORY_[A-Z_]+$/.test(error?.code || "") ? error.code : "MEMORY_IO",
       status: repository?.status() || null });
+    if (progress) Atomics.store(progress, 0, 2);
   }
 });

@@ -19,6 +19,18 @@ function projectDelegation(task, status) {
   task.completedAt = ["completed", "cancelled"].includes(status) ? new Date().toISOString() : "";
 }
 
+function invalidateDelegationGrants(task, at) {
+  // Preserve grant/wake history, but neither authority nor a planned opportunity
+  // may cross an execution boundary even if the host config revision is unchanged.
+  task.grantRevision = nextCounter(task.grantRevision);
+  task.grants = asArray(task.grants).map(grant => grant.revokedAt ? grant
+    : { ...grant, revokedAt: new Date(at).toISOString(), revokedBy: "execution-boundary" });
+  if (["pending", "claimed"].includes(task.socialWake?.status)) {
+    task.socialWake = { ...task.socialWake, revokedFrom: task.socialWake.status,
+      status: "revoked", revokedAt: at, reason: "execution-boundary" };
+  }
+}
+
 function asArray(value) {
   if (Array.isArray(value)) return value.filter((item) => item !== undefined && item !== null);
   if (value === undefined || value === null || value === "") return [];
@@ -191,6 +203,8 @@ export class TaskRuntime {
       if (delegated(task) && !["completed", "cancelled"].includes(task.socialDelegation.status)) {
         const goal = task.socialDelegation;
         goal.recoveryReadOnly = true;
+        goal.runId = null;
+        invalidateDelegationGrants(task, this.clock());
         if (["running", "ready"].includes(goal.status)) goal.status = delegationReplayBlocked(goal) ? "uncertain" : "interrupted";
         goal.revision = nextCounter(goal.revision);
         goal.controlRevision = nextCounter(goal.controlRevision);
@@ -279,8 +293,36 @@ export class TaskRuntime {
   mutateDelegation(taskId, build) {
     const task = this.get(taskId);
     if (!task || task.authorityBlocked) throw new CapabilityError("DELEGATION_TASK_UNAVAILABLE");
-    const goal = build(structuredClone(task.socialDelegation ?? null), structuredClone(task));
+    const goal = build(structuredClone(task.socialDelegation ?? null), { ...structuredClone(task),
+      currentLogicalBotId: this.resolveLogicalOwner(task.accountId), executionActive: this.running.has(task.id) || task.status === "queued",
+      unresolvedOperations: hasUnresolvedSideEffects(task) });
     if (!goal || goal.version !== 1 || typeof goal.then === "function") throw new CapabilityError("DELEGATION_MUTATION_INVALID");
+    const previous = task.socialDelegation;
+    const renewed = previous && (goal.executionGeneration ?? 1) !== (previous.executionGeneration ?? 1);
+    if (renewed) {
+      if (this.running.has(task.id) || task.status === "queued") throw new CapabilityError("DELEGATION_EXECUTION_ACTIVE");
+      if (goal.executionGeneration !== (previous.executionGeneration ?? 1) + 1 || goal.code !== "DELEGATION_REAUTHORIZED"
+        || !goal.authorization || goal.status !== "ready") throw new CapabilityError("DELEGATION_GENERATION_INVALID");
+      if (hasUnresolvedSideEffects(task)) throw new CapabilityError("UNRESOLVED_SIDE_EFFECT");
+      if (this.resolveLogicalOwner(task.accountId) !== task.logicalBotId) throw new CapabilityError("DELEGATION_IDENTITY_CHANGED");
+      invalidateDelegationGrants(task, this.clock());
+      task.socialPrivateContext = false;
+      task.supplements = [];
+      task.executionSupplementCount = 0;
+      task.previousResultSummary = "";
+      task.resultSummary = "";
+      task.review = null;
+      task.deliveryArtifactNames = [];
+      task.objective = task.summary = task.socialOwnerPrivate ? "主人持续委托" : goal.objective;
+      task.status = "interrupted"; // ready, NOT queued: caller must confirm afresh.
+      task.completedAt = "";
+      task.suppressStartNotice = true;
+    }
+    if (["paused", "cancelled"].includes(goal.status) && goal.controlRevision !== previous?.controlRevision) {
+      this.controllers.get(task.id)?.abort();
+      this.queue = this.queue.filter(id => id !== task.id);
+      invalidateDelegationGrants(task, this.clock());
+    }
     task.socialDelegation = structuredClone(goal);
     projectDelegation(task, goal.status);
     this.persist(task);
@@ -431,6 +473,8 @@ export class TaskRuntime {
   confirm(taskId, actor = {}) {
     const task = this.get(taskId);
     if (!task) return { ok: false, reason: "任务不存在。" };
+    if (delegated(task) && this.resolveLogicalOwner(task.accountId) !== task.logicalBotId)
+      return { ok: false, code: "DELEGATION_IDENTITY_CHANGED", reason: "账号的逻辑身份已变化，需要新建委托。" };
     if (this.running.has(task.id)) return { ok: false, task, code: "TASK_BUSY", reason: "旧执行尚未退出。" };
     if (unresolvedTask(task)) return { ok: false, task, code: "UNRESOLVED_SIDE_EFFECT", reason: "存在已声明或结果不确定的执行副作用，不能恢复重放；此限制不包括通知回执。" };
     if (!["offered", "interrupted", "failed", ...(delegated(task) ? resumableDelegation : [])].includes(task.status)) return { ok: false, task, reason: `任务当前状态是 ${task.status}。` };
@@ -464,7 +508,7 @@ export class TaskRuntime {
     task.lastProgressAt = Date.now();
     task.lastProgressText = "已确认，正在进入执行队列。";
     task.suppressStartNotice = actor.source === "qq" || delegated(task)
-      && (actor.source === "host_event" || task.socialDelegation.recoveryReadOnly === true);
+      && (actor.source === "host_event" || task.socialDelegation.recoveryReadOnly === true || (task.socialDelegation.executionGeneration ?? 1) > 1);
     task.permissionTier = permission.owner ? "owner" : "isolated";
     if (delegated(task) && this.authorizeSocialTask && typeof actor.socialConfigRevision === "string") task.socialOwnerRevision = actor.socialConfigRevision;
     task.lastError = "";
@@ -522,6 +566,14 @@ export class TaskRuntime {
       task.status = "waiting_permission";
       task.currentStage = "授权已撤销";
       task.lastProgressText = "授权已撤销，等待当前执行停止。";
+    }
+    if (delegated(task) && !["cancelled", "completed"].includes(task.socialDelegation.status)) {
+      task.socialDelegation = applyDelegationControl(task.socialDelegation,
+        { action: "pause", expectedRevision: task.socialDelegation.revision }, this.clock());
+      task.socialDelegation.code = "DELEGATION_GRANTS_REVOKED";
+      projectDelegation(task, "paused");
+      this.queue = this.queue.filter(id => id !== task.id);
+      invalidateDelegationGrants(task, this.clock());
     }
     // Abort even if persistence fails; never let a failed revoke keep dispatching.
     this.controllers.get(task.id)?.abort();
@@ -581,8 +633,11 @@ export class TaskRuntime {
     if (delegated(task)) {
       const permission = this.delegationActorPermission(task, actor, "cancel");
       if (!permission.ok) return permission;
-      if (!["cancelled", "completed"].includes(task.socialDelegation.status)) task.socialDelegation = applyDelegationControl(task.socialDelegation,
-        { action: "cancel", expectedRevision: task.socialDelegation.revision }, this.clock());
+      if (!["cancelled", "completed"].includes(task.socialDelegation.status)) {
+        task.socialDelegation = applyDelegationControl(task.socialDelegation,
+          { action: "cancel", expectedRevision: task.socialDelegation.revision }, this.clock());
+        invalidateDelegationGrants(task, this.clock());
+      }
     }
     task.status = "cancelled";
     task.currentStage = "已取消";
@@ -706,7 +761,7 @@ export class TaskRuntime {
       || result.delegationRevision !== goal.revision || result.delegationControlRevision !== goal.controlRevision
       || result.delegationSupplementCount !== (goal.supplementCount || 0));
     const pendingEffect = unresolvedTask(task);
-    if ((pendingEffect && !["cancelled", "accepted", "uncertain"].includes(goal.status))
+    if ((pendingEffect && !["paused", "cancelled", "accepted", "uncertain"].includes(goal.status))
       || ["running", "ready"].includes(goal.status) || staleComplete || !Object.hasOwn(delegationStages, goal.status)) {
       goal = { ...goal, status: pendingEffect ? "uncertain" : "interrupted", revision: nextCounter(goal.revision),
         code: "DELEGATION_REEVALUATION_REQUIRED", updatedAt: this.clock() };
@@ -735,7 +790,8 @@ export class TaskRuntime {
       return;
     }
     await this.notifySafely(task, { type: "completed",
-      text: `任务 ${task.id} 已完成。${task.resultSummary ? `\n${task.resultSummary}` : ""}`, artifacts: this.deliveryArtifacts(task) });
+      text: `任务 ${task.id} 已完成。${task.resultSummary ? `\n${task.resultSummary}` : ""}`,
+      artifacts: task.deliveryArtifactNames.length ? this.deliveryArtifacts(task) : [] });
   }
 
   async run(task) {

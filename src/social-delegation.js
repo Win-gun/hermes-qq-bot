@@ -11,6 +11,11 @@ const copy = x => structuredClone(x);
 const fail = code => Object.assign(new Error(code), { code });
 const assert = (test, code) => { if (!test) throw fail(code); };
 const digest = x => createHash("sha256").update(JSON.stringify(x)).digest("hex");
+const argumentDigest = value => {
+  const canonical = x => Array.isArray(x) ? x.map(canonical) : plain(x)
+    ? Object.fromEntries(Object.keys(x).sort().map(k => [k, canonical(x[k])])) : x;
+  return digest(canonical(value));
+};
 const freeze = x => { if (x && typeof x === "object") { Object.values(x).forEach(freeze); Object.freeze(x); } return x; };
 const safeCode = x => typeof x === "string" && /^[A-Z][A-Z0-9_]{0,79}$/.test(x) ? x : "DELEGATION_TOOL_RESULT";
 const text = (x, max = 4000) => {
@@ -84,14 +89,18 @@ function matchesTask(task, target) {
 export function createDelegationGoal({ objective, target, now }) {
   assert(natural(now), "DELEGATION_CLOCK_INVALID");
   return { version: 1, target: copy(delegationTarget(target)), objective: text(objective), revision: 1, controlRevision: 1,
-    status: "ready", runId: null, createdAt: now, updatedAt: now, spent: { steps: 0, plannerCalls: 0, units: 0 },
+    executionGeneration: 1, status: "ready", runId: null, createdAt: now, updatedAt: now, spent: { steps: 0, plannerCalls: 0, units: 0 },
     steps: [], summary: "", code: "DELEGATION_READY" };
 }
 
+const generation = goal => goal.executionGeneration ?? 1;
+const stepGeneration = step => step.executionGeneration ?? 1;
 export function delegationReplayBlocked(goal) {
-  return goal?.version !== 1 || !Array.isArray(goal.steps) || goal.steps.some(s => !plain(s)
+  return goal?.version !== 1 || !Number.isSafeInteger(generation(goal)) || generation(goal) < 1
+    || !Array.isArray(goal.steps) || goal.steps.some(s => !plain(s)
     || !["read", "write"].includes(s.effect) || !["claimed", "succeeded", "failed", "accepted", "uncertain", "interrupted"].includes(s.status)
-    || ["accepted", "uncertain"].includes(s.status) || (s.effect === "write" && s.status === "claimed"));
+    || !Number.isSafeInteger(stepGeneration(s)) || stepGeneration(s) < 1 || stepGeneration(s) > generation(goal)
+    || stepGeneration(s) === generation(goal) && (["accepted", "uncertain"].includes(s.status) || (s.effect === "write" && s.status === "claimed")));
 }
 const unresolved = delegationReplayBlocked;
 export function applyDelegationControl(goal, command, now) {
@@ -108,7 +117,8 @@ export function applyDelegationControl(goal, command, now) {
   } else if (command.action === "resume") {
     assert(!unresolved(goal), "DELEGATION_UNRESOLVED_EFFECT");
     assert(["paused", "waiting", "interrupted", "blocked", "budget_exhausted"].includes(goal.status), "DELEGATION_NOT_RESUMABLE");
-    next.steps = next.steps.map(s => s.status === "claimed" ? { ...s, status: "interrupted", code: "DELEGATION_INTERRUPTED" } : s);
+    next.steps = next.steps.map(s => s.status === "claimed" && stepGeneration(s) === generation(goal)
+      ? { ...s, status: "interrupted", code: "DELEGATION_INTERRUPTED" } : s);
     next.status = "ready";
     next.runId = null;
   } else {
@@ -156,7 +166,7 @@ export function createCapabilityRegistry({ list, tools }) {
 function taskView(task) {
   if (!task) return null;
   return copy(Object.fromEntries(["id", "status", "accountId", "logicalBotId", "conversationId", "messageType", "groupId", "userId",
-    "authorityBlocked", "attemptId", "socialDelegation"].map(k => [k, task[k]])));
+    "authorityBlocked", "attemptId", "socialOwnerUserId", "currentLogicalBotId", "executionActive", "unresolvedOperations", "socialDelegation"].map(k => [k, task[k]])));
 }
 
 /** No new files, writer, queue, sender or startup scan. All updates go through
@@ -169,13 +179,19 @@ function taskView(task) {
 export function createTaskDelegationStore(runtime) {
   assert(runtime && ["get", "persist", "subscribeState"].every(k => typeof runtime[k] === "function"), "DELEGATION_STORE_INVALID");
   return Object.freeze({
-    read: taskId => taskView(runtime.get(taskId)),
+    read: taskId => {
+      const task = runtime.get(taskId);
+      return task ? taskView({ ...task, ...(typeof runtime.resolveLogicalOwner === "function"
+        ? { currentLogicalBotId: runtime.resolveLogicalOwner(task.accountId), executionActive: runtime.running?.has(taskId) || task.status === "queued" }
+        : {}) }) : null;
+    },
     mutate(taskId, build) {
       if (typeof runtime.mutateDelegation === "function") return runtime.mutateDelegation(taskId, build);
       const task = runtime.get(taskId);
       assert(task && !task.authorityBlocked, "DELEGATION_TASK_UNAVAILABLE");
       const next = build(copy(task.socialDelegation ?? null), taskView(task));
       assert(plain(next) && next.version === 1 && !next.then, "DELEGATION_MUTATION_INVALID");
+      assert(!task.socialDelegation || generation(next) === generation(task.socialDelegation), "DELEGATION_STORE_REAUTHORIZATION_UNAVAILABLE");
       task.socialDelegation = copy(next);
       runtime.persist(task);
       return { ok: true, durable: true, value: copy(next) };
@@ -208,6 +224,9 @@ function plannerContext(goal, catalogue, budget) {
     if (Buffer.byteLength(JSON.stringify(context)) > budget.maxContextBytes) { context.supplements.shift(); context.omittedSupplements++; break; }
   }
   for (const step of [...goal.steps].reverse()) {
+    // Old claims remain audit evidence, NOT executable context. In particular,
+    // never carry private/QZone observations into an explicitly renewed grant.
+    if (stepGeneration(step) !== generation(goal)) continue;
     const item = { operationId: step.operationId, capability: step.capability, status: step.status,
       controlRevision: step.controlRevision, code: step.code, observation: step.observation || "" };
     context.observations.unshift(item);
@@ -269,7 +288,16 @@ function decision(value) {
  *    verified source, exact account/logicalBot/conversation, eventId/eventAt
  *    and pinned expectedDelegationRevision. No timer/startup auto-requeue;
  *    events cannot lift an explicit pause. Restart recovery exposes READ tools
- *    only. Any later write needs a new host-validated task, not clearing flags.
+ *    only. Later writes require control({action:'reauthorize',expectedRevision,
+ *    objective}, freshOwnerActor): a NEW explicit objective, not the old summary.
+ *    It creates a new executionGeneration and keeps old receipts/cumulative costs.
+ *    Host resetContext({taskId,target,executionGeneration}) MUST synchronously
+ *    return true after dropping all task-keyed offers, private/QZone context and
+ *    prepared content grants. Missing/async acknowledgement fails closed. No
+ *    authority may be restored from an older tool's guard, signal or grant.
+ *    TaskRuntime store revokes old tool grants atomically with this transition.
+ *    Reauthorize only parks ready; obtain a fresh resume actor pinned to the
+ *    RETURNED revision, then tasks.resume() uses the SAME existing queue.
  *    MemoryRuntime-only adapters still use control(resume) + their host queue.
  *    correct updates the live goal; changing target/bot requires a NEW validated
  *    TaskRuntime task; keep the old goal/receipts, never retarget or reset them.
@@ -277,12 +305,18 @@ function decision(value) {
  *    pause/cancel may restrict a goal even while execution is quiet/disabled. Pausing
  *    closes tool guards through store.subscribe, without a second scheduler.
  * 7. claimed writes, accepted and uncertain NEVER resume/replay, even after
- *    restart or correction. Host receipt reconciliation is a separate audited
+ *    restart or correction. Reauthorization isolates, never resolves old claims;
+ *    identical canonical write arguments from older generations are blocked.
+ *    Legacy writes without a versioned canonical digest fence that capability
+ *    entirely (unless known failed/unapplied); their arguments cannot be recovered.
+ *    Unresolved
+ *    CapabilityBroker operations still require separate audited reconciliation.
+ *    Host receipt reconciliation is a separate audited
  *    operation, not a model decision. No automatic retry on persistence failure.
  *    TaskRuntime notices/delivery remain host-owned and must use current guards.
  */
 export function createAgentExecutionLoop(host) {
-  const { store, capture, guard, authorize, planner, registry, budget, observe, authorizeStep, clock = Date.now } = host || {};
+  const { store, capture, guard, authorize, planner, registry, budget, observe, authorizeStep, resetContext, clock = Date.now } = host || {};
   assert(store && ["read", "mutate", "subscribe"].every(k => typeof store[k] === "function")
     && [capture, guard, authorize, planner, budget, observe, clock].every(f => typeof f === "function")
     && typeof registry?.snapshot === "function", "DELEGATION_HOST_INVALID");
@@ -327,13 +361,56 @@ export function createAgentExecutionLoop(host) {
     const check = latest => {
       assert(matchesTask(latest, target), "DELEGATION_TARGET_MISMATCH");
       assert(authorize(actor, freeze({ action: command.action, target, taskId })) === true, "DELEGATION_AUTHORITY_REQUIRED");
+      if (command.action === "reauthorize") assert(!latest.socialOwnerUserId || latest.socialOwnerUserId === actor?.userId,
+        "DELEGATION_AUTHORITY_REQUIRED");
       // Restrictive controls remain available under quiet/stale-carrier state.
       // Human/source authenticity still comes from current host authorize().
-      if (!restrictive) sourceCheck(source, target);
+      if (!restrictive) {
+        assert(latest.currentLogicalBotId === undefined || latest.currentLogicalBotId === target.logicalBotId, "DELEGATION_IDENTITY_CHANGED");
+        sourceCheck(source, target);
+      }
     };
     check(task);
-    const goal = await mutate(taskId, (current, latest) => { check(latest); return applyDelegationControl(current, command, now()); });
-    return { status: goal.status, revision: goal.revision, code: goal.code };
+    let renewal;
+    if (command.action === "reauthorize") {
+      assert(fields(command, ["action", "expectedRevision", "objective"]) && command.expectedRevision === task.socialDelegation.revision,
+        "DELEGATION_CONTROL_CONFLICT");
+      assert(actor?.verified === true && ["qq", "admin"].includes(actor.source) && [undefined, "human"].includes(actor.kind)
+        && typeof actor.userId === "string" && actor.userId.length > 0
+        && (!task.socialOwnerUserId || task.socialOwnerUserId === actor.userId), "DELEGATION_AUTHORITY_REQUIRED");
+      const objective = text(command.objective);
+      assert(!task.executionActive, "DELEGATION_EXECUTION_ACTIVE");
+      assert(["paused", "waiting", "interrupted", "blocked", "budget_exhausted", "accepted", "uncertain"].includes(task.socialDelegation.status)
+        || task.socialDelegation.status === "completed" && task.socialDelegation.recoveryReadOnly === true,
+        "DELEGATION_NOT_RESUMABLE");
+      assert(Number.isSafeInteger(generation(task.socialDelegation)) && generation(task.socialDelegation) >= 1, "DELEGATION_GENERATION_INVALID");
+      const nextGeneration = generation(task.socialDelegation) + 1;
+      assert(Number.isSafeInteger(nextGeneration), "DELEGATION_GENERATION_INVALID");
+      assert(typeof resetContext === "function" && resetContext(freeze({ taskId, target, executionGeneration: nextGeneration })) === true,
+        "DELEGATION_CONTEXT_RESET_REQUIRED");
+      const catalogue = registry.snapshot(target);
+      assert(catalogue.length > 0, "DELEGATION_NO_CAPABILITY");
+      const catalogueDigest = digest(catalogue.map(c => c.descriptor));
+      const fresh = () => {
+        const current = registry.snapshot(target);
+        assert(digest(current.map(c => c.descriptor)) === catalogueDigest
+          && current.every((c, i) => c.execute === catalogue[i].execute), "DELEGATION_CAPABILITY_CHANGED");
+      };
+      renewal = (current, latest) => {
+        assert(current.revision === command.expectedRevision, "DELEGATION_CONTROL_CONFLICT");
+        assert(!latest.executionActive, "DELEGATION_EXECUTION_ACTIVE");
+        assert(!latest.unresolvedOperations, "UNRESOLVED_SIDE_EFFECT");
+        fresh();
+        assert(generation(current) + 1 === nextGeneration, "DELEGATION_GENERATION_INVALID");
+        return { ...current, objective, executionGeneration: nextGeneration, recoveryReadOnly: false,
+          authorization: { sourceDigest: digest(source), catalogueDigest, ownerUserId: actor.userId },
+          status: "ready", runId: null, summary: "", supplements: [], supplementCount: 0,
+          revision: current.revision + 1, controlRevision: current.controlRevision + 1, updatedAt: now(), code: "DELEGATION_REAUTHORIZED" };
+      };
+    }
+    const goal = await mutate(taskId, (current, latest) => { check(latest); return renewal ? renewal(current, latest) : applyDelegationControl(current, command, now()); });
+    check(read(taskId));
+    return { status: goal.status, revision: goal.revision, executionGeneration: generation(goal), code: goal.code };
   }
   const outcome = goal => ({ ok: goal.status === "completed", delegationStatus: goal.status, code: goal.code,
     delegationRevision: goal.revision, delegationControlRevision: goal.controlRevision, delegationSupplementCount: goal.supplementCount || 0,
@@ -350,8 +427,11 @@ export function createAgentExecutionLoop(host) {
       const latest = read(taskId);
       assert(!runtime.signal?.aborted && ["planning", "running", "reviewing", "delivering"].includes(latest.status), "DELEGATION_CANCELLED");
       assert(latest.attemptId === initialTask.attemptId, "DELEGATION_ATTEMPT_CHANGED");
+      assert(generation(latest.socialDelegation) === generation(initial), "DELEGATION_GENERATION_CHANGED");
       assert(matchesTask(latest, target), "DELEGATION_TARGET_MISMATCH");
+      assert(latest.currentLogicalBotId === undefined || latest.currentLogicalBotId === target.logicalBotId, "DELEGATION_IDENTITY_CHANGED");
       sourceCheck(source, target);
+      if (initial.authorization && !initial.recoveryReadOnly) assert(initial.authorization.sourceDigest === digest(source), "DELEGATION_STALE_HOST");
       return latest.socialDelegation;
     };
     baseCheck();
@@ -384,6 +464,7 @@ export function createAgentExecutionLoop(host) {
     };
     async function patch(build, expectedControlRevision) {
       return mutate(taskId, current => {
+        assert(generation(current) === generation(initial), "DELEGATION_GENERATION_CHANGED");
         assert(current.runId === runId, "DELEGATION_RUN_CHANGED");
         // A MemoryRuntime builder may see a newer draft than published read().
         // CAS against THAT draft, not only against our pre-await snapshot.
@@ -432,6 +513,8 @@ export function createAgentExecutionLoop(host) {
           assert(goal.spent.plannerCalls < b.maxPlannerCalls && goal.spent.steps <= b.maxSteps && goal.spent.units <= b.maxUnits,
             "DELEGATION_BUDGET_EXHAUSTED");
           const offered = registry.snapshot(target).filter(c => !goal.recoveryReadOnly || c.descriptor.effect === "read");
+          if (goal.authorization && !goal.recoveryReadOnly) assert(digest(registry.snapshot(target).map(c => c.descriptor)) === goal.authorization.catalogueDigest,
+            "DELEGATION_CAPABILITY_CHANGED");
           assert(offered.length > 0, "DELEGATION_NO_CAPABILITY");
           const context = plannerContext(goal, offered, b);
           await patch(current => {
@@ -442,7 +525,8 @@ export function createAgentExecutionLoop(host) {
           const next = decision(await bounded(revision, meta => planner(context, { signal: meta.signal, target, taskId })));
           goal = check(revision); b = limits();
           if (next.action !== "tool") {
-            if (next.action === "complete") assert(goal.steps.some(s => s.status === "succeeded" && s.controlRevision === revision)
+            if (next.action === "complete") assert(goal.steps.some(s => s.status === "succeeded" && s.controlRevision === revision
+              && stepGeneration(s) === generation(goal))
               && !unresolved(goal), "DELEGATION_NO_COMPLETION_EVIDENCE");
             return outcome(await patch(current => { check(revision); return { ...current, status: next.action === "complete" ? "completed" : "waiting",
               summary: next.summary, code: next.action === "complete" ? "DELEGATION_COMPLETED" : "DELEGATION_WAITING" }; }, revision));
@@ -455,8 +539,13 @@ export function createAgentExecutionLoop(host) {
             const current = registry.snapshot(target).find(c => c.descriptor.id === next.capability);
             assert(current?.fingerprint === cap.fingerprint && current.execute === cap.execute, "DELEGATION_CAPABILITY_CHANGED");
             assert(!read(taskId).socialDelegation.recoveryReadOnly || current.descriptor.effect === "read", "DELEGATION_RECOVERY_READ_ONLY");
+            assert(cap.descriptor.effect !== "write" || !read(taskId).socialDelegation.steps.some(s => stepGeneration(s) < generation(initial)
+              && s.effect === "write" && s.capability === next.capability
+              && (s.argumentDigestVersion !== 1 || typeof s.argumentDigest !== "string"
+                || !/^[a-f0-9]{64}$/.test(s.argumentDigest) || s.argumentDigest === argumentDigest(args))
+              && !(s.status === "failed" && s.applied === false)), "DELEGATION_PRIOR_EFFECT_REPLAY");
             assert(Object.keys(args).every(k => cap.descriptor.argumentKeys.includes(k)) && current.validate(args, target) === true, "DELEGATION_ARGS_INVALID");
-            assert(cap.descriptor.risk === "low" || authorizeStep?.(freeze({ taskId, target, operationId, capability: next.capability, args })) === true,
+            assert(cap.descriptor.risk === "low" || authorizeStep?.(freeze({ taskId, target, operationId, executionGeneration: generation(initial), capability: next.capability, args })) === true,
               "DELEGATION_APPROVAL_REQUIRED");
             const latest = check(revision), available = limits();
             assert(latest.spent.steps <= available.maxSteps && latest.spent.units <= available.maxUnits
@@ -471,13 +560,14 @@ export function createAgentExecutionLoop(host) {
               "DELEGATION_BUDGET_EXHAUSTED");
             return { ...current, spent: { ...current.spent, steps: current.spent.steps + 1, units: current.spent.units + cap.descriptor.cost },
               steps: [...current.steps, { operationId, capability: next.capability, effect: cap.descriptor.effect, controlRevision: revision,
-                argumentDigest: digest(args), status: "claimed", code: "DELEGATION_CLAIMED", at: now() }] };
+                executionGeneration: generation(initial), argumentDigestVersion: 1, argumentDigest: argumentDigest(args),
+                status: "claimed", code: "DELEGATION_CLAIMED", at: now() }] };
           }, revision);
           let receipt, observation = "", invoked = false;
           try {
             const raw = await bounded(revision, meta => {
               invoked = true;
-              return cap.execute(args, { ...meta, taskId, operationId, target });
+              return cap.execute(args, { ...meta, taskId, operationId, target, executionGeneration: generation(initial) });
             }, validate);
             assert(plain(raw), "DELEGATION_RECEIPT_INVALID");
             const status = raw.status;
@@ -523,6 +613,7 @@ export function createAgentExecutionLoop(host) {
       // Persistence uncertainty is never "fixed" by attempting another write.
       if (["DELEGATION_DURABILITY_UNKNOWN", "TASK_DURABILITY_UNKNOWN"].includes(error?.code)) throw error;
       const current = read(taskId).socialDelegation;
+      if (generation(current) !== generation(initial)) return outcome(current);
       if (current.status !== "running") return outcome(current);
       return outcome(await patch(latest => ({ ...latest, status: unresolved(latest) ? "uncertain"
         : error?.code === "DELEGATION_BUDGET_EXHAUSTED" ? "budget_exhausted"
@@ -531,7 +622,7 @@ export function createAgentExecutionLoop(host) {
   }
   function status(taskId) {
     const goal = read(taskId).socialDelegation;
-    return goal ? { status: goal.status, revision: goal.revision, controlRevision: goal.controlRevision, spent: copy(goal.spent),
+    return goal ? { status: goal.status, revision: goal.revision, executionGeneration: generation(goal), controlRevision: goal.controlRevision, spent: copy(goal.spent),
       code: goal.code, receipts: goal.steps.map(s => ({ operationId: s.operationId, capability: s.capability, status: s.status, code: s.code })) } : null;
   }
   return Object.freeze({ start, control, execute, status });

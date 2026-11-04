@@ -38,7 +38,7 @@ export const OWNER_DIRECTIVE_ACTIONS = Object.freeze(['poke', 'address', 'group_
 const queries = new Set(['status', 'blockers', 'tasks', 'history', 'activity', 'why']);
 /** The model candidate path may ONLY express these bounded actions. It can never
  * invent an actor, a permission, a target grant or a persistent preference. */
-const modelActions = new Set(['tokens', 'send_text', 'send_sticker', 'quiet', 'resume', 'notifications', 'autonomy',
+const modelActions = new Set(['tokens', 'people', 'send_text', 'send_sticker', 'quiet', 'resume', 'notifications', 'autonomy',
   'restrict_poke', 'revoke_directive']);
 const queryFields = ['action', 'days', 'accountId'];
 const fail = code => Object.assign(new Error(code), { code });
@@ -258,21 +258,35 @@ export function createOwnerCommandRouter({ read, transact, isOwner, capture, isC
   const inFlight = new Set();
   const direct = intent => intent.action !== 'confirm' && isLowRiskDirectAction(intent.action)
     && typeof allowDirect === 'function' && allowDirect(intent) === true;
-  return { async handle(envelope, text) {
+  return { async handle(envelope, text, options = {}) {
+    // Host-only reuse of a classification for the SAME verified Carrier event.
+    // A candidate never skips validation, authority, confirmations or claims.
+    const currentCandidate = () => {
+      try { return options.guard === undefined || typeof options.guard === 'function' && options.guard() === true; }
+      catch { return false; }
+    };
     const explicit = /^\/owner\b/iu.test(String(text));
     if (!envelope || envelope.private !== true || envelope.verified !== true || !qq(envelope.ownerUserId) || !id(envelope.accountId)
       || !logical(envelope.logicalBotId) || !/^[-A-Za-z0-9_:]{1,128}$/.test(envelope.messageId || '') || !isOwner(envelope))
       return { matched: explicit, status: 'blocked', code: 'OWNER_IDENTITY_REQUIRED' };
     const source = capture(envelope);
     let intent = null, clarify = null, modelParsed = false;
-    if (typeof parseUtterance === 'function') {
+    if (!currentCandidate()) return { matched: true, status: 'blocked', code: 'OWNER_STALE_SOURCE' };
+    if (Object.hasOwn(options, 'semanticCandidate')) {
+      try {
+        intent = validateOwnerIntent(options.semanticCandidate);
+        if (intent.action === 'confirm' || !(modelActions.has(intent.action) || queries.has(intent.action))) throw fail('OWNER_PARSE_REJECTED');
+        modelParsed = true;
+      } catch { return { matched: true, status: 'blocked', code: 'OWNER_PARSE_REJECTED' }; }
+    }
+    if (!intent && typeof parseUtterance === 'function') {
       let parsed;
       try { parsed = parseUtterance(text, envelope); } catch { return { matched: explicit, status: 'blocked', code: 'OWNER_PARSE_REJECTED' }; }
       if (parsed?.clarify) clarify = parsed.clarify;
       else if (parsed?.intent) { try { intent = validateOwnerIntent(parsed.intent); } catch { return { matched: true, status: 'blocked', code: 'OWNER_PARSE_REJECTED' }; } }
     }
     if (!intent && !clarify) intent = parseOwnerCommand(text);
-    if (!intent && !clarify && parseIntent && (typeof isLikelyCommand !== 'function' || isLikelyCommand(text))) {
+    if (!intent && !clarify && options.skipSemanticParse !== true && parseIntent && (typeof isLikelyCommand !== 'function' || isLikelyCommand(text))) {
       try { const v = await parseIntent(text, envelope); if (v && Object.keys(v).length) {
         intent = validateOwnerIntent(v);
         // Model output can never confirm on the owner's behalf or create a new
@@ -287,10 +301,13 @@ export function createOwnerCommandRouter({ read, transact, isOwner, capture, isC
     // Ordinary owner chat is NOT a command: no model call, no receipt, no side effect.
     if (!intent) return explicit ? { matched: true, status: 'not_supported', code: 'OWNER_COMMAND_UNKNOWN' }
       : { matched: false, status: 'unmatched', code: 'OWNER_NOT_A_COMMAND' };
-    if (!isCurrent(source) || !isOwner(envelope)) return { matched: true, status: 'blocked', code: 'OWNER_STALE_SOURCE' };
+    if (!isCurrent(source) || !isOwner(envelope) || !currentCandidate()) return { matched: true, status: 'blocked', code: 'OWNER_STALE_SOURCE' };
     if (!writes.has(intent.action) && intent.action !== 'confirm') {
       if (!authorize(envelope, intent)) return { matched: true, status: 'blocked', code: 'OWNER_QUERY_BLOCKED' };
-      return { matched: true, status: 'confirmed', action: intent.action, data: await query(intent, envelope) };
+      const data = await query(intent, envelope);
+      if (!isCurrent(source) || !isOwner(envelope) || !currentCandidate() || !authorize(envelope, intent))
+        return { matched: true, status: 'blocked', code: 'OWNER_STALE_SOURCE' };
+      return { matched: true, status: 'confirmed', action: intent.action, data };
     }
     let approval;
     if (intent.action === 'confirm') {
@@ -308,7 +325,7 @@ export function createOwnerCommandRouter({ read, transact, isOwner, capture, isC
     inFlight.add(key);
     try {
       const claimed = await transact(root => {
-        if (!isCurrent(source) || !isOwner(envelope) || !authorize(envelope, intent)) return { ok:false, code:'OWNER_STALE_SOURCE' };
+        if (!isCurrent(source) || !isOwner(envelope) || !currentCandidate() || !authorize(envelope, intent)) return { ok:false, code:'OWNER_STALE_SOURCE' };
         const s = store(root, true), previous = s.commands[key];
         if (previous && (!approval || previous.status !== 'awaiting_confirmation')) return { ok: false, code: 'OWNER_ALREADY_CLAIMED' };
         if (approval && (!previous || previous.expiresAt <= now() || previous.ownerUserId !== envelope.ownerUserId
@@ -328,7 +345,7 @@ export function createOwnerCommandRouter({ read, transact, isOwner, capture, isC
       if (!claimed.ok) return { matched:true, status:claimed.code==='OWNER_ALREADY_CLAIMED'?'uncertain':'blocked', code:claimed.code, id:key };
       if (claimed.confirmation) return { matched:true, status:'accepted', code:'OWNER_CONFIRM_REQUIRED', id:key, change:intent };
       let result;
-      const guard = () => isCurrent(source) && isOwner(envelope) && authorize(envelope,intent)
+      const guard = () => isCurrent(source) && isOwner(envelope) && currentCandidate() && authorize(envelope,intent)
         && store(read()).commands[key]?.status === 'claimed' && store(read()).commands[key]?.expiresAt > now();
       if (!guard()) result = { status:'blocked', code:'OWNER_STALE_SOURCE' };
       else try { result = await execute(intent, { envelope, source, guard, commandId:key }); }

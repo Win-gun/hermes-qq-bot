@@ -1,6 +1,7 @@
 import path from "node:path";
 import { Worker } from "node:worker_threads";
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { releaseStoppedMemoryWriter } from "./memory-repository.js";
 
 const error = code => Object.assign(new Error(code), { name: "MemoryServiceError", code });
@@ -38,6 +39,7 @@ function inspect(value, ancestors = new Set(), depth = 0, budget = { nodes: 2_00
 export class BackgroundMemoryRepository {
   #file; #worker = null; #opened = false; #opening = null; #closing = null;
   #closed = false; #fault = null; #sequence = 0; #pending = new Map();
+  #lastFailure = null;
   #token = randomUUID(); #stopping = null; #idleWaiters = [];
   #timeout; #limit; #status = { writer: false, loaded: false, writable: false, durability: "none", revision: null };
 
@@ -52,9 +54,11 @@ export class BackgroundMemoryRepository {
     return { ...this.#status, closed: this.#closed, pending: this.#pending.size, background: true,
       recoveryRequired: Boolean(this.#fault || this.#status.recoveryRequired),
       lastError: this.#fault || this.#status.lastError || null,
+      lastFailure: this.#lastFailure ? { ...this.#lastFailure } : null,
       writable: this.#opened && !this.#closed && !this.#fault && this.#status.writable === true };
   }
-  #fail(code) {
+  #fail(code, diagnostic) {
+    if (!this.#fault && diagnostic) this.#lastFailure = diagnostic;
     this.#fault ||= code;
     for (const pending of this.#pending.values()) { clearTimeout(pending.timer); pending.reject(error(this.#fault)); }
     this.#pending.clear();
@@ -69,17 +73,45 @@ export class BackgroundMemoryRepository {
   #notifyIdle() {
     if (!this.#pending.size) for (const resolve of this.#idleWaiters.splice(0)) resolve();
   }
+  #deadline(id) {
+    const pending = this.#pending.get(id);
+    if (!pending || this.#fault) return;
+    const now = performance.now();
+    const lag = Math.max(0, now - pending.deadline);
+    // A process suspended by macOS cannot service either timers or worker
+    // messages. Even a timer only 1ms overdue may have crossed a suspension;
+    // no lag threshold can prove the worker hung. The first deadline enters
+    // ONE bounded confirmation window. The second fails closed, irrespective
+    // of progress. This never repeats a mutation or treats a witness as an ACK.
+    if (!pending.grace) {
+      pending.grace = true;
+      pending.deadline = now + this.#timeout;
+      pending.timer = setTimeout(() => this.#deadline(id), this.#timeout);
+      return;
+    }
+    this.#fail("MEMORY_OPERATION_UNCERTAIN", { cause: "deadline", operation: pending.kind,
+      elapsedMs: Math.round(Math.max(0, now - pending.started)), overdueMs: Math.round(lag),
+      workerState: ["queued", "executing", "response_posted"][Atomics.load(pending.progress, 0)] || "unknown",
+      resumeGraceUsed: pending.grace });
+  }
   #request(kind, payload = {}) {
     if (this.#fault) return Promise.reject(error(this.#fault));
     if (!this.#worker) return Promise.reject(error("MEMORY_LOAD_REQUIRED"));
     if (this.#pending.size >= this.#limit) return Promise.reject(error("MEMORY_QUEUE_FULL"));
     const id = ++this.#sequence;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => this.#fail("MEMORY_OPERATION_UNCERTAIN"), this.#timeout);
-      this.#pending.set(id, { resolve, reject, timer });
-      try { this.#worker.postMessage({ id, kind, ...payload }); }
+      const progress = new Int32Array(new SharedArrayBuffer(4));
+      const pending = { resolve, reject, timer: null, kind, progress, started: performance.now(), grace: false };
+      this.#pending.set(id, pending);
+      try {
+        this.#worker.postMessage({ id, kind, ...payload, progress: progress.buffer });
+        // Structured cloning is synchronous. Start the worker response deadline
+        // AFTER dispatch so a large valid root does not consume it on the host.
+        pending.deadline = performance.now() + this.#timeout;
+        pending.timer = setTimeout(() => this.#deadline(id), this.#timeout);
+      }
       catch {
-        clearTimeout(timer); this.#pending.delete(id); this.#notifyIdle(); reject(error("MEMORY_INVALID_JSON"));
+        clearTimeout(pending.timer); this.#pending.delete(id); this.#notifyIdle(); reject(error("MEMORY_INVALID_JSON"));
       }
     });
   }
@@ -104,11 +136,12 @@ export class BackgroundMemoryRepository {
       if (message.ok) pending.resolve(message.result);
       else pending.reject(error(/^MEMORY_[A-Z_]+$/.test(message.code || "") ? message.code : "MEMORY_IO"));
     });
-    worker.on("error", () => { if (this.#worker === worker) this.#fail("MEMORY_WORKER_FAILED"); });
-    worker.on("exit", () => {
+    worker.on("error", failure => { if (this.#worker === worker) this.#fail("MEMORY_WORKER_FAILED", {
+      cause: "worker_error", errorCode: /^ERR_[A-Z_]+$/.test(failure?.code || "") ? failure.code : "unknown" }); });
+    worker.on("exit", exitCode => {
       if (this.#worker !== worker) return;
       if (this.#closing && !this.#pending.size) { this.#worker = null; return; }
-      this.#fail("MEMORY_OPERATION_UNCERTAIN");
+      this.#fail("MEMORY_OPERATION_UNCERTAIN", { cause: "worker_exit", exitCode });
     });
     this.#opening = this.#request("open", { filePath: this.#file, writerToken: this.#token }).then(result => {
       this.#opened = true; return result;

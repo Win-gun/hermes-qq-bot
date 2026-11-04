@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { BackgroundMemoryRepository } from "../src/memory-repository-service.js";
 import { MemoryRuntime } from "../src/memory-runtime.js";
 import { administerPersonMemory, recordPersonEvidence, queryPersonMemory } from "../src/people-memory.js";
@@ -9,9 +10,11 @@ import {
   PEOPLE_RECONSTRUCTION_LIMITS as LIMITS,
   createPeopleReconstructionState, createPeopleReconstructionPager,
   createPeopleReconstructionRunner, classifyPeopleReconstructionRow,
-  summarizePeopleReconstructionPage,
+  summarizePeopleReconstructionPage, summarizePeopleReconstructionSemanticsPage,
   validatePeopleReconstructionSemantics, controlPeopleReconstruction,
-  queryPeopleReconstructionCandidates, peopleReconstructionStatus
+  queryPeopleReconstructionCandidates, peopleReconstructionStatus,
+  matchPeopleReconstructionUnknownPage, peopleReconstructionUnknownLedgerBinding,
+  applyPeopleReconstructionUnknownRecovery
 } from "../src/people-memory-reconstruction.js";
 
 // ALL source/state files are synthetic and under this newly-created directory.
@@ -70,6 +73,7 @@ async function start(runner, options = {}) {
   await runner.start({ authorized: true, id: "test-job", sourceId: "fixture-v1", ...options });
 }
 const usage = { inputTokens: 20, outputTokens: 5, totalTokens: 25 };
+const digest = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 try {
   // Pure provenance tiers, not AI confidence or nicknames.
@@ -82,6 +86,8 @@ try {
   equal(classify(row({ logicalBotId: PEER })).tier, "Conflicted", "cannot borrow another bot's receipt");
   equal(classify(row({ sources: [source({ verifiedSenderId: OTHER })] })).tier, "Conflicted", "same-name other QQ cannot supply evidence");
   equal(classify(row({ sources: [source({ time: "2027-01-01T00:00:00Z" })] })).tier, "Conflicted", "future sources rejected");
+  equal(classify(row({ sources: [source(), source({ messageId: "unlisted" })],
+    evidenceKeys: [JSON.stringify([G, "m1"]), JSON.stringify([G, "unlisted"])] })).tier, "Conflicted", "extra receipt cannot expand the candidate's pinned source IDs");
   equal(classify(row({ sourceMessageIds: ["m1", "m2"] })).tier, "Supported", "partial receipt cannot become Verified");
   equal(classify(row({ negative: true })).tier, "Suppressed", "negative record wins");
   equal(classify(row({ corrected: true, sourceIssue: true })).tier, "Suppressed", "correction wins even over invalid evidence");
@@ -101,6 +107,10 @@ try {
   const a = classify(row()), b = classify(row({ key: "second", value: "偏爱咖啡" }));
   const semantic = validatePeopleReconstructionSemantics({ groups: [{ ids: [a.id, b.id], summary: "偏爱咖啡", tier: "Verified", logicalBotId: PEER }] }, [a, b]);
   equal([semantic[0].proposalOnly, semantic[0].evidence], [true, false], "model cannot claim authority or improve provenance");
+  assert.throws(() => validatePeopleReconstructionSemantics({ groups: [{ ids: [a.id], summary: "密码:secret123" }] }, [a]),
+    { code: "INVALID_MODEL_GROUP_SUMMARY" }); checks++;
+  assert.throws(() => validatePeopleReconstructionSemantics({ groups: [{ ids: [a.id], summary: "提案", category: "Verified" }] }, [a]),
+    { code: "INVALID_MODEL_GROUP_CATEGORY" }); checks++;
   assert.throws(() => validatePeopleReconstructionSemantics({ groups: [{ ids: [a.id, "invented"], summary: "捏造" }] }, [a]), { code: "MODEL_UNPINNED_ID" }); checks++;
   const otherQQ = classify(row({ key: "other-user", userId: OTHER, sources: [source({ verifiedSenderId: OTHER })] }));
   assert.throws(() => validatePeopleReconstructionSemantics({ groups: [{ ids: [a.id, otherQQ.id], summary: "同名合并" }] }, [a, otherQQ]), { code: "MODEL_SCOPE_CROSSING" }); checks++;
@@ -325,6 +335,255 @@ try {
   equal(recoveryR.status().stats.reservedTokens, reserved, 'unknown old call reservation is never released by recovery');
   equal(recoveryR.status().stats.unknownCalls, 1, 'unknown historical receipt is not relabelled confirmed');
   equal(recoveryR.status().acknowledgedUnknownCalls, 1, 'operator acknowledgment is separate from usage truth');
+
+  // Reverse-page evidence must match all four invariants, never cursor
+  // subtraction alone. Adoption is metadata-only and preserves old receipts.
+  const proofRows = Array.from({ length: 32 }, (_, i) => row({ key: `unknown-proof-${i}` }));
+  const proofNext = { phase: "memory", offset: 34, file: 0, byte: 0 };
+  const proofReceipt = { id: "old-unknown", status: "unknown", hash: digest(proofRows), count: 32, scanned: 32,
+    nextCursor: proofNext, modelStarted: true, calls: [{ id: "old-attempt", usageSettled: true }] };
+  const matchArgs = { receipt: proofReceipt, receiptIndex: 0, receiptHash: digest(proofReceipt),
+    page: { sourceId: "proof-source", rows: proofRows, scanned: 32, nextCursor: proofNext },
+    matchedCursor: { phase: "memory", offset: 0, file: 0, byte: 0 } };
+  const witnessed = matchPeopleReconstructionUnknownPage(matchArgs);
+  check(witnessed && witnessed.candidateIds.length === 32, "exact raw row hash plus metadata yields an ID-only source witness");
+  for (const patch of [{ rows: [...proofRows.slice(1), row({ key: "tampered" })] }, { scanned: 31 },
+    { rows: proofRows.slice(1) }, { nextCursor: { ...proofNext, offset: 35 } }]) {
+    equal(matchPeopleReconstructionUnknownPage({ ...matchArgs, page: { ...matchArgs.page, ...patch } }), null,
+      "row hash, count, scanned and nextCursor each independently fence unknown recovery");
+  }
+  const proofRoot = { groups: {}, peopleReconstruction: createPeopleReconstructionState({ id: "proof-job", sourceId: "proof-source" }) };
+  const proofJob = proofRoot.peopleReconstruction;
+  Object.assign(proofJob, { status: "completed_with_limits", cursor: { ...proofNext, phase: "done" }, unknownBatches: [proofReceipt] });
+  Object.assign(proofJob.stats, { modelAttempts: 1, unknownCalls: 1, reservedTokens: 2048, skippedUnknown: 32 });
+  const proofPacket = { version: 1, done: true, sourceId: "proof-source", ledgerBinding: peopleReconstructionUnknownLedgerBinding(proofRoot), matches: [witnessed] };
+  const staleProofRoot = structuredClone(proofRoot);
+  staleProofRoot.peopleReconstruction.unknownBatches[0].hash = "f".repeat(64);
+  assert.throws(() => applyPeopleReconstructionUnknownRecovery(staleProofRoot, { authorized: true, expectedRevision: 0, proof: proofPacket }),
+    { code: "UNKNOWN_RECOVERY_STALE" }); checks++;
+  const pausedProofRoot = structuredClone(proofRoot);
+  pausedProofRoot.peopleReconstruction.semanticStage = { version: 1, cursor: { ...proofNext, offset: 100 },
+    excludedPrefixThrough: proofNext, legacyPendingAllowed: true, processed: 12, maxCalls: 1, startAttempts: 1 };
+  applyPeopleReconstructionUnknownRecovery(pausedProofRoot, { authorized: true, expectedRevision: 0, proof: proofPacket });
+  equal([pausedProofRoot.peopleReconstruction.status, pausedProofRoot.peopleReconstruction.semanticStage.cursor.offset,
+    pausedProofRoot.peopleReconstruction.semanticStage.processed, pausedProofRoot.peopleReconstruction.semanticStage.startAttempts],
+    ["paused", 0, 12, 1], "adopting exact proofs can revisit an over-quarantined prefix without resetting completed work or model allowance");
+  const proofBefore = JSON.stringify([proofJob.unknownBatches, proofJob.stats, proofJob.budget]);
+  assert.throws(() => applyPeopleReconstructionUnknownRecovery(proofRoot, { expectedRevision: 0, proof: proofPacket }), { code: "UNAUTHORIZED" }); checks++;
+  assert.throws(() => applyPeopleReconstructionUnknownRecovery(proofRoot, { authorized: true, expectedRevision: 1, proof: proofPacket }), { code: "REVISION_MISMATCH" }); checks++;
+  assert.throws(() => applyPeopleReconstructionUnknownRecovery(proofRoot, { authorized: true, expectedRevision: 0,
+    proof: { ...proofPacket, sourceId: "other-source" } }), { code: "UNKNOWN_RECOVERY_STALE" }); checks++;
+  const appliedProof = applyPeopleReconstructionUnknownRecovery(proofRoot, { authorized: true, expectedRevision: 0, proof: proofPacket });
+  equal(appliedProof.excludedPrefixThrough.offset, 0, "proven page no longer quarantines the entire memory prefix");
+  equal(JSON.stringify([proofJob.unknownBatches, proofJob.stats, proofJob.budget]), proofBefore, "adoption neither rewrites unknown receipts nor changes cost/budget truth");
+  const unknownCandidate = classify(proofRows[0], proofRoot);
+  proofJob.candidates[unknownCandidate.id] = { ...unknownCandidate, semanticState: "pending" }; proofJob.candidateCount = 1;
+  const recoveredDry = summarizePeopleReconstructionSemanticsPage(proofRoot, [proofRows[0], row({ key: "not-unknown" })], { eligible, now: NOW });
+  equal([recoveredDry.unknownCandidates, recoveredDry.pending], [1, 0], "proven unknown ID is excluded even if it appears in stored candidates");
+
+  const proofFile = path.join(home, "recovered-unknown-runtime", "memory.json");
+  let proofRuntime = new MemoryRuntime(new BackgroundMemoryRepository({ filePath: proofFile }));
+  await proofRuntime.open();
+  try {
+    const initialProofRoot = structuredClone(staleProofRoot);
+    initialProofRoot.peopleReconstruction.unknownBatches[0].hash = proofReceipt.hash;
+    await proofRuntime.transact(root => Object.assign(root, initialProofRoot));
+    await proofRuntime.transact(root => applyPeopleReconstructionUnknownRecovery(root, { authorized: true, expectedRevision: 0, proof: proofPacket }));
+    await proofRuntime.close(); proofRuntime = new MemoryRuntime(new BackgroundMemoryRepository({ filePath: proofFile })); await proofRuntime.open();
+    equal(proofRuntime.value.peopleReconstruction.unknownPageRecovery.matches[0].candidateIds, witnessed.candidateIds,
+      "exact source proof is durable after the real sole-writer repository reopens");
+    equal(proofRuntime.value.peopleReconstruction.unknownBatches[0], proofReceipt, "real durable proof adoption does not rewrite the historical unknown receipt");
+  } finally { await proofRuntime.close(); }
+
+  // Real-shaped post-scan recovery: three UNKNOWN pages (96 rows), followed
+  // by old scan-only candidates without the new per-ID exposure marker.
+  const semanticH = harness(), semanticCalls = [];
+  const postScanPages = async ({ sourceId, cursor: c }) => {
+    const page = c.offset, count = page < 3 ? 32 : 8;
+    assert.ok(page <= 3, "semantic continuation must never rewind the unknown prefix");
+    return { sourceId, rows: Array.from({ length: count }, (_, i) => row({
+      key: `post-${page}-${i}`, logicalBotId: null, sources: [], sourceMessageIds: [], evidenceKeys: [],
+      value: `喜欢项目${page}-${i}` })), scanned: count,
+    nextCursor: { phase: page < 3 ? "memory" : "done", offset: page + 1, file: 0, byte: 0 } };
+  };
+  const semanticModel = async ({ candidates: cs }) => {
+    semanticCalls.push(cs.map(c => c.key));
+    if (semanticCalls.length <= 3) throw new Error("fixture transport unknown");
+    check(cs.length <= 4, "explicit small-batch recovery has at most four candidates");
+    check(cs.every(c => c.logicalBotId === null && c.tier === "Tentative"), "semantic phase never fabricates historical Bot or evidence");
+    return { groups: cs.map(c => ({ ids: [c.id], summary: c.value, tier: "Verified",
+      logicalBotId: BOT, sourceMessageIds: ["invented"], conflict: false })), usage };
+  };
+  let semanticR = runnerFor(semanticH, { readPage: postScanPages, model: semanticModel, modelBatchSize: () => 4 });
+  await start(semanticR, { maxCalls: 20, maxTokens: 60000, publishVerified: true });
+  for (let n = 0; n < 3; n++) {
+    await semanticR.step();
+    await semanticR.control({ authorized: true, operation: "scan_only", expectedRevision: semanticR.status().revision });
+    if (n < 2) await semanticR.control({ authorized: true, operation: "resume_semantics", expectedRevision: semanticR.status().revision });
+  }
+  await semanticR.step();
+  equal([semanticR.status().cursor.phase, semanticR.status().unknownBatches, semanticR.status().stats.skippedUnknown,
+    semanticR.status().candidates], ["done", 3, 96, 8], "scan completion retains three unknown batches and only later committed candidates");
+  await semanticH.transact(root => { for (const c of Object.values(root.peopleReconstruction.candidates)) delete c.semanticState; });
+  const unknownLedger = JSON.stringify(semanticH.getState().peopleReconstruction.unknownBatches);
+  const sourceCounts = [semanticR.status().stats.scanned, semanticR.status().stats.committedRows, semanticR.status().stats.semanticSkipped];
+  const previewPage = await postScanPages({ sourceId: "fixture-v1", cursor: { phase: "memory", offset: 3 } });
+  const previewBefore = semanticH.durable();
+  const preview = summarizePeopleReconstructionSemanticsPage(semanticH.getState(), previewPage.rows, { eligible, now: NOW });
+  equal([preview.pending, preview.legacyPendingAllowed, preview.cursor.offset, preview.modelCalls], [8, true, 3, 0], "dry-run proves unexposed legacy candidates after the unknown prefix");
+  equal(semanticH.durable(), previewBefore, "semantic preflight is a pure read, not a compatibility write");
+  await rejected(semanticR.control({ authorized: false, operation: "resume_semantics", expectedRevision: semanticR.status().revision }), "UNAUTHORIZED");
+  await rejected(semanticR.control({ authorized: true, operation: "resume_semantics", expectedRevision: 0 }), "REVISION_MISMATCH");
+  await semanticR.control({ authorized: true, operation: "resume_semantics", expectedRevision: semanticR.status().revision });
+  await semanticR.step();
+  equal([semanticR.status().status, semanticR.status().pauseReason, semanticR.status().semanticStage.processed],
+    ["paused", "semantic_run_limit", 4], "done source can enter semantics, and default one-call grant pauses after four candidates");
+  await rejected(semanticR.control({ authorized: true, operation: "resume", expectedRevision: semanticR.status().revision }), "SEMANTIC_RESUME_BLOCKED");
+  semanticR = runnerFor(semanticH, { readPage: postScanPages, model: semanticModel, modelBatchSize: () => 4 });
+  await semanticR.recover(); await semanticR.step();
+  equal(semanticCalls.length, 4, "restart preserves bounded semantic pause and makes no model call");
+  await semanticR.control({ authorized: true, operation: "resume_semantics", expectedRevision: semanticR.status().revision, maxSemanticCalls: 1 });
+  await semanticR.step();
+  equal(semanticR.status().semanticStage.processed, 8, "second explicit allowance handles only the remaining four IDs");
+  equal(new Set(semanticCalls.slice(3).flat()).size, 8, "already processed candidates are never replayed on repeated source page");
+  equal(JSON.stringify(semanticH.getState().peopleReconstruction.unknownBatches), unknownLedger, "old unknown receipts are byte-for-byte unchanged");
+  equal([semanticR.status().stats.scanned, semanticR.status().stats.committedRows, semanticR.status().stats.semanticSkipped], sourceCounts,
+    "semantic continuation does not inflate source scan counts or erase historical skipped work");
+  equal([semanticR.status().stats.published, semanticH.getState().peopleMemory], [0, undefined], "semantic summaries never publish even when old job publishVerified is true");
+  check(Object.values(semanticH.getState().peopleReconstruction.candidates).every(c => c.tier === "Tentative"
+    && c.logicalBotId === null && !c.evidence.length && !c.sourceMessageIds.length && c.semantic?.proposalOnly),
+    "model authority, Bot and source fabrication fields cannot alter stored originals");
+  equal([semanticR.status().stats.unknownCalls, semanticR.status().stats.reservedTokens, semanticR.status().stats.usage.totalTokens],
+    [3, 6144, 50], "unknown reservations and actual known usage remain separate through post-scan recovery");
+
+  const legacyH = harness(), legacyR = runnerFor(legacyH);
+  await start(legacyR); await legacyR.step({ model: false });
+  await legacyH.transact(root => {
+    const job = root.peopleReconstruction;
+    for (const c of Object.values(job.candidates)) delete c.semanticState;
+    job.stats.modelAttempts = 1; // No receipt: exposure cannot be proven absent.
+  });
+  const legacyPreview = summarizePeopleReconstructionSemanticsPage(legacyH.getState(), [row()], { eligible, now: NOW });
+  equal([legacyPreview.pending, legacyPreview.legacyUnproven], [0, 1], "unexplained legacy model attempts cannot silently unlock old IDs");
+
+  // Correction during a post-scan model await wins without a second writer.
+  const semanticRaceH = harness(), semanticRaceBarrier = {};
+  const raceEntered = new Promise(resolve => { semanticRaceBarrier.enter = resolve; });
+  const raceReleased = new Promise(resolve => { semanticRaceBarrier.release = resolve; });
+  const semanticRace = runnerFor(semanticRaceH, { model: async ({ candidates: cs }) => {
+    semanticRaceBarrier.enter(); await raceReleased;
+    return { groups: [{ ids: [cs[0].id], summary: "旧偏好不可回活" }], usage };
+  } });
+  await start(semanticRace); await semanticRace.step({ model: false });
+  await semanticRace.control({ authorized: true, operation: "resume_semantics", expectedRevision: semanticRace.status().revision });
+  const racePending = semanticRace.step(); await raceEntered;
+  await semanticRaceH.transact(root => {
+    recordPersonEvidence(root, { logicalBotId: BOT, userId: U, verifiedSenderId: U, accountId: "alpha",
+      conversationId: `group:${G}`, messageId: "correct-source", time: AT, now: NOW,
+      kind: "preference", value: "喜欢咖啡", privacy: "conversation", sourceType: "message", confidence: 0.9 });
+    const entryId = root.peopleMemory.bots[BOT].people[U].entries[0].id;
+    check(administerPersonMemory(root, { logicalBotId: BOT, userId: U, operation: "correct", entryId,
+      value: "不喜欢咖啡", expectedRevision: root.peopleMemory.revision, authorized: true, actorUserId: "90001", now: NOW }).ok,
+    "fixture installs an authenticated exact-ID correction tombstone");
+  });
+  semanticRaceBarrier.release(); await racePending;
+  const raceCandidate = Object.values(semanticRaceH.getState().peopleReconstruction.candidates)[0];
+  equal([raceCandidate.tier, raceCandidate.value, raceCandidate.semantic, raceCandidate.semanticState],
+    ["Suppressed", null, null, "suppressed"], "latest correction tombstone defeats paid semantic result");
+
+  // New semantic claims have the same crash/no-replay semantics as scan claims.
+  const postUnknownH = harness(), postUnknownCalls = [];
+  const postUnknownR = runnerFor(postUnknownH, { model: async args => { postUnknownCalls.push(args.attemptId); throw new Error("unknown"); } });
+  await start(postUnknownR); await postUnknownR.step({ model: false });
+  await postUnknownR.control({ authorized: true, operation: "resume_semantics", expectedRevision: postUnknownR.status().revision });
+  await postUnknownR.step(); await postUnknownR.step();
+  equal([postUnknownCalls.length, postUnknownR.status().claim.status], [1, "unknown"], "post-scan unknown model call is not automatically replayed");
+  const postRestart = runnerFor(postUnknownH); await postRestart.recover();
+  await postRestart.control({ authorized: true, operation: "skip_unknown", expectedRevision: postRestart.status().revision });
+  equal([postRestart.status().unknownBatches, postRestart.status().cursor.phase, postRestart.status().stats.scanned], [1, "done", 1],
+    "explicit semantic skip preserves its receipt without recounting or rewinding the original source scan");
+
+  const subsetH = harness(), subsetSeen = [], subsetRows = [row(), row({ key: "other-subset", userId: OTHER,
+    sources: [source({ verifiedSenderId: OTHER })] })];
+  const subsetR = runnerFor(subsetH, { readPage: onePage(subsetRows), model: async ({ candidates }) => {
+    subsetSeen.push(candidates.map(c => c.userId));
+    if (subsetSeen.length === 1) throw new Error("unknown first scope only");
+    return { groups: candidates.map(c => ({ ids: [c.id], summary: c.value })), usage };
+  } });
+  await start(subsetR); await subsetR.step({ model: false });
+  await subsetR.control({ authorized: true, operation: "resume_semantics", expectedRevision: subsetR.status().revision });
+  await subsetR.step();
+  await subsetR.control({ authorized: true, operation: "skip_unknown", expectedRevision: subsetR.status().revision });
+  await subsetR.control({ authorized: true, operation: "resume_semantics", expectedRevision: subsetR.status().revision });
+  await subsetR.step();
+  equal(subsetSeen, [[U], [OTHER]], "semantic skip quarantines exposed IDs, not unexposed people on the same page");
+  equal(subsetR.status().semanticStage.processed, 1, "remaining scope is organized without retrying the unknown call");
+
+  const quoteH = harness(), quoteRow = row({ kind: "quote", value: "随口说的一句话" });
+  const quoteR = runnerFor(quoteH, { readPage: onePage([quoteRow]), model: async ({ candidates: cs }) => ({
+    groups: [{ ids: [cs[0].id], summary: "模型建议不是事实", category: "stable_fact", relation: "related" }], usage }) });
+  await start(quoteR, { publishVerified: true }); await quoteR.step({ model: false });
+  const quoteDry = summarizePeopleReconstructionSemanticsPage(quoteH.getState(), [quoteRow], { eligible, now: NOW });
+  equal([quoteDry.tiers.Verified, quoteDry.verifiedDurableCandidates], [1, 0], "verified quote is not a publishable durable fact");
+  await quoteR.control({ authorized: true, operation: "resume_semantics", expectedRevision: quoteR.status().revision }); await quoteR.step();
+  const quoteCandidate = Object.values(quoteH.getState().peopleReconstruction.candidates)[0];
+  equal([quoteCandidate.kind, quoteCandidate.semantic.category, quoteR.status().stats.published, quoteH.getState().peopleMemory],
+    ["quote", "stable_fact", 0, undefined], "semantic category cannot turn an original quote into fact or publish it");
+
+  // A 32-row source page, four scopes, tiny batches. Never advance past the
+  // other 29 rows/scopes while any eligible ID is still explicitly pending.
+  const multiRows = Array.from({ length: 32 }, (_, i) => row({ key: `multi-${i}`,
+    jobKey: i % 4 === 2 ? G2 : G, userId: i % 4 === 1 ? OTHER : U,
+    logicalBotId: i % 4 === 3 ? PEER : null, sources: [], sourceMessageIds: [], evidenceKeys: [], value: `独立候选${i}` }));
+  const multiH = harness(); let multiCalls = 0;
+  const multiModel = async ({ candidates: cs }) => {
+    multiCalls++; check(cs.length <= 3, "small adaptive batches stay bounded");
+    equal(new Set(cs.map(c => JSON.stringify([c.logicalBotId, c.userId, c.conversationId]))).size, 1, "each call is one exact logical Bot/QQ/conversation scope");
+    return { groups: cs.map(c => ({ ids: [c.id], summary: c.value })), usage };
+  };
+  const multiR = runnerFor(multiH, { readPage: onePage(multiRows), model: multiModel, modelBatchSize: cs => Math.min(3, cs.length) });
+  await start(multiR, { maxCalls: 20 }); await multiR.step({ model: false });
+  await multiR.control({ authorized: true, operation: "resume_semantics", expectedRevision: multiR.status().revision, maxSemanticCalls: 20 });
+  for (let n = 0; n < 20 && multiR.status().status === "running"; n++) {
+    await multiR.step();
+    const pending = Object.values(multiH.getState().peopleReconstruction.candidates).filter(c => c.semanticState === "pending").length;
+    if (pending) check(multiR.status().semanticStage.cursor.phase !== "done", "source cursor cannot swallow remaining rows or other scopes");
+  }
+  equal([multiCalls, multiR.status().semanticStage.processed, multiR.status().semanticStage.cursor.phase], [12, 32, "done"],
+    "all 32 distinct candidates in four scopes reach terminal semantic state across twelve small calls");
+  check(Object.values(multiH.getState().peopleReconstruction.candidates).every(c => c.semanticState === "completed"), "no silently stranded pending candidate after final source cursor");
+
+  const limitedH = harness(), limitedR = runnerFor(limitedH, { readPage: onePage(multiRows), model: multiModel,
+    modelBatchSize: cs => Math.min(3, cs.length) });
+  await start(limitedR, { maxCalls: 2 }); await limitedR.step({ model: false });
+  await limitedR.control({ authorized: true, operation: "resume_semantics", expectedRevision: limitedR.status().revision, maxSemanticCalls: 20 });
+  await limitedR.step(); await limitedR.step(); await limitedR.step();
+  equal([limitedR.status().status, limitedR.status().stats.modelAttempts, limitedR.status().budget.maxCalls,
+    Object.values(limitedH.getState().peopleReconstruction.candidates).filter(c => c.semanticState === "pending").length],
+    ["paused", 2, 2, 26], "insufficient existing budget pauses with 26 explicit pending IDs, without raising budget or skipping their source page");
+
+  // Exact duplicates across source pages reuse ONLY a one-value proposal.
+  // Every candidate keeps its own original sender, source IDs and event time.
+  const duplicateRows = Array.from({ length: 64 }, (_, i) => row({ key: `duplicate-${i}`, value: `喜欢项目${i % 8}`,
+    kind: i % 8 === 0 ? "quote" : "preference", sourceMessageIds: [`dup-${i}`], evidenceKeys: [JSON.stringify([G, `dup-${i}`])],
+    sources: [source({ messageId: `dup-${i}`, time: new Date(Date.parse(AT) + i * 1000).toISOString() })] }));
+  const duplicatePages = async ({ sourceId, cursor: c }) => ({ sourceId, rows: duplicateRows.slice(c.offset * 32, (c.offset + 1) * 32),
+    nextCursor: { phase: c.offset ? "done" : "memory", offset: c.offset + 1, file: 0, byte: 0 } });
+  const duplicateH = harness(); let duplicateCalls = 0;
+  const duplicateR = runnerFor(duplicateH, { readPage: duplicatePages, model: async ({ candidates: cs }) => {
+    duplicateCalls++; equal(cs.length, 8, "32-row page sends only eight exact same-scope representatives");
+    return { groups: cs.map(c => ({ ids: [c.id], summary: c.value, category: "uncertain" })), usage };
+  } });
+  await start(duplicateR, { maxCalls: 2 }); await duplicateR.step({ model: false }); await duplicateR.step({ model: false });
+  const duplicateBefore = Object.values(duplicateH.getState().peopleReconstruction.candidates).map(c => [c.id, c.kind, c.evidence, c.sourceMessageIds, c.tier]);
+  await duplicateR.control({ authorized: true, operation: "resume_semantics", expectedRevision: duplicateR.status().revision }); await duplicateR.step();
+  equal([duplicateR.status().semanticStage.processed, duplicateR.status().semanticStage.reused], [32, 24], "same-page exact duplicates reuse a proposal without model evidence promotion");
+  // Resuming does not spend the remaining call when exact proposal reuse works.
+  await duplicateR.control({ authorized: true, operation: "resume_semantics", expectedRevision: duplicateR.status().revision });
+  await duplicateR.step();
+  equal([duplicateCalls, duplicateR.status().semanticStage.processed, duplicateR.status().semanticStage.reused], [1, 64, 56], "next page reuses exact proposals without spending another call");
+  equal(Object.values(duplicateH.getState().peopleReconstruction.candidates).map(c => [c.id, c.kind, c.evidence, c.sourceMessageIds, c.tier]), duplicateBefore,
+    "deduplication does not merge evidence, timestamps, kinds or grades between duplicate candidates");
 
   // Budgets are claim-time gates; explicit increase can resume non-invoked pages.
   const budgetH = harness(); let budgetCalls = 0;

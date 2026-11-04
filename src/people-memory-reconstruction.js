@@ -24,6 +24,10 @@ import { redactText, sanitizeArchiveValue } from "./privacy-filter.js";
  *   await runner.recover(); // startup, before scheduling; orphan claims -> UNKNOWN
  *   await runner.start({ authorized: true, id, sourceId: snapshotId });
  *   await runner.step(); // ONE bounded page; schedule OUTSIDE the reply queue
+ *   // After source cursor is done: operator/CAS gated, existing budget only.
+ *   await runner.control({ authorized:true, operation:'resume_semantics',
+ *     expectedRevision:runner.status().revision, maxSemanticCalls:1 });
+ *   await runner.step(); // <=16 adaptive, exact-scope representatives; <=1 call
  *
  * `eligible(tuple)` is synchronous, literal true only. It must authenticate the
  * HISTORICAL bot/account receipt AND current access, not map a historical QQ or
@@ -59,13 +63,16 @@ import { redactText, sanitizeArchiveValue } from "./privacy-filter.js";
 export const PEOPLE_RECONSTRUCTION_LIMITS = Object.freeze({
   page: 32, sources: 16, bots: 16, candidates: 24000, people: 20000,
   valueChars: 240, pageBytes: 128 * 1024, lineBytes: 64 * 1024,
-  evidenceScanBytes: 2 * 1024 * 1024, semanticGroups: 32, reasons: 32
+  evidenceScanBytes: 2 * 1024 * 1024, semanticGroups: 32, reasons: 32,
+  semanticBatch: 16, semanticRunCalls: 100, unknownRecoveryReceipts: 16, unknownRecoverySlots: 512
 });
 const L = PEOPLE_RECONSTRUCTION_LIMITS;
 const FIELD = "peopleReconstruction";
 const BAD = new Set(["__proto__", "constructor", "prototype"]);
 const TIERS = ["Verified", "Supported", "Tentative", "Conflicted", "Suppressed"];
 const DURABLE = new Set(["stable_fact", "preference", "alias", "boundary"]);
+const SEMANTIC_CATEGORIES = new Set([...DURABLE, "quote", "episode", "uncertain", "discard"]);
+const SEMANTIC_RELATIONS = new Set(["related", "duplicate", "conflict", "temporal", "withdrawal", "insufficient"]);
 const TERMINAL = new Set(["deleted", "revoked", "rejected", "superseded", "suppressed"]);
 const KIND = { profile: "stable_fact", ...Object.fromEntries([...DURABLE].map(k => [k, k])) };
 const own = (v, k) => v && Object.hasOwn(v, k) ? v[k] : undefined;
@@ -115,12 +122,161 @@ function advances(before, after) {
   return before.phase === "memory" ? after.offset > before.offset
     : before.phase === "archive" && (after.file > before.file || (after.file === before.file && after.byte > before.byte));
 }
+function cursorOrder(a, b) {
+  const rank = { memory: 0, archive: 1, done: 2 };
+  return rank[a.phase] - rank[b.phase] || (a.phase === "memory" ? a.offset - b.offset
+    : a.phase === "archive" ? a.file - b.file || a.byte - b.byte : 0);
+}
+// Old candidates had no per-ID exposure marker. Adopt them only if EVERY old
+// attempt is accounted for by an unknown receipt, and skip the entire prefix
+// through the last such page. No inference from semanticSkipped totals alone.
+function semanticPlan(job) {
+  let floor = initialCursor(), attempts = 0;
+  const receipts = job.unknownBatches ?? [];
+  if (!Array.isArray(receipts) || receipts.length > 128) fail("INVALID_UNKNOWN_LEDGER");
+  const seen = new Set();
+  for (const [index, receipt] of receipts.entries()) {
+    const next = cursor(receipt.nextCursor);
+    if (receipt.phase !== "semantics" && !recoveredUnknownMatch(job, index) && cursorOrder(next, floor) > 0) floor = next;
+    if (receipt.calls) {
+      for (const call of receipt.calls) {
+        if (!id(call.id) || seen.has(call.id)) fail("INVALID_UNKNOWN_LEDGER");
+        seen.add(call.id); attempts++;
+      }
+    } else if (receipt.modelStarted) attempts++;
+  }
+  if (job.semanticStage) return { cursor: copy(job.semanticStage.cursor), excludedPrefixThrough: floor,
+    legacyPendingAllowed: job.semanticStage.legacyPendingAllowed === true,
+    blockedReason: cursorOrder(job.semanticStage.cursor, floor) < 0 ? "UNKNOWN_RECOVERY_STALE" : null };
+  return { cursor: floor, excludedPrefixThrough: floor, legacyPendingAllowed: attempts === job.stats.modelAttempts,
+    blockedReason: attempts > job.stats.modelAttempts ? "INVALID_UNKNOWN_LEDGER" : null };
+}
+function semanticPending(job, candidate, plan = job.semanticStage ?? semanticPlan(job)) {
+  const stored = own(job.candidates, candidate.id);
+  return Boolean(stored && !unknownCandidateExcluded(job, candidate.id) && !stored.semantic && stored.tier !== "Suppressed" && stored.value
+    && stored.userId === candidate.userId && stored.logicalBotId === candidate.logicalBotId
+    && stored.conversationId === candidate.conversationId && stored.kind === candidate.kind && stored.value === candidate.value
+    && candidate.tier !== "Suppressed" && candidate.value
+    && candidate.userId && candidate.conversationId?.startsWith("group:") && candidate.origin !== "archive"
+    && (stored.semanticState === "pending" || stored.semanticState === undefined && plan.legacyPendingAllowed));
+}
+// Reuse ONLY the attached proposal, never sources, evidence grade or time.
+const semanticKey = c => hash([c.logicalBotId, c.userId, c.conversationId, c.kind, c.value]);
+function reusableSemantic(root, job, c, eligible) {
+  if (c.tier === "Conflicted") return null;
+  const donor = own(job.candidates, own(job.semanticReuseIndex, semanticKey(c)));
+  if (!donor || unknownCandidateExcluded(job, donor.id) || donor.id === c.id || semanticKey(donor) !== semanticKey(c)
+    || !["completed", "reused"].includes(donor.semanticState)
+    || ["Suppressed", "Conflicted"].includes(donor.tier) || !donor.semantic?.proposalOnly
+    || donor.semantic.conflict || donor.semantic.ids.length !== 1
+    || ["conflict", "temporal", "withdrawal"].includes(donor.semantic.relation)
+    || donor.sourceBinding && currentSourceFence(root, donor.sourceBinding)
+    || fence(root, donor.logicalBotId, donor.userId)
+    || ["legacy", "archive"].includes(donor.origin) && archiveNegativeFence(root, donor.userId,
+      donor.conversationId, donor.sourceMessageIds, donor.logicalBotId, donor.origin === "legacy")
+    || sync(eligible, { logicalBotId: donor.logicalBotId, userId: donor.userId,
+      conversationId: donor.conversationId, mode: "reconstruction" }) !== true) return null;
+  return donor;
+}
+function retainUnknown(job) {
+  job.unknownBatches ??= [];
+  if (job.unknownBatches.length >= 128) fail("UNKNOWN_LEDGER_CAPACITY");
+  job.unknownBatches.push(copy(job.claim));
+}
+function advanceClaim(job, claim) {
+  // A semantic page can expose only one scope/subset. Quarantine its actual
+  // attempted IDs, then revisit the page for unexposed candidates, never ACK
+  // the entire page merely because one sub-call became uncertain.
+  if (claim.phase === "semantics") job.semanticStage.cursor = copy(claim.startCursor);
+  else { job.cursor = copy(claim.nextCursor); job.stats.scanned += claim.scanned; }
+}
 function jobAt(root) {
   const job = own(root, FIELD);
   if (job === undefined) return null;
   if (!object(job) || job.version !== 1 || !id(job.id) || !integer(job.revision)
     || !object(job.candidates) || !object(job.stats) || !object(job.people)) fail("INVALID_RECONSTRUCTION_STATE");
   return job;
+}
+
+export function peopleReconstructionUnknownLedgerBinding(root) {
+  const job = jobAt(root);
+  if (!job) fail("JOB_REQUIRED");
+  return hash([job.id, job.sourceId, job.unknownBatches ?? []]);
+}
+function recoveredUnknownMatch(job, index) {
+  const recovery = job.unknownPageRecovery;
+  if (recovery?.version !== 1 || recovery.sourceId !== job.sourceId) return null;
+  const match = recovery.matches.find(m => m.receiptIndex === index);
+  return match && match.receiptHash === hash(job.unknownBatches[index]) ? match : null;
+}
+function unknownCandidateExcluded(job, candidateId) {
+  return (job.unknownBatches ?? []).some((receipt, index) =>
+    recoveredUnknownMatch(job, index)?.candidateIds.includes(candidateId)
+    // New semantic claims already pin their actual exposed IDs durably. Keep
+    // them excluded too if a later proof permits rewinding the source cursor.
+    || receipt.phase === "semantics" && receipt.calls?.some(a => a.candidateIds?.includes(candidateId)));
+}
+
+/** Source-worker witness only. A guessed offset is NEVER evidence. Even the
+ * exact same rows with a different next cursor/scanned/count do not match.
+ * matchedCursor is a reproducible read start, NOT a fabricated historical one. */
+export function matchPeopleReconstructionUnknownPage({ receipt, receiptIndex, receiptHash, page, matchedCursor } = {}) {
+  if (!object(receipt) || !object(page) || !Array.isArray(page.rows) || page.rows.length > L.page
+    || !integer(receiptIndex) || !/^[a-f0-9]{64}$/.test(receiptHash ?? "")) return null;
+  const next = cursor(receipt.nextCursor), actualNext = cursor(page.nextCursor), from = cursor(matchedCursor);
+  if (next.phase !== "memory" || from.phase !== "memory" || from.offset >= next.offset
+    || next.offset - from.offset > L.unknownRecoverySlots || page.rows.length !== receipt.count
+    || page.scanned !== receipt.scanned || hash(actualNext) !== hash(next) || hash(page.rows) !== receipt.hash) return null;
+  if (page.rows.some(row => !object(row) || !id(row.key))) return null;
+  const candidateIds = page.rows.map(row => `recon_${hash([row.key, row.logicalBotId ?? null])}`);
+  if (new Set(candidateIds).size !== candidateIds.length) return null;
+  return { receiptIndex, receiptHash, hash: receipt.hash, count: receipt.count, scanned: receipt.scanned,
+    nextCursor: next, matchedCursor: from, candidateIds };
+}
+
+/** Explicit HOST adoption through the sole MemoryRuntime writer, never model
+ * JSON or a public caller's supplied proof. Host obtains this packet directly
+ * from its private fixed-source worker. Old receipts/costs stay untouched. */
+export function applyPeopleReconstructionUnknownRecovery(root, { authorized, expectedRevision, proof } = {}) {
+  if (authorized !== true) fail("UNAUTHORIZED");
+  const job = jobAt(root);
+  if (!job || job.revision !== expectedRevision) fail("REVISION_MISMATCH");
+  if (job.claim || job.cursor.phase !== "done" || !["paused", "completed", "completed_with_limits"].includes(job.status)) fail("UNKNOWN_RECOVERY_BLOCKED");
+  if (!object(proof) || proof.version !== 1 || proof.done !== true || proof.sourceId !== job.sourceId
+    || proof.ledgerBinding !== peopleReconstructionUnknownLedgerBinding(root)
+    || !Array.isArray(proof.matches) || proof.matches.length > L.unknownRecoveryReceipts) fail("UNKNOWN_RECOVERY_STALE");
+  const seen = new Set();
+  for (const match of proof.matches) {
+    const receipt = job.unknownBatches?.[match?.receiptIndex];
+    if (!object(match) || !integer(match.receiptIndex) || seen.has(match.receiptIndex) || !receipt
+      || match.receiptHash !== hash(receipt) || match.hash !== receipt.hash || match.count !== receipt.count
+      || match.scanned !== receipt.scanned || hash(cursor(match.nextCursor)) !== hash(cursor(receipt.nextCursor))
+      || cursor(match.matchedCursor).phase !== "memory" || match.nextCursor.phase !== "memory"
+      || match.matchedCursor.offset >= match.nextCursor.offset
+      || match.nextCursor.offset - match.matchedCursor.offset > L.unknownRecoverySlots
+      || !Array.isArray(match.candidateIds) || match.candidateIds.length !== receipt.count
+      || match.candidateIds.length > L.page || new Set(match.candidateIds).size !== match.candidateIds.length
+      || match.candidateIds.some(key => !/^recon_[a-f0-9]{64}$/.test(key))) fail("INVALID_UNKNOWN_RECOVERY");
+    seen.add(match.receiptIndex);
+  }
+  if (!proof.matches.length) fail("NO_UNKNOWN_MATCHES");
+  // Additive metadata only; no rewrite of receipt/startCursor or schema version.
+  const merged = new Map((job.unknownBatches ?? []).map((_, i) => [i, recoveredUnknownMatch(job, i)]).filter(([, m]) => m));
+  for (const match of proof.matches) merged.set(match.receiptIndex, match);
+  if (merged.size > L.unknownRecoveryReceipts) fail("RECOVERY_LEDGER_CAPACITY");
+  const matches = [...merged.values()];
+  job.unknownPageRecovery = { version: 1, sourceId: job.sourceId, ledgerBinding: proof.ledgerBinding, matches: copy(matches) };
+  if (job.semanticStage) {
+    const plan = semanticPlan(job);
+    if (cursorOrder(plan.excludedPrefixThrough, job.semanticStage.excludedPrefixThrough ?? initialCursor()) < 0) {
+      job.semanticStage.cursor = copy(plan.excludedPrefixThrough);
+      job.semanticStage.excludedPrefixThrough = copy(plan.excludedPrefixThrough);
+      job.status = "paused"; job.pauseReason = "unknown_recovery_adopted";
+    }
+  }
+  job.controlRevision++; job.revision++;
+  return { status: job.status, revision: job.revision, verifiedBatches: matches.length,
+    verifiedRows: matches.reduce((n, m) => n + m.count, 0), excludedPrefixThrough: semanticPlan(job).excludedPrefixThrough };
 }
 
 export function createPeopleReconstructionState({ id: jobId, sourceId, maxCalls = 1000,
@@ -266,6 +422,7 @@ export function classifyPeopleReconstructionRow(root, row, { eligible, now } = {
   base.evidence = sources.map(({ text: _text, ...s }) => s);
   const exact = ids.length > 0 && ids.every(Boolean) && new Set(ids).size === ids.length
     && ids.every(mid => sources.some(s => s.messageId === mid));
+  if (sources.some(s => !ids.includes(s.messageId))) contradictory = true;
   const contentBound = sources.length > 0 && sources.every(s => s.via === "receipt"
     ? row.evidenceKeys?.includes(JSON.stringify([row.jobKey, s.messageId]))
     : s.boundValueDigest === peopleReconstructionEvidenceBinding({ ...row, userId, value, kind }, s)
@@ -328,8 +485,11 @@ export function validatePeopleReconstructionSemantics(output, candidates) {
   const used = new Set(), result = [];
   for (const g of output.groups) {
     if (!object(g) || !Array.isArray(g.ids) || !g.ids.length || g.ids.length > L.page
-      || new Set(g.ids).size !== g.ids.length || !text(g.summary)
-      || (g.conflict !== undefined && typeof g.conflict !== "boolean")) fail("INVALID_MODEL_GROUP");
+      || new Set(g.ids).size !== g.ids.length) fail("INVALID_MODEL_GROUP");
+    if (!text(g.summary)) fail("INVALID_MODEL_GROUP_SUMMARY");
+    if (g.conflict !== undefined && typeof g.conflict !== "boolean") fail("INVALID_MODEL_GROUP_CONFLICT");
+    if (g.category !== undefined && !SEMANTIC_CATEGORIES.has(g.category)) fail("INVALID_MODEL_GROUP_CATEGORY");
+    if (g.relation !== undefined && !SEMANTIC_RELATIONS.has(g.relation)) fail("INVALID_MODEL_GROUP_RELATION");
     const selected = g.ids.map(key => available.get(key));
     if (selected.some(c => !c) || g.ids.some(key => used.has(key))) fail("MODEL_UNPINNED_ID");
     const first = selected[0];
@@ -337,7 +497,8 @@ export function validatePeopleReconstructionSemantics(output, candidates) {
       || c.conversationId !== first.conversationId)) fail("MODEL_SCOPE_CROSSING");
     g.ids.forEach(key => used.add(key));
     result.push({ ids: [...g.ids], summary: text(g.summary), conflict: g.conflict === true,
-      evidence: false, proposalOnly: true });
+      ...(g.category !== undefined ? { category: g.category } : {}),
+      ...(g.relation !== undefined ? { relation: g.relation } : {}), evidence: false, proposalOnly: true });
   }
   return result;
 }
@@ -382,11 +543,11 @@ export function controlPeopleReconstruction(root, args = {}) {
     } else return { status: job.status, revision: job.revision };
   } else if (op === "skip_unknown") {
     if (job.claim?.status !== "unknown" || !["paused", "cancelled"].includes(job.status)) fail("NO_UNKNOWN_CLAIM");
-    job.cursor = copy(job.claim.nextCursor);
-    job.stats.scanned += job.claim.scanned;
+    retainUnknown(job);
+    advanceClaim(job, job.claim);
     job.stats.skippedUnknown += job.claim.count; job.stats.unresolved += job.claim.count;
     job.claim = null;
-    if (job.cursor.phase === "done" && job.status !== "cancelled") job.status = "completed_with_limits";
+    if ((job.semanticStage?.cursor ?? job.cursor).phase === "done" && job.status !== "cancelled") job.status = "completed_with_limits";
   } else if (op === "pause") {
     if (job.status !== "running") fail("NOT_RUNNING");
     job.status = "paused";
@@ -398,27 +559,34 @@ export function controlPeopleReconstruction(root, args = {}) {
   } else if (op === "resume") {
     if (job.status !== "paused") fail("NOT_PAUSED");
     if (job.claim) fail("UNKNOWN_REQUIRES_EXPLICIT_SKIP");
+    if (job.semanticStage && job.stats.modelAttempts - job.semanticStage.startAttempts >= job.semanticStage.maxCalls) fail("SEMANTIC_RESUME_BLOCKED");
     job.status = "running";
     job.pauseReason = null;
   } else if (op === "scan_only") {
-    if (job.status === "cancelled" || job.claim?.status === "claimed") fail("NOT_SCANNABLE");
+    if (job.status === "cancelled" || job.claim?.status === "claimed" || job.semanticStage) fail("NOT_SCANNABLE");
     if (job.claim?.status === "unknown") {
-      job.unknownBatches ??= [];
-      if (job.unknownBatches.length >= 128) fail("UNKNOWN_LEDGER_CAPACITY");
       // Preserve the unknown receipt, never relabel it an ACK or replay it.
-      job.unknownBatches.push(copy(job.claim));
-      job.cursor = copy(job.claim.nextCursor); job.stats.scanned += job.claim.scanned;
+      retainUnknown(job);
+      advanceClaim(job, job.claim);
       job.stats.skippedUnknown += job.claim.count; job.stats.unresolved += job.claim.count;
       job.claim = null;
       if (job.pauseReason !== "operator") job.status = job.cursor.phase === "done" ? "completed_with_limits" : "running";
     }
     job.scanOnly = true;
   } else if (op === "resume_semantics") {
-    // Explicit operator recovery for NEW pages only. Never clear an unknown
-    // receipt, return to its cursor, release its reserved cost or replay it.
-    if (job.claim || !job.scanOnly || !["running", "paused"].includes(job.status) || job.cursor.phase === "done"
-      || job.stats.modelAttempts >= job.budget.maxCalls
+    if (job.claim || job.status === "cancelled" || job.stats.modelAttempts >= job.budget.maxCalls
       || job.stats.usage.totalTokens + job.stats.reservedTokens + job.budget.maxTokensPerCall > job.budget.maxTokens) fail("SEMANTIC_RESUME_BLOCKED");
+    if (job.cursor.phase === "done") {
+      const maxCalls = args.maxSemanticCalls ?? 1, plan = semanticPlan(job);
+      if (!["completed", "completed_with_limits", "paused"].includes(job.status)
+        || !integer(maxCalls) || maxCalls < 1 || maxCalls > L.semanticRunCalls || plan.blockedReason
+        || plan.cursor.phase === "done") fail("SEMANTIC_RESUME_BLOCKED");
+      job.semanticStage ??= { version: 1, cursor: plan.cursor, legacyPendingAllowed: plan.legacyPendingAllowed,
+        excludedPrefixThrough: copy(plan.excludedPrefixThrough),
+        pages: 0, processed: 0, proposed: 0, omitted: 0, suppressed: 0, reused: 0, ineligible: 0, unproven: 0 };
+      job.semanticStage.maxCalls = maxCalls;
+      job.semanticStage.startAttempts = job.stats.modelAttempts;
+    } else if (!job.scanOnly || !["running", "paused"].includes(job.status)) fail("SEMANTIC_RESUME_BLOCKED");
     job.acknowledgedUnknownCalls = job.stats.unknownCalls;
     job.scanOnly = false; job.status = "running"; job.pauseReason = null;
   } else if (op === "set_budget") {
@@ -428,6 +596,109 @@ export function controlPeopleReconstruction(root, args = {}) {
   } else fail("INVALID_OPERATION");
   job.controlRevision++; job.revision++;
   return { status: job.status, revision: job.revision };
+}
+
+/** Read-only bounded preflight. No transaction, model, text or paths in result. */
+export function summarizePeopleReconstructionSemanticsPage(root, rows, { eligible, now, cursor: from } = {}) {
+  const job = jobAt(root);
+  if (!job || !Array.isArray(rows) || rows.length > L.page || job.cursor.phase !== "done") fail("SEMANTIC_DRY_RUN_BLOCKED");
+  const plan = semanticPlan(job), at = cursor(from ?? plan.cursor);
+  if (cursorOrder(at, plan.cursor) < 0) fail("UNKNOWN_PREFIX_FENCED");
+  const candidates = rows.map(row => classifyPeopleReconstructionRow(root, row, { eligible, now }));
+  const pending = candidates.filter(c => semanticPending(job, c, plan));
+  return { sourceId: job.sourceId, cursor: at, legacyPendingAllowed: plan.legacyPendingAllowed,
+    excludedPrefixThrough: copy(plan.excludedPrefixThrough),
+    blockedReason: plan.blockedReason, rows: rows.length,
+    pending: pending.length,
+    exactRepresentativesLowerBound: new Set(pending.map(semanticKey)).size,
+    reusableProposals: pending.filter(c => reusableSemantic(root, job, c, eligible)).length,
+    unknownCandidates: candidates.filter(c => unknownCandidateExcluded(job, c.id)).length,
+    legacyUnproven: candidates.filter(c => own(job.candidates, c.id) && own(job.candidates, c.id).semanticState === undefined
+      && !plan.legacyPendingAllowed && !own(job.candidates, c.id)?.semantic).length,
+    suppressed: candidates.filter(c => c.tier === "Suppressed").length,
+    tiers: Object.fromEntries(TIERS.map(tier => [tier, candidates.filter(c => c.tier === tier).length])),
+    sourceTuples: candidates.reduce((n, c) => n + c.evidence.length, 0),
+    verifiedDurableCandidates: candidates.filter(c => c.tier === "Verified" && DURABLE.has(c.kind)).length,
+    attributionChanges: candidates.filter(c => own(job.candidates, c.id)
+      && own(job.candidates, c.id).logicalBotId !== c.logicalBotId).length,
+    modelCalls: 0, batchLimit: L.semanticBatch, defaultRunCalls: 1 };
+}
+
+// Semantic reprocessing never publishes to peopleMemory or creates candidates.
+// It may only attach non-evidence proposals to pinned, still-eligible originals.
+function applySemanticPage(root, { claimId, rows, groups, eligible, modelEligible, now }) {
+  const job = jobAt(root), claim = job?.claim;
+  if (claim?.id !== claimId || claim.status !== "claimed" || claim.phase !== "semantics"
+    || hash(rows) !== claim.hash) fail("CLAIM_LOST");
+  if (job.status !== "running" || claim.controlRevision !== job.controlRevision) {
+    claim.status = "unknown"; job.revision++; return { status: job.status, reason: "CONTROL_CHANGED" };
+  }
+  const fresh = rows.map(row => classifyPeopleReconstructionRow(root, row, { eligible, now }));
+  const attempted = new Set(claim.calls.filter(a => !a.notInvoked).flatMap(a => a.candidateIds));
+  for (const c of fresh) {
+    const stored = own(job.candidates, c.id);
+    if (stored && unknownCandidateExcluded(job, c.id)) {
+      if ([undefined, "pending"].includes(stored.semanticState)) {
+        stored.semanticState = "unknown"; job.semanticStage.unknown = (job.semanticStage.unknown || 0) + 1;
+      }
+      continue;
+    }
+    if (!stored || stored.semanticState && stored.semanticState !== "pending" || stored.semantic) continue;
+    if (stored.semanticState === undefined && !job.semanticStage.legacyPendingAllowed) {
+      stored.semanticState = "unproven"; job.semanticStage.unproven = (job.semanticStage.unproven || 0) + 1; continue;
+    }
+    if (c.tier === "Suppressed") {
+      job.stats.tiers[stored.tier]--; job.stats.tiers.Suppressed++;
+      stored.tier = "Suppressed"; stored.value = null; stored.evidence = []; stored.experience = false;
+      stored.publicStable = false; stored.reasons = c.reasons; stored.semanticState = "suppressed";
+      job.semanticStage.suppressed++; continue;
+    }
+    if (stored.tier === "Suppressed" || !c.conversationId?.startsWith("group:") || c.origin === "archive"
+      || sync(modelEligible, c) !== true) {
+      stored.semanticState = "ineligible"; job.semanticStage.ineligible = (job.semanticStage.ineligible || 0) + 1; continue;
+    }
+    if (c.tier === "Conflicted" && stored.tier !== "Conflicted") {
+      job.stats.tiers[stored.tier]--; job.stats.tiers.Conflicted++;
+      stored.tier = "Conflicted"; stored.experience = false; stored.publicStable = false;
+      stored.reasons.push("CURRENT_MEMORY_DIFFERS");
+    }
+    if (!attempted.has(c.id)) continue;
+    const proposal = groups.find(g => g.ids.includes(c.id));
+    // Original QQ, Bot, time, source IDs, grade and value remain unchanged.
+    stored.semantic = proposal ?? null; stored.semanticState = proposal ? "completed" : "omitted";
+    if (proposal?.conflict && stored.tier !== "Conflicted") {
+      job.stats.tiers[stored.tier]--; job.stats.tiers.Conflicted++;
+      stored.tier = "Conflicted"; stored.experience = false; stored.publicStable = false;
+      stored.reasons.push("SEMANTIC_CONFLICT_PROPOSAL");
+    }
+    job.semanticStage.processed++;
+    if (proposal) job.semanticStage.proposed++; else job.semanticStage.omitted = (job.semanticStage.omitted || 0) + 1;
+    if (proposal && !proposal.conflict && proposal.ids.length === 1
+      && !["conflict", "temporal", "withdrawal"].includes(proposal.relation) && stored.tier !== "Conflicted") {
+      job.semanticReuseIndex ??= {};
+      job.semanticReuseIndex[semanticKey(stored)] = stored.id;
+    }
+  }
+  for (const c of fresh) {
+    if (!semanticPending(job, c) || sync(modelEligible, c) !== true) continue;
+    const donor = reusableSemantic(root, job, c, eligible);
+    if (!donor) continue;
+    const stored = job.candidates[c.id];
+    stored.semantic = { ...copy(donor.semantic), ids: [c.id], relation: "duplicate", reusedFrom: donor.id };
+    stored.semanticState = "reused";
+    job.semanticStage.processed++; job.semanticStage.proposed++; job.semanticStage.reused = (job.semanticStage.reused || 0) + 1;
+  }
+  job.semanticStage.pages++;
+  // One scope / <=16 representatives / <=1 call per opportunity. Stay on this source
+  // page until all other pending IDs are handled, WITHOUT recalling tried IDs.
+  const remaining = fresh.some(c => semanticPending(job, c));
+  job.semanticStage.cursor = copy(remaining ? claim.startCursor : claim.nextCursor);
+  job.claim = null; job.revision++;
+  if (job.semanticStage.cursor.phase === "done") job.status = "completed_with_limits";
+  else if (job.stats.modelAttempts - job.semanticStage.startAttempts >= job.semanticStage.maxCalls) {
+    job.status = "paused"; job.pauseReason = "semantic_run_limit";
+  }
+  return { status: job.status, revision: job.revision, published: 0 };
 }
 
 /** Atomic result + ACK. Only unchanged Verified originals can enter peopleMemory. */
@@ -477,6 +748,8 @@ export function applyPeopleReconstructionPage(root, { claimId, rows, modelOutput
       }
       else if (imported) published++;
     }
+    const exposed = job.claim.calls?.some(a => !a.notInvoked && a.candidateIds?.includes(c.id));
+    c.semanticState = c.tier === "Suppressed" ? "suppressed" : c.semantic ? "completed" : exposed ? "omitted" : "pending";
     job.candidates[c.id] = c; job.candidateCount++; job.stats.tiers[c.tier]++;
     if (["Verified", "Supported"].includes(c.tier) && c.userId && c.conversationId?.startsWith("group:")
       && DURABLE.has(c.kind)) {
@@ -509,7 +782,8 @@ export function peopleReconstructionStatus(root) {
     usageComplete: job.stats.unknownCalls === 0, scanOnly: job.scanOnly === true,
     acknowledgedUnknownCalls: job.acknowledgedUnknownCalls || 0,
     lastFailureCode: job.lastFailureCode ?? null,
-    pauseReason: job.pauseReason ?? null, unknownBatches: job.unknownBatches?.length ?? 0 } : null;
+    pauseReason: job.pauseReason ?? null, unknownBatches: job.unknownBatches?.length ?? 0,
+    semanticStage: job.semanticStage ? copy(job.semanticStage) : null } : null;
 }
 
 export function peopleReconstructionProjectionKey(conversationId, userId, logicalBotId = null) {
@@ -551,9 +825,10 @@ export function queryPeopleReconstructionCandidates(root, { ids, logicalBotId, u
 
 /** One runner owns one root. No polling/retries; host serializes startup/control. */
 export function createPeopleReconstructionRunner({ getState, transact, readPage, eligible, model,
-  modelEligible = () => true, initializeJob = () => {},
+  modelEligible = () => true, modelAvailable = () => true,
+  modelBatchSize = cs => Math.min(cs.length, L.semanticBatch), initializeJob = () => {},
   now = Date.now } = {}) {
-  for (const fn of [getState, transact, readPage, eligible, now, modelEligible, initializeJob]) if (typeof fn !== "function") fail("INVALID_CALLBACK");
+  for (const fn of [getState, transact, readPage, eligible, now, modelEligible, modelAvailable, modelBatchSize, initializeJob]) if (typeof fn !== "function") fail("INVALID_CALLBACK");
   if (model !== undefined && typeof model !== "function") fail("INVALID_MODEL");
   let recovered = false, active = null, abort = null, storageBlocked = false;
   const tx = async build => {
@@ -591,8 +866,12 @@ export function createPeopleReconstructionRunner({ getState, transact, readPage,
     if (storageBlocked) fail("STORAGE_RECONCILIATION_REQUIRED");
     const before = jobAt(sync(getState));
     if (!before || before.status !== "running" || before.claim) return peopleReconstructionStatus(sync(getState));
+    const semanticPhase = Boolean(before.semanticStage);
+    if (semanticPhase && semanticPlan(before).blockedReason) fail("UNKNOWN_RECOVERY_STALE");
+    if (semanticPhase && (!useModel || !model || before.scanOnly)) fail("SEMANTIC_MODEL_REQUIRED");
     abort = new AbortController();
-    const pin = { id: before.id, sourceId: before.sourceId, cursor: copy(before.cursor), control: before.controlRevision };
+    const pin = { id: before.id, sourceId: before.sourceId,
+      cursor: copy(semanticPhase ? before.semanticStage.cursor : before.cursor), control: before.controlRevision };
     let page;
     try { page = await readPage({ sourceId: pin.sourceId, cursor: copy(pin.cursor), limit: L.page, signal: abort.signal }); }
     catch (error) { return { status: abort.signal.aborted ? jobAt(sync(getState))?.status : "source_error",
@@ -607,9 +886,11 @@ export function createPeopleReconstructionRunner({ getState, transact, readPage,
     const claimed = await tx(root => {
       const job = jobAt(root);
       if (job?.id !== pin.id || job.sourceId !== pin.sourceId || job.status !== "running"
-        || job.controlRevision !== pin.control || job.claim || hash(job.cursor) !== hash(pin.cursor)) return false;
-      job.sequence++; job.revision++; job.stats.scanAttempts += scanned;
+        || job.controlRevision !== pin.control || job.claim
+        || hash(semanticPhase ? job.semanticStage?.cursor : job.cursor) !== hash(pin.cursor)) return false;
+      job.sequence++; job.revision++; if (!semanticPhase) job.stats.scanAttempts += scanned;
       job.claim = { id: claimId, status: "claimed", hash: hash(rows), count: rows.length, scanned,
+        phase: semanticPhase ? "semantics" : "scan", startCursor: pin.cursor,
         nextCursor: next, controlRevision: job.controlRevision, modelStarted: false, calls: [] };
       return true;
     });
@@ -619,12 +900,26 @@ export function createPeopleReconstructionRunner({ getState, transact, readPage,
     try {
       const candidates = rows.map(row => classifyPeopleReconstructionRow(sync(getState), row, { eligible, now: sync(now) }));
       const visible = candidates.filter(c => c.tier !== "Suppressed" && c.userId && c.value
-        && sync(modelEligible, c) === true);
+        && sync(modelEligible, c) === true && (!semanticPhase || semanticPending(jobAt(sync(getState)), c)));
       const partitions = new Map();
+      const representatives = new Set();
       for (const c of visible) {
+        if (semanticPhase) {
+          if (reusableSemantic(sync(getState), jobAt(sync(getState)), c, eligible)) continue;
+          const key = semanticKey(c);
+          if (representatives.has(key)) continue;
+          representatives.add(key);
+        }
         const scopeKey = JSON.stringify([c.userId, c.logicalBotId, c.conversationId]);
         if (!partitions.has(scopeKey)) partitions.set(scopeKey, []);
         partitions.get(scopeKey).push(c.id);
+      }
+      if (semanticPhase && partitions.size) {
+        const [key, ids] = partitions.entries().next().value;
+        const count = sync(modelBatchSize, ids.map(key => candidates.find(c => c.id === key)),
+          { maxTokens: jobAt(sync(getState)).budget.maxTokensPerCall });
+        if (!integer(count) || count < 1 || count > Math.min(ids.length, L.semanticBatch)) fail("INVALID_SEMANTIC_BATCH");
+        partitions.clear(); partitions.set(key, ids.slice(0, count));
       }
       const modelEnabled = Boolean(model && useModel && !jobAt(sync(getState)).scanOnly);
       if (!modelEnabled && visible.length) await tx(root => {
@@ -646,9 +941,12 @@ export function createPeopleReconstructionRunner({ getState, transact, readPage,
           const job = jobAt(root);
           if (job.claim?.id !== claimId || job.status !== "running" || job.controlRevision !== pin.control) return false;
           const current = rows.map(row => classifyPeopleReconstructionRow(root, row, { eligible, now: sync(now) }))
-            .filter(c => ids.includes(c.id) && c.tier !== "Suppressed" && c.userId && c.value);
+            .filter(c => ids.includes(c.id) && c.tier !== "Suppressed" && c.userId && c.value
+              && (!semanticPhase || semanticPending(job, c)));
           if (!current.length) return { skip: true };
-          if (job.stats.unknownCalls > (job.acknowledgedUnknownCalls || 0) || job.stats.modelAttempts >= job.budget.maxCalls
+          if (sync(modelAvailable) !== true
+            || semanticPhase && job.stats.modelAttempts - job.semanticStage.startAttempts >= job.semanticStage.maxCalls
+            || job.stats.unknownCalls > (job.acknowledgedUnknownCalls || 0) || job.stats.modelAttempts >= job.budget.maxCalls
             || job.stats.usage.totalTokens + job.stats.reservedTokens + job.budget.maxTokensPerCall > job.budget.maxTokens) {
             job.status = "paused";
             if (job.claim.modelStarted) job.claim.status = "unknown"; else job.claim = null;
@@ -656,7 +954,8 @@ export function createPeopleReconstructionRunner({ getState, transact, readPage,
             bump(job.stats, job.stats.unknownCalls ? "MODEL_USAGE_UNKNOWN" : "MODEL_BUDGET"); return false;
           }
           job.claim.modelStarted = true; job.stats.modelAttempts++;
-          job.claim.calls.push({ id: attemptId, scopeHash: hash(scopeKey), usageSettled: false });
+          job.claim.calls.push({ id: attemptId, scopeHash: hash(scopeKey),
+            candidateIds: current.map(c => c.id), usageSettled: false });
           job.stats.reservedTokens += job.budget.maxTokensPerCall; job.revision++;
           return { candidates: current };
         });
@@ -675,8 +974,10 @@ export function createPeopleReconstructionRunner({ getState, transact, readPage,
         // Recheck AFTER the durable await as well: an online person-control
         // transaction may have been queued ahead of this continuation.
         const current = rows.map(row => classifyPeopleReconstructionRow(sync(getState), row, { eligible, now: sync(now) }))
-          .filter(c => ids.includes(c.id) && c.tier !== "Suppressed" && c.userId && c.value);
-        if (abort.signal.aborted || !current.length) {
+          .filter(c => ids.includes(c.id) && c.tier !== "Suppressed" && c.userId && c.value
+            && (!semanticPhase || semanticPending(jobAt(sync(getState)), c)));
+        const latest = jobAt(sync(getState));
+        if (abort.signal.aborted || !current.length || latest.status !== "running" || latest.controlRevision !== pin.control) {
           await tx(root => {
             const job = jobAt(root), attempt = job.claim?.calls?.find(a => a.id === attemptId);
             if (!attempt || attempt.usageSettled) fail("CLAIM_LOST");
@@ -698,6 +999,8 @@ export function createPeopleReconstructionRunner({ getState, transact, readPage,
         if (!object(output) || !Array.isArray(output.groups) || output.groups.length > L.semanticGroups) fail("INVALID_MODEL_OUTPUT");
         groups.push(...validatePeopleReconstructionSemantics(output, current));
       }
+      if (semanticPhase) return await tx(root => applySemanticPage(root,
+        { claimId, rows, groups, eligible, modelEligible, now: sync(now) }));
       return await tx(root => applyPeopleReconstructionPage(root, { claimId, rows,
         modelOutput: latestAttempt ? { groups } : undefined, now: sync(now), eligible }));
     } catch (error) {
@@ -711,7 +1014,9 @@ export function createPeopleReconstructionRunner({ getState, transact, readPage,
         // Only host enum codes are diagnostics. Never persist a provider error
         // message, model output, candidate text or arbitrary error.code.
         job.lastFailureCode = error instanceof ReconstructionError ? error.code
-          : ["RECONSTRUCTION_MODEL_OUTPUT_REJECTED", "MODEL_CONTEXT_CHANGED", "RECONSTRUCTION_STALE"].includes(error?.code)
+          : ["RECONSTRUCTION_MODEL_OUTPUT_REJECTED", "MODEL_CONTEXT_CHANGED", "RECONSTRUCTION_STALE",
+            "MODEL_PROMPT_LIMIT", "MODEL_TOKEN_ENVELOPE", "MODEL_SCOPE_DENIED", "MODEL_BINDING_CHANGED",
+            "EXISTING_BUDGET_EXHAUSTED"].includes(error?.code)
             ? error.code : "MODEL_OR_HOST_FAILED";
         job.claim.status = "unknown";
         job.claim.failureCode = job.lastFailureCode;
