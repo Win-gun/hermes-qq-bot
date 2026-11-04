@@ -87,7 +87,8 @@ const model = http.createServer(async (req, res) => {
     const payload = JSON.parse(raw);
     assert.equal(payload.model, 'synthetic-discovery-model');
     assert.equal(payload.tools, undefined); assert.equal(payload.tool_choice, undefined);
-    assert(raw.includes('后台网络素材筛选器'), 'only collection filtering may call model endpoint');
+    assert(raw.includes('后台网络素材筛选器'), 'only collection filtering may call model endpoint'
+      + (raw.includes('仅将主人请求解析为一个 JSON 候选') ? ' (received owner command classifier)' : ''));
     assert(!raw.includes('ordinary-private-sentinel'), 'filter cannot read private chat');
     const evidence = JSON.parse(payload.messages.at(-1).content.split('\n').at(-1));
     assert(evidence.results.some(item => (item.link || item.url) === 'https://example.invalid/evidence/collected'));
@@ -115,7 +116,7 @@ config.trigger = { ...config.trigger, activeReply: false, replyToKeywords: false
 config.messageDebounce = { enabled: false };
 config.memory = { ...config.memory, aiExtraction: { enabled: false }, learning: { enabled: false } };
 config.targetGroups = ['20001'];
-config.privateChats = { enabled: true, targetUsers: ['30001'], ownerUserIds: ['30001'] };
+config.privateChats = { enabled: true, targetUsers: ['30001', '30002'], ownerUserIds: ['30001'] };
 config.commands = { ...config.commands, enabled: true, ownerUserIds: ['30001'], adminUserIds: ['30001'] };
 delete config.apiCenter;
 config.ai = { ...config.ai, command: fakeHermes, args: ['-z'], textTransport: 'hermes', provider: 'custom',
@@ -158,9 +159,9 @@ const patch = async change => {
 const post = async (op, extra = {}, id = 'primary') => request(endpoint(id) + op,
   { method: 'POST', body: { expectedRevision: (await get(id)).revision, ...extra } });
 const persistedConfig = () => JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8'));
-function message(id, text, group = true) {
+function message(id, text, group = true, userId = 30001) {
   socket.send(JSON.stringify({ post_type: 'message', message_type: group ? 'group' : 'private', self_id: 10001,
-    ...(group ? { group_id: 20001 } : {}), user_id: 30001, message_id: id,
+    ...(group ? { group_id: 20001 } : {}), user_id: userId, message_id: id,
     time: Math.floor(Number(fs.readFileSync(clockFile, 'utf8')) / 1000), message: text, raw_message: text, sender: { nickname: 'Synthetic human' } }));
 }
 let slow;
@@ -271,10 +272,11 @@ try {
   assert.equal(modelCalls.length, 1, 'round interval prevents another provider call');
   assert.equal(readLines('search-calls').length, 1);
 
-  // Normal chat must remain one generation call; discovery cannot add another
-  // filter/search call. A deliberately emitted internal marker never reaches wire.
-  message(101, 'ordinary-private-sentinel', false);
+  // Use a non-owner DM to isolate ordinary chat from the independently tested
+  // owner classifier. Discovery must not add a filter/search call or leak a marker.
+  message(101, 'ordinary-private-sentinel', false, 30002);
   await until(() => sends.some(item => item.action === 'send_private_msg'), 'ordinary reply');
+  assert.equal(Number(sends.find(item => item.action === 'send_private_msg').params.user_id), 30002);
   assert.equal(readLines('chat-calls').length, 1);
   assert.equal(modelCalls.length, 1); assert.equal(readLines('search-calls').length, 1);
   assert(!JSON.stringify(sends).includes('DISCOVERY_USED'), 'internal marker stripped before OneBot');
