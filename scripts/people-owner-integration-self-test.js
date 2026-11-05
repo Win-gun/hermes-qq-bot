@@ -775,6 +775,32 @@ try {
         notifications: { enabled: original.enabled, times: original.times, timezone: original.timezone } } })).status, 200);
     }
   }, "src/bridge.js /api/send_private legacy-status-report guard");
+  await test("plain group self-report persists without model extraction and reaches only its bot's allowed context after restart", async () => {
+    const userId = "22992", phrase = "最近真的迷上火星观测了", secret = "喜欢绘制金星图", sourceId = "46090";
+    emit("alpha", `${phrase}。`, { userId, groupId: "31002", messageId: sourceId });
+    await until(() => snapshot().peopleMemory?.bots?.["account:alpha"]?.people?.[userId]?.entries
+      .some(entry => entry.value === phrase && entry.evidence.some(source => source.sourceType === "message" && source.messageId === sourceId)),
+    "deterministic OneBot evidence persisted");
+    assert.equal(snapshot().peopleMemory.bots["account:beta"].people[userId], undefined);
+    emit("alpha", `我${secret}。`, { userId, messageId: "46091" });
+    await until(() => snapshot().groups[`private:${userId}:alpha`]?.peopleSourceIndex?.["46091"], "private source received by the bridge");
+    await stopBridge(); await launch();
+    const here = await api(peoplePath("alpha", "group:31002", userId));
+    const cross = await api(peoplePath("alpha", "group:31001", userId));
+    assert.deepEqual(here.body.profile.entries.map(entry => entry.value), [phrase]);
+    assert.deepEqual(cross.body.profile.entries, [], "cross-group disclosure stays closed");
+    const start = calls.length;
+    emit("alpha", "LIVE_MEMORY_CROSS_CONTEXT 说说行星观测", { userId, groupId: "31001", mention: true });
+    await until(() => calls.slice(start).some(call => !call.extraction && call.prompt.includes("LIVE_MEMORY_CROSS_CONTEXT")
+      && call.prompt.includes(phrase) && !call.prompt.includes(secret)), "real reply context contains cross-group internal understanding");
+    const blocked = await api("/api/people/admin", { method: "POST", body: { expectedRevision: here.body.revision,
+      personRevision: here.body.profile.revision, accountId: "alpha", userId, operation: "delete", entryId: here.body.profile.entries[0].id } });
+    assert.equal(blocked.status, 200);
+    emit("alpha", `${phrase}。`, { userId, groupId: "31002", messageId: "46092" });
+    await until(() => snapshot().groups["31002"]?.peopleSourceIndex?.["46092"], "fresh input observed after deletion");
+    const after = await api(peoplePath("alpha", "group:31002", userId));
+    assert.deepEqual(after.body.profile.entries, [], "new replay of deleted value cannot resurrect it");
+  }, reportPointer.intake);
   await stopBridge();
   await test("IO guards prove no external process/network/production-state access", async () => {
     const guards = fs.existsSync(guardLog) ? fs.readFileSync(guardLog, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) : [];

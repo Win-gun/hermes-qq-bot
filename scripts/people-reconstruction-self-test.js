@@ -14,7 +14,7 @@ import {
   validatePeopleReconstructionSemantics, controlPeopleReconstruction,
   queryPeopleReconstructionCandidates, peopleReconstructionStatus,
   matchPeopleReconstructionUnknownPage, peopleReconstructionUnknownLedgerBinding,
-  applyPeopleReconstructionUnknownRecovery
+  applyPeopleReconstructionUnknownRecovery, literalPeopleArchiveSelfStatement
 } from "../src/people-memory-reconstruction.js";
 
 // ALL source/state files are synthetic and under this newly-created directory.
@@ -35,6 +35,7 @@ const row = (extra = {}) => ({ key: "fixture", origin: "canonical", jobKey: G, u
   logicalBotId: BOT, kind: "preference", value: "喜欢咖啡", status: "active", confidence: 0.9,
   sourceMessageIds: ["m1"], evidenceKeys: [JSON.stringify([G, "m1"])],
   extractionSource: "ai-extraction", sources: [source()], ...extra });
+const analysisRow = extra => row({ kind: "quote", ...extra });
 const classify = (r, root = { groups: {} }) => classifyPeopleReconstructionRow(root, r, { now: NOW, eligible });
 
 function harness(initial = { groups: {} }) {
@@ -66,7 +67,7 @@ const onePage = rows => async ({ sourceId }) => ({ sourceId, rows: structuredClo
   nextCursor: { phase: "done", offset: rows.length, file: 0, byte: 0 } });
 function runnerFor(h, options = {}) {
   return createPeopleReconstructionRunner({ getState: h.getState, transact: h.transact.bind(h),
-    readPage: onePage([row()]), eligible, now: () => NOW, ...options });
+    readPage: onePage([options.model ? analysisRow() : row()]), eligible, now: () => NOW, ...options });
 }
 async function start(runner, options = {}) {
   await runner.recover();
@@ -76,6 +77,16 @@ const usage = { inputTokens: 20, outputTokens: 5, totalTokens: 25 };
 const digest = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 try {
+  for (const [raw, value] of [
+    ["最近真的迷上胶片了", "最近真的迷上胶片了"], ["我现在基本都拍胶片", "现在基本都拍胶片"],
+    ["最近天天在玩星露谷", "最近天天在玩星露谷"], ["比起数码我还是更喜欢胶片", "比起数码还是更喜欢胶片"],
+    ["哈哈哈哈，我已经戒不掉摄影了", "已经戒不掉摄影了"], ["我以前很喜欢摄影。", "以前很喜欢摄影"]
+  ]) equal(literalPeopleArchiveSelfStatement(raw), { kind: "preference", value }, "oral recognition retains exact qualification");
+  equal(literalPeopleArchiveSelfStatement("我昵称是胶卷"), { kind: "alias", value: "胶卷" }, "explicit alias remains supported");
+  for (const raw of ["我不喜欢摄影", "更正我不喜欢摄影", "最近有人天天在玩星露谷", "我妈喜欢胶片",
+    "我喜欢胶片才怪", "假如我喜欢胶片", "我喜欢胶片？", "我喜欢胶片吗", "“我喜欢胶片”",
+    "[CQ:reply,id=123]我喜欢胶片", "我常用密码123456", "在玩星露谷", "我拍胶片", "我叫做他过来"])
+    equal(literalPeopleArchiveSelfStatement(raw), null, "ambiguous, sensitive or negative language cannot publish");
   // Pure provenance tiers, not AI confidence or nicknames.
   equal(classify(row()).tier, "Verified", "exact canonical receipts recover original ownership");
   equal(classify(row({ sources: [], logicalBotId: null })).tier, "Tentative", "source-less canonical stays tentative");
@@ -158,7 +169,7 @@ try {
     check(persisted.claim.calls.some(c => c.id === args.attemptId), "every isolated sub-call has its own durable attempt claim");
     equal(new Set(args.candidates.map(c => JSON.stringify([c.userId, c.logicalBotId, c.conversationId]))).size, 1,
       "model input never mixes QQ, private/group conversations or independent bots");
-    check(args.candidates.every(c => c.tier !== "Suppressed"), "suppressed content never reaches model");
+    check(args.candidates.every(c => c.tier === "Verified" && c.kind === "quote"), "only verified non-durable originals reach model");
     observedModels.push(args.candidates);
     return { groups: args.candidates.map(c => ({ ids: [c.id], summary: c.value, tier: "Verified" })), usage };
   } });
@@ -176,6 +187,7 @@ try {
   check(candidates.some(c => c.tier === "Conflicted"), "canonical conflicts retained");
   equal(h.getState().groups, snapshot.groups, "original memory and provenance untouched");
   equal(status.stats.usage.totalTokens, observedModels.length * usage.totalTokens, "provider usage summed, never estimated");
+  equal(observedModels.length, 0, "already publishable, unsupported, private and conflicted rows cost zero model calls");
   check(!JSON.stringify(status).includes("喜欢咖啡") && !JSON.stringify(status).includes(archiveFile), "status excludes source text and file paths");
   equal(status.stats.scanned, 16, "scan count includes raw JSONL records once, not model/bot copies");
 
@@ -242,7 +254,11 @@ try {
   const entered = new Promise(resolve => { deferred.enter = resolve; });
   const resultReady = new Promise(resolve => { deferred.release = resolve; });
   const changingPager = createPeopleReconstructionPager({ memory: snapshot, archives: [], sourceId: "fixture-v1" });
-  const changing = runnerFor(changed, { readPage: changingPager.readPage, model: async ({ candidates: cs }) => {
+  const changing = runnerFor(changed, { readPage: async args => {
+    const page = await changingPager.readPage(args);
+    for (const r of page.rows) if (r.value === "喜欢咖啡") r.kind = "quote";
+    return page;
+  }, model: async ({ candidates: cs }) => {
     deferred.enter(); await resultReady;
     return { groups: cs.map(c => ({ ids: [c.id], summary: c.value })), usage };
   } });
@@ -266,7 +282,7 @@ try {
   const began = new Promise(resolve => { barriers.began = resolve; });
   const releaseModel = new Promise(resolve => { barriers.release = resolve; });
   const pagedRows = async ({ sourceId, cursor: c }) => ({ sourceId,
-    rows: [row({ key: c.offset ? "later" : "first" })], nextCursor: c.offset
+    rows: [analysisRow({ key: c.offset ? "later" : "first" })], nextCursor: c.offset
       ? { phase: "done", offset: 2, file: 0, byte: 0 } : { phase: "memory", offset: 1, file: 0, byte: 0 } });
   const pauseRunner = runnerFor(pausing, { readPage: pagedRows, model: async args => {
     calls.push(args.candidates[0].key); if (calls.length === 1) { barriers.began(); await releaseModel; }
@@ -401,8 +417,8 @@ try {
   const postScanPages = async ({ sourceId, cursor: c }) => {
     const page = c.offset, count = page < 3 ? 32 : 8;
     assert.ok(page <= 3, "semantic continuation must never rewind the unknown prefix");
-    return { sourceId, rows: Array.from({ length: count }, (_, i) => row({
-      key: `post-${page}-${i}`, logicalBotId: null, sources: [], sourceMessageIds: [], evidenceKeys: [],
+    return { sourceId, rows: Array.from({ length: count }, (_, i) => analysisRow({
+      key: `post-${page}-${i}`,
       value: `喜欢项目${page}-${i}` })), scanned: count,
     nextCursor: { phase: page < 3 ? "memory" : "done", offset: page + 1, file: 0, byte: 0 } };
   };
@@ -410,7 +426,7 @@ try {
     semanticCalls.push(cs.map(c => c.key));
     if (semanticCalls.length <= 3) throw new Error("fixture transport unknown");
     check(cs.length <= 4, "explicit small-batch recovery has at most four candidates");
-    check(cs.every(c => c.logicalBotId === null && c.tier === "Tentative"), "semantic phase never fabricates historical Bot or evidence");
+    check(cs.every(c => c.logicalBotId === BOT && c.tier === "Verified"), "semantic phase uses only exact verified scope");
     return { groups: cs.map(c => ({ ids: [c.id], summary: c.value, tier: "Verified",
       logicalBotId: BOT, sourceMessageIds: ["invented"], conflict: false })), usage };
   };
@@ -450,8 +466,8 @@ try {
   equal([semanticR.status().stats.scanned, semanticR.status().stats.committedRows, semanticR.status().stats.semanticSkipped], sourceCounts,
     "semantic continuation does not inflate source scan counts or erase historical skipped work");
   equal([semanticR.status().stats.published, semanticH.getState().peopleMemory], [0, undefined], "semantic summaries never publish even when old job publishVerified is true");
-  check(Object.values(semanticH.getState().peopleReconstruction.candidates).every(c => c.tier === "Tentative"
-    && c.logicalBotId === null && !c.evidence.length && !c.sourceMessageIds.length && c.semantic?.proposalOnly),
+  check(Object.values(semanticH.getState().peopleReconstruction.candidates).every(c => c.tier === "Verified"
+    && c.logicalBotId === BOT && c.evidence.length === 1 && c.sourceMessageIds[0] === "m1" && c.semantic?.proposalOnly),
     "model authority, Bot and source fabrication fields cannot alter stored originals");
   equal([semanticR.status().stats.unknownCalls, semanticR.status().stats.reservedTokens, semanticR.status().stats.usage.totalTokens],
     [3, 6144, 50], "unknown reservations and actual known usage remain separate through post-scan recovery");
@@ -498,12 +514,12 @@ try {
   await postUnknownR.control({ authorized: true, operation: "resume_semantics", expectedRevision: postUnknownR.status().revision });
   await postUnknownR.step(); await postUnknownR.step();
   equal([postUnknownCalls.length, postUnknownR.status().claim.status], [1, "unknown"], "post-scan unknown model call is not automatically replayed");
-  const postRestart = runnerFor(postUnknownH); await postRestart.recover();
+  const postRestart = runnerFor(postUnknownH, { readPage: onePage([analysisRow()]) }); await postRestart.recover();
   await postRestart.control({ authorized: true, operation: "skip_unknown", expectedRevision: postRestart.status().revision });
   equal([postRestart.status().unknownBatches, postRestart.status().cursor.phase, postRestart.status().stats.scanned], [1, "done", 1],
     "explicit semantic skip preserves its receipt without recounting or rewinding the original source scan");
 
-  const subsetH = harness(), subsetSeen = [], subsetRows = [row(), row({ key: "other-subset", userId: OTHER,
+  const subsetH = harness(), subsetSeen = [], subsetRows = [analysisRow(), analysisRow({ key: "other-subset", userId: OTHER,
     sources: [source({ verifiedSenderId: OTHER })] })];
   const subsetR = runnerFor(subsetH, { readPage: onePage(subsetRows), model: async ({ candidates }) => {
     subsetSeen.push(candidates.map(c => c.userId));
@@ -532,9 +548,12 @@ try {
 
   // A 32-row source page, four scopes, tiny batches. Never advance past the
   // other 29 rows/scopes while any eligible ID is still explicitly pending.
-  const multiRows = Array.from({ length: 32 }, (_, i) => row({ key: `multi-${i}`,
-    jobKey: i % 4 === 2 ? G2 : G, userId: i % 4 === 1 ? OTHER : U,
-    logicalBotId: i % 4 === 3 ? PEER : null, sources: [], sourceMessageIds: [], evidenceKeys: [], value: `独立候选${i}` }));
+  const multiRows = Array.from({ length: 32 }, (_, i) => {
+    const group = i % 4 === 2 ? G2 : G, userId = i % 4 === 1 ? OTHER : U, bot = i % 4 === 3 ? PEER : BOT;
+    return analysisRow({ key: `multi-${i}`, jobKey: group, userId, logicalBotId: bot,
+      evidenceKeys: [JSON.stringify([group, "m1"])], value: `独立候选${i}`,
+      sources: [source({ verifiedSenderId: userId, conversationId: `group:${group}`, logicalBotId: bot })] });
+  });
   const multiH = harness(); let multiCalls = 0;
   const multiModel = async ({ candidates: cs }) => {
     multiCalls++; check(cs.length <= 3, "small adaptive batches stay bounded");
@@ -564,8 +583,8 @@ try {
 
   // Exact duplicates across source pages reuse ONLY a one-value proposal.
   // Every candidate keeps its own original sender, source IDs and event time.
-  const duplicateRows = Array.from({ length: 64 }, (_, i) => row({ key: `duplicate-${i}`, value: `喜欢项目${i % 8}`,
-    kind: i % 8 === 0 ? "quote" : "preference", sourceMessageIds: [`dup-${i}`], evidenceKeys: [JSON.stringify([G, `dup-${i}`])],
+  const duplicateRows = Array.from({ length: 64 }, (_, i) => analysisRow({ key: `duplicate-${i}`, value: `喜欢项目${i % 8}`,
+    sourceMessageIds: [`dup-${i}`], evidenceKeys: [JSON.stringify([G, `dup-${i}`])],
     sources: [source({ messageId: `dup-${i}`, time: new Date(Date.parse(AT) + i * 1000).toISOString() })] }));
   const duplicatePages = async ({ sourceId, cursor: c }) => ({ sourceId, rows: duplicateRows.slice(c.offset * 32, (c.offset + 1) * 32),
     nextCursor: { phase: c.offset ? "done" : "memory", offset: c.offset + 1, file: 0, byte: 0 } });
@@ -648,7 +667,9 @@ try {
   const conflictR = runnerFor(conflictH, { model: async ({ candidates: cs }) => ({
     groups: [{ ids: [cs[0].id], summary: "待核实矛盾", conflict: true, tier: "Verified" }], usage }) });
   await start(conflictR, { publishVerified: true }); await conflictR.step();
-  equal([conflictR.status().stats.tiers.Conflicted, conflictR.status().stats.published], [1, 0], "model may flag conflict but never raise evidence grade");
+  const conflictCandidate = Object.values(conflictH.getState().peopleReconstruction.candidates)[0];
+  equal([conflictCandidate.tier, conflictCandidate.semantic.conflict, conflictR.status().stats.published],
+    ["Verified", true, 0], "model conflict remains a proposal and cannot change evidence grade or publication");
 
   // Indexed archive host seam: original IDs/sender/time still checked by helper.
   let indexRequests;

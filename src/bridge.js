@@ -94,7 +94,7 @@ import { resolveModelCredential } from "./model-credentials.js";
 import { claimModelCall, settleModelCall, queryModelUsage, recordOperationalEvent, queryOperationalEvents } from "./operational-ledger.js";
 import { createOwnerCommandRouter, ownerOperationHistory, putOwnerDirective, revokeOwnerDirective, ownerDirectiveAllows, ownerAddressFor, ownerAddressAvoided, ownerGroupParticipationReduced } from "./owner-authority.js";
 import { normalizeOwnerNotifications, createOwnerNotificationCenter, getOwnerNotificationStatus } from "./owner-notifications.js";
-import { queryPersonMemory, personMemoryContext, personMemoryControl, applyPersonExtractionReceipt } from "./people-memory.js";
+import { queryPersonMemory, personMemoryContext, personMemoryControl, applyPersonExtractionReceipt, recordPersonEvidence } from "./people-memory.js";
 import { migrateLegacyCanonicalPeople } from "./people-memory-migration.js";
 import { createOwnerServices, normalizeOwnerControl, ownerQueryRange, formatOwnerCommandResult } from "./owner-services.js";
 import { resolveOwnerUtterance } from "./owner-intent.js";
@@ -103,6 +103,7 @@ import { projectOwnerGuidance, ownerGuidanceAllows, prepareOwnerGuidance, applyO
 import { createOwnerSocialController } from "./owner-social-controller.js";
 import { createCapabilityRegistry } from "./social-delegation.js";
 import { createPeopleReconstructionHost } from "./people-reconstruction-host.js";
+import { literalPeopleArchiveSelfStatement } from "./people-memory-reconstruction.js";
 import { migrateAutonomousSocialConfig, normalizeAutonomousSocialPolicy } from "./autonomous-social-migration.js";
 import { recordOwnerInteraction, queryOwnerInteractions } from "./owner-interactions.js";
 import { normalizeApiCenter, validateApiCenter, applyApiCenterBindings, resolveApiCapability, syncLegacyApiPatch } from "./api-center.js";
@@ -1678,6 +1679,22 @@ function recordPeopleSourceObservation(memory, event, config) {
   const slots = gm.peopleSourceIndex[messageId] ||= {};
   slots[event.__logicalBotId] ||= { accountId: event.__accountId, verifiedSenderId: String(event.user_id),
     conversationId: event.message_type === "private" ? `private:${event.user_id}` : `group:${event.group_id}`, time: timing.sentAt };
+}
+
+// OneBot already authenticated the carrier and routed this event. Only plain
+// source text is eligible: no quote, forward, attachment, model or OCR text.
+function livePersonStatement(event, config) {
+  if (config.memory?.enabled === false || config.memory?.people?.enabled !== true || event.message_type !== "group"
+    || !/^[1-9]\d{4,19}$/.test(String(event.group_id ?? ""))
+    || !/^-?[1-9]\d{0,19}$/.test(String(event.message_id ?? ""))
+    || typeof event.message_id === "number" && !Number.isSafeInteger(event.message_id)
+    || event.sender?.user_id != null && String(event.sender.user_id) !== String(event.user_id)
+    || !/^[1-9]\d{8,10}$/.test(String(event.time ?? ""))) return null;
+  const input = event.message ?? event.raw_message;
+  const text = typeof input === "string" ? input : Array.isArray(input) && input.length === 1
+    && input[0]?.type === "text" && typeof input[0].data?.text === "string" ? input[0].data.text : "";
+  if (!text || text.length > 400 || /^\s*[!/]/u.test(text) || redactSensitive(text, config, { force: true }) !== text) return null;
+  return literalPeopleArchiveSelfStatement(text);
 }
 
 function addPendingMemoryMessage(memory, event, senderName, text, config) {
@@ -9020,7 +9037,8 @@ async function main() {
   }
   const extractionCounts = { committed: 0, failed: 0, acceptedClaims: 0, proposedClaims: 0,
     rejectedClaims: 0, verificationCasesCreated: 0, verificationCandidatesRejected: 0,
-    verificationBackpressure: 0, lastCode: "", lastRejectionCodes: [], active: false };
+    verificationBackpressure: 0, lastCode: "", lastRejectionCodes: [], active: false,
+    liveSelfReports: { committed: 0, duplicate: 0, rejected: 0, lastRejectionCode: "" } };
   memoryExtractionRuntime = createAsyncMemoryExtractionScheduler({
     getState: () => memory,
     transact: build => mutateMemory(memory, build),
@@ -16665,11 +16683,29 @@ async function main() {
       if (inboundIdentity?.logicalBotId && /^[1-9]\d{4,19}$/.test(senderId) && senderId !== selfId
         && !configuredAccountDefinitions(config).some(a => String(a.qq || "") === senderId)) {
         const timing = messageTiming(event);
-        if (timing.sourceTimeKnown) await collectMemory(memory, draft => {
-          recordPeopleSourceObservation(draft, event, config);
-          return recordOwnerInteraction(draft, { logicalBotId: inboundIdentity.logicalBotId, accountId: accountState.id,
-            conversationId: isPrivate ? `private:${senderId}` : `group:${event.group_id}`, messageId: String(event.message_id || ""),
-            direction: "received", at: timing.sentAtMs, now: Date.now() }); });
+        const personStatement = livePersonStatement(event, config), personConfig = configRevision;
+        if (timing.sourceTimeKnown) {
+          const result = await collectMemory(memory, draft => {
+            recordPeopleSourceObservation(draft, event, config);
+            recordOwnerInteraction(draft, { logicalBotId: inboundIdentity.logicalBotId, accountId: accountState.id,
+              conversationId: isPrivate ? `private:${senderId}` : `group:${event.group_id}`, messageId: String(event.message_id || ""),
+              direction: "received", at: timing.sentAtMs, now: Date.now() });
+            if (!personStatement) return null;
+            if (personConfig !== configRevision || !receivingAccount.enabled || !oneBotBindingCurrent(ws, inboundBinding))
+              return { ok: false, reason: "LIVE_SOURCE_STALE" };
+            // Same durable intake as the verified source. Background model
+            // extraction remains optional enrichment, not a prerequisite.
+            return recordPersonEvidence(draft, { ...personStatement, logicalBotId: inboundIdentity.logicalBotId,
+              accountId: accountState.id, userId: senderId, verifiedSenderId: senderId,
+              conversationId: `group:${event.group_id}`, messageId: String(event.message_id),
+              time: Number(event.time), now: Date.now(), sourceType: "message", privacy: "public",
+              confidence: 0.7, selfReported: true });
+          });
+          const stats = extractionCounts.liveSelfReports;
+          if (result?.ok && result.changed) stats.committed++;
+          else if (result?.reason === "DUPLICATE") stats.duplicate++;
+          else if (result) { stats.rejected++; stats.lastRejectionCode = result.reason; }
+        }
         if (!oneBotBindingCurrent(ws, inboundBinding) || !accountRuntimeIdentityCurrent(inboundIdentity, ws)) return;
       }
       if (isPrivate && (isPrivateOwner(senderId, config) || /^\/owner(?:\s|$)/iu.test(text))) {

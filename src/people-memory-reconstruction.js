@@ -3,7 +3,7 @@ import { open } from "node:fs/promises";
 import { setImmediate as yieldTurn } from "node:timers/promises";
 import { canonicalMemoryFields } from "./memory-integrity.js";
 import { legacyJobScope } from "./people-memory-migration.js";
-import { personMemoryControl, recordPersonEvidence, verifyPublicSelfStatement } from "./people-memory.js";
+import { personMemoryControl, recordPersonEvidence, recognizePublicSelfStatement } from "./people-memory.js";
 import { redactText, sanitizeArchiveValue } from "./privacy-filter.js";
 
 /**
@@ -73,6 +73,7 @@ const BAD = new Set(["__proto__", "constructor", "prototype"]);
 const TIERS = ["Verified", "Supported", "Tentative", "Conflicted", "Suppressed"];
 const DURABLE = new Set(["stable_fact", "preference", "alias", "boundary"]);
 const ARCHIVE_SELF_CONFIDENCE = 0.7; // same evidence grade as ordinary live public self-report
+export const PEOPLE_ARCHIVE_SELF_EVIDENCE_VERSION = 2;
 const SEMANTIC_CATEGORIES = new Set([...DURABLE, "quote", "episode", "uncertain", "discard"]);
 const SEMANTIC_RELATIONS = new Set(["related", "duplicate", "conflict", "temporal", "withdrawal", "insufficient"]);
 const TERMINAL = new Set(["deleted", "revoked", "rejected", "superseded", "suppressed"]);
@@ -158,9 +159,17 @@ function semanticPending(job, candidate, plan = job.semanticStage ?? semanticPla
   return Boolean(stored && !unknownCandidateExcluded(job, candidate.id) && !stored.semantic && stored.tier !== "Suppressed" && stored.value
     && stored.userId === candidate.userId && stored.logicalBotId === candidate.logicalBotId
     && stored.conversationId === candidate.conversationId && stored.kind === candidate.kind && stored.value === candidate.value
-    && candidate.tier !== "Suppressed" && candidate.value
-    && candidate.userId && candidate.conversationId?.startsWith("group:") && candidate.origin !== "archive"
+    && peopleReconstructionNeedsAnalysis(candidate)
     && (stored.semanticState === "pending" || stored.semanticState === undefined && plan.legacyPendingAllowed));
+}
+
+// Only exact, verified originals that cannot already use deterministic durable
+// publication are worth semantic spend. A legacy summary or an owner-less or
+// conflicted join is never a substitute for that evidence.
+export function peopleReconstructionNeedsAnalysis(c) {
+  return Boolean(c?.tier === "Verified" && c.value && c.userId && c.logicalBotId
+    && c.conversationId?.startsWith("group:") && c.origin === "canonical"
+    && c.evidence?.length && ["quote", "episode"].includes(c.kind));
 }
 // Reuse ONLY the attached proposal, never sources, evidence grade or time.
 const semanticKey = c => hash([c.logicalBotId, c.userId, c.conversationId, c.kind, c.value]);
@@ -169,7 +178,7 @@ function reusableSemantic(root, job, c, eligible) {
   const donor = own(job.candidates, own(job.semanticReuseIndex, semanticKey(c)));
   if (!donor || unknownCandidateExcluded(job, donor.id) || donor.id === c.id || semanticKey(donor) !== semanticKey(c)
     || !["completed", "reused"].includes(donor.semanticState)
-    || ["Suppressed", "Conflicted"].includes(donor.tier) || !donor.semantic?.proposalOnly
+    || !peopleReconstructionNeedsAnalysis(donor) || !donor.semantic?.proposalOnly
     || donor.semantic.conflict || donor.semantic.ids.length !== 1
     || ["conflict", "temporal", "withdrawal"].includes(donor.semantic.relation)
     || donor.sourceBinding && currentSourceFence(root, donor.sourceBinding)
@@ -351,15 +360,7 @@ function sourceTuple(raw, row, scope, now) {
 /** Derive the entire value from one original, plain self-statement. No model,
  * legacy summary, substring match, residence or arbitrary free-text inference. */
 export function literalPeopleArchiveSelfStatement(rawText) {
-  const body = text(rawText);
-  if (!body || /[\r\n\[\]<>]/u.test(rawText)) return null;
-  const match = /^我(?:本人|自己|个人)?(喜欢|偏爱|偏好|中意|爱好|习惯|常用|名叫|叫做|昵称是|外号是|别名是|从事|用的是)([^，,、。！？!?；;：:]{1,64})。?$/u.exec(body);
-  if (!match) return null;
-  const [, verb, object] = match;
-  const kind = /^(?:名叫|叫做|昵称是|外号是|别名是)$/u.test(verb) ? "alias"
-    : /^(?:从事|用的是)$/u.test(verb) ? "stable_fact" : "preference";
-  const value = kind === "alias" ? object.trim() : `${verb}${object}`.trim();
-  return verifyPublicSelfStatement({ text: body, value, kind }).ok ? { kind, value } : null;
+  return recognizePublicSelfStatement(rawText);
 }
 
 /** Dedicated model-free publication cursor. No source text/semantic output is
@@ -371,12 +372,15 @@ export function applyPeopleArchiveSelfEvidencePage(root, { authorized, expectedR
   if (!job || job.revision !== expectedRevision) fail("REVISION_MISMATCH");
   if (!job.publishVerified || job.claim || job.cursor.phase !== "done"
     || !["paused", "completed", "completed_with_limits"].includes(job.status)) fail("EVIDENCE_PUBLICATION_BLOCKED");
-  const offset = job.archiveSelfEvidence?.offset ?? 0;
-  if (!object(page) || page.sourceId !== job.sourceId || page.offset !== offset || !Array.isArray(page.rows)
+  const previous = job.archiveSelfEvidenceV2;
+  const offset = previous?.offset ?? 0;
+  if (!object(page) || page.version !== PEOPLE_ARCHIVE_SELF_EVIDENCE_VERSION
+    || page.sourceId !== job.sourceId || page.offset !== offset || !Array.isArray(page.rows)
     || page.rows.length > L.page || page.nextOffset !== offset + page.rows.length || typeof page.done !== "boolean"
     || (!page.rows.length && !page.done) || typeof eligible !== "function" || time(now) === null
-    || job.archiveSelfEvidence?.done) fail("INVALID_EVIDENCE_PAGE");
-  const stats = job.archiveSelfEvidence ??= { offset: 0, done: false, published: 0, skipped: 0, duplicates: 0, reasons: {} };
+    || previous && (previous.version !== page.version || previous.sourceId !== job.sourceId || previous.done)) fail("INVALID_EVIDENCE_PAGE");
+  const stats = job.archiveSelfEvidenceV2 ??= { version: page.version, sourceId: job.sourceId, offset: 0, done: false,
+    published: 0, skipped: 0, duplicates: 0, reasons: {} };
   for (const row of page.rows) {
     const userId = qq(row?.userId), logicalBotId = id(row?.logicalBotId), scope = row?.conversationId;
     const value = text(row?.value), kind = row?.kind;
@@ -456,8 +460,9 @@ export function classifyPeopleReconstructionRow(root, row, { eligible, now } = {
   }
   const eligibility = { logicalBotId: base.logicalBotId, userId, conversationId: scope, mode: "reconstruction" };
   if (sync(eligible, eligibility) !== true) return suppress("SCOPE_NOT_AUTHORIZED");
-  if (row.sourceIssue) return { ...base, reasons: [row.sourceIssue === "ARCHIVE_OWNER_AMBIGUOUS"
-    ? "ARCHIVE_OWNER_AMBIGUOUS" : "SOURCE_CAPACITY_OR_INVALID_IDS"] };
+  if (row.sourceIssue) return { ...base, reasons: [
+    ["ARCHIVE_OWNER_AMBIGUOUS", "ARCHIVE_OWNER_UNKNOWN", "ORIGINAL_TIME_UNVERIFIED", "NON_PLAIN_SOURCE"].includes(row.sourceIssue)
+      ? row.sourceIssue : "SOURCE_CAPACITY_OR_INVALID_IDS"] };
   if (!Array.isArray(row.sources) || row.sources.length > L.sources) return suppress("SOURCE_CAPACITY");
   const ids = Array.isArray(row.sourceMessageIds) && row.sourceMessageIds.length <= L.sources
     ? row.sourceMessageIds.map(id) : [];
@@ -481,10 +486,12 @@ export function classifyPeopleReconstructionRow(root, row, { eligible, now } = {
   const exact = ids.length > 0 && ids.every(Boolean) && new Set(ids).size === ids.length
     && ids.every(mid => sources.some(s => s.messageId === mid));
   if (sources.some(s => !ids.includes(s.messageId))) contradictory = true;
-  const contentBound = sources.length > 0 && sources.every(s => s.via === "receipt"
-    ? row.evidenceKeys?.includes(JSON.stringify([row.jobKey, s.messageId]))
-    : s.boundValueDigest === peopleReconstructionEvidenceBinding({ ...row, userId, value, kind }, s)
-      || s.text === value || verifyPublicSelfStatement({ text: s.text, value, kind }).ok);
+  const contentBound = sources.length > 0 && sources.every(s => {
+    if (s.via === "receipt") return row.evidenceKeys?.includes(JSON.stringify([row.jobKey, s.messageId]));
+    if (s.boundValueDigest === peopleReconstructionEvidenceBinding({ ...row, userId, value, kind }, s)) return true;
+    const claim = literalPeopleArchiveSelfStatement(s.text);
+    return claim?.kind === kind && claim.value === value || kind === "quote" && s.text === value;
+  });
   if (row.conflicted === true || contradictory) {
     base.tier = "Conflicted"; base.reasons.push(contradictory ? "SOURCE_CONFLICT" : "HISTORICAL_CONFLICT");
   } else if (exact && contentBound && base.logicalBotId && row.origin === "canonical" && row.status === "active") {
@@ -493,7 +500,8 @@ export function classifyPeopleReconstructionRow(root, row, { eligible, now } = {
     base.tier = "Supported";
     base.reasons.push(base.logicalBotId ? "INCOMPLETE_EVIDENCE" : "BOT_OWNERSHIP_UNKNOWN");
   } else base.reasons.push(row.joinIncomplete ? "ARCHIVE_JOIN_INCOMPLETE"
-    : sources.length ? "CONTENT_NOT_BOUND" : "NO_ORIGINAL_SOURCE");
+    : sources.length ? "CONTENT_NOT_BOUND" : ids.length ? "ORIGINAL_MESSAGE_NOT_FOUND"
+      : row.origin === "legacy" ? "LEGACY_SUMMARY_WITHOUT_MESSAGE_ID" : "MISSING_MESSAGE_ID");
   // Different interests are not automatically contradictions. Only explicit
   // historical links, a narrow opposite assertion, or an AI conflict proposal
   // may hold a fact; never interpret "coffee" vs "photography" as a conflict.
@@ -663,10 +671,19 @@ export function summarizePeopleReconstructionSemanticsPage(root, rows, { eligibl
   const plan = semanticPlan(job), at = cursor(from ?? plan.cursor);
   if (cursorOrder(at, plan.cursor) < 0) fail("UNKNOWN_PREFIX_FENCED");
   const candidates = rows.map(row => classifyPeopleReconstructionRow(root, row, { eligible, now }));
+  const diagnostics = { reasons: {} };
+  for (const c of candidates) for (const reason of c.reasons) bump(diagnostics, reason);
   const pending = candidates.filter(c => semanticPending(job, c, plan));
   return { sourceId: job.sourceId, cursor: at, legacyPendingAllowed: plan.legacyPendingAllowed,
     excludedPrefixThrough: copy(plan.excludedPrefixThrough),
     blockedReason: plan.blockedReason, rows: rows.length,
+    sourceReasons: diagnostics.reasons,
+    sourceClasses: {
+      deterministic: candidates.filter(c => c.tier === "Verified" && DURABLE.has(c.kind)).length,
+      analysis: candidates.filter(peopleReconstructionNeedsAnalysis).length,
+      unresolved: candidates.filter(c => ["Supported", "Tentative"].includes(c.tier)).length,
+      fenced: candidates.filter(c => ["Conflicted", "Suppressed"].includes(c.tier)).length
+    },
     pending: pending.length,
     exactRepresentativesLowerBound: new Set(pending.map(semanticKey)).size,
     reusableProposals: pending.filter(c => reusableSemantic(root, job, c, eligible)).length,
@@ -711,8 +728,7 @@ function applySemanticPage(root, { claimId, rows, groups, eligible, modelEligibl
       stored.publicStable = false; stored.reasons = c.reasons; stored.semanticState = "suppressed";
       job.semanticStage.suppressed++; continue;
     }
-    if (stored.tier === "Suppressed" || !c.conversationId?.startsWith("group:") || c.origin === "archive"
-      || sync(modelEligible, c) !== true) {
+    if (stored.tier === "Suppressed" || !peopleReconstructionNeedsAnalysis(c) || sync(modelEligible, c) !== true) {
       stored.semanticState = "ineligible"; job.semanticStage.ineligible = (job.semanticStage.ineligible || 0) + 1; continue;
     }
     if (c.tier === "Conflicted" && stored.tier !== "Conflicted") {
@@ -724,11 +740,6 @@ function applySemanticPage(root, { claimId, rows, groups, eligible, modelEligibl
     const proposal = groups.find(g => g.ids.includes(c.id));
     // Original QQ, Bot, time, source IDs, grade and value remain unchanged.
     stored.semantic = proposal ?? null; stored.semanticState = proposal ? "completed" : "omitted";
-    if (proposal?.conflict && stored.tier !== "Conflicted") {
-      job.stats.tiers[stored.tier]--; job.stats.tiers.Conflicted++;
-      stored.tier = "Conflicted"; stored.experience = false; stored.publicStable = false;
-      stored.reasons.push("SEMANTIC_CONFLICT_PROPOSAL");
-    }
     job.semanticStage.processed++;
     if (proposal) job.semanticStage.proposed++; else job.semanticStage.omitted = (job.semanticStage.omitted || 0) + 1;
     if (proposal && !proposal.conflict && proposal.ids.length === 1
@@ -779,7 +790,6 @@ export function applyPeopleReconstructionPage(root, { claimId, rows, modelOutput
     const c = planned.find(item => item.id === key);
     if (c.tier === "Suppressed") continue;
     c.semantic = g;
-    if (g.conflict && c.tier !== "Suppressed") { c.tier = "Conflicted"; c.experience = false; c.reasons.push("SEMANTIC_CONFLICT_PROPOSAL"); }
   }
   const added = planned.filter(c => !own(job.candidates, c.id));
   const newPeople = new Set(added.map(c => c.userId).filter(u => u && !own(job.people, u)));
@@ -842,7 +852,8 @@ export function peopleReconstructionStatus(root) {
     lastFailureCode: job.lastFailureCode ?? null,
     pauseReason: job.pauseReason ?? null, unknownBatches: job.unknownBatches?.length ?? 0,
     semanticStage: job.semanticStage ? copy(job.semanticStage) : null,
-    archiveSelfEvidence: job.archiveSelfEvidence ? copy(job.archiveSelfEvidence) : null } : null;
+    archiveSelfEvidence: job.archiveSelfEvidence ? copy(job.archiveSelfEvidence) : null,
+    archiveSelfEvidenceV2: job.archiveSelfEvidenceV2 ? copy(job.archiveSelfEvidenceV2) : null } : null;
 }
 
 export function peopleReconstructionProjectionKey(conversationId, userId, logicalBotId = null) {
@@ -958,7 +969,7 @@ export function createPeopleReconstructionRunner({ getState, transact, readPage,
     const groups = [];
     try {
       const candidates = rows.map(row => classifyPeopleReconstructionRow(sync(getState), row, { eligible, now: sync(now) }));
-      const visible = candidates.filter(c => c.tier !== "Suppressed" && c.userId && c.value
+      const visible = candidates.filter(c => peopleReconstructionNeedsAnalysis(c)
         && sync(modelEligible, c) === true && (!semanticPhase || semanticPending(jobAt(sync(getState)), c)));
       const partitions = new Map();
       const representatives = new Set();
@@ -1000,7 +1011,7 @@ export function createPeopleReconstructionRunner({ getState, transact, readPage,
           const job = jobAt(root);
           if (job.claim?.id !== claimId || job.status !== "running" || job.controlRevision !== pin.control) return false;
           const current = rows.map(row => classifyPeopleReconstructionRow(root, row, { eligible, now: sync(now) }))
-            .filter(c => ids.includes(c.id) && c.tier !== "Suppressed" && c.userId && c.value
+            .filter(c => ids.includes(c.id) && peopleReconstructionNeedsAnalysis(c) && sync(modelEligible, c) === true
               && (!semanticPhase || semanticPending(job, c)));
           if (!current.length) return { skip: true };
           if (sync(modelAvailable) !== true
@@ -1033,7 +1044,7 @@ export function createPeopleReconstructionRunner({ getState, transact, readPage,
         // Recheck AFTER the durable await as well: an online person-control
         // transaction may have been queued ahead of this continuation.
         const current = rows.map(row => classifyPeopleReconstructionRow(sync(getState), row, { eligible, now: sync(now) }))
-          .filter(c => ids.includes(c.id) && c.tier !== "Suppressed" && c.userId && c.value
+          .filter(c => ids.includes(c.id) && peopleReconstructionNeedsAnalysis(c) && sync(modelEligible, c) === true
             && (!semanticPhase || semanticPending(jobAt(sync(getState)), c)));
         const latest = jobAt(sync(getState));
         if (abort.signal.aborted || !current.length || latest.status !== "running" || latest.controlRevision !== pin.control) {

@@ -125,6 +125,36 @@ await check("bounded eight calls / lower tool budget / unknown usage", async () 
   assert.equal(f.modelCalls.length, 8); assert.equal(f.usage.actualCalls, 8); assert.equal(f.usage.unknownUsageCalls, 8);
   const lower = fixture({ policy: { maxToolCalls: 1 }, model: () => ({ action: "tool", tool: { name: "read_memory", args: {} } }) });
   assert.equal(code(await lower.run()), "SOCIAL_TOOL_LIMIT"); assert.equal(lower.toolCalls.length, 1);
+  assert.ok(lower.modelCalls[0].tools.some(row => row.name === "read_memory"));
+  assert.deepEqual(lower.modelCalls[1].tools, []);
+});
+
+await check("model sees scoped tool guidance; sticker result is evidence, not delivery", async () => {
+  const f = fixture({
+    tools: { search_stickers: (_scope, args) => {
+      assert.deepEqual(args, { query: "庆祝完工" });
+      return { candidates: [], reason: "NO_REUSABLE_PUBLIC_STICKER" };
+    } },
+    model: ({ tools, snapshot }, n) => {
+      const search = tools.find(row => row.name === "search_stickers");
+      assert.match(search.description, /本地候选不合适.*公开情绪短语/);
+      assert.deepEqual(search.argumentKeys, ["query"]);
+      if (n === 1) return { action: "tool", tool: { name: search.name, args: { query: "庆祝完工" } } };
+      assert.deepEqual(snapshot.toolResults, [{ name: "search_stickers",
+        result: { candidates: [], reason: "NO_REUSABLE_PUBLIC_STICKER" } }]);
+      return { action: "observe" };
+    }
+  });
+  assert.equal(code(await f.run()), "SOCIAL_COMPLETED");
+  assert.equal(f.modelCalls.length, 2);
+  assert.equal(f.sends.length, 0);
+
+  const reflected = fixture({ model: ({ tools }) => {
+    assert.deepEqual(tools.map(row => row.name), ["read_unread", "read_detail", "read_history", "read_memory"]);
+    return { action: "tool", tool: { name: "web_search", args: { query: "unoffered" } } };
+  } });
+  assert.equal(code(await reflected.run({ ...ctx, reflectOnly: true })), "SOCIAL_INVALID_TOOL");
+  assert.equal(reflected.toolCalls.length, 0);
 });
 
 await check("daily budget shared across concurrent conversations / max global two", async () => {

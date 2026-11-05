@@ -337,6 +337,39 @@ const JOKE = /(?:开玩笑|逗你|玩笑|骗你的|随便说|瞎说|梗|hhh|233)
 const INJECTION = /(?:忽略|无视|忘记|忘掉|牢记|指令|提示词|系统消息|system|assistant|prompt|ignore|从现在开始|从现在起|你必须|请把)/iu;
 const SECRET = /(?:密码|口令|验证码|身份证|手机号|银行卡|地址|住址|宿舍|寝室|token|密钥|secret|password)/iu;
 const QUOTED = /["“”‘’「」『』`]|^\s*>|\[CQ:(?:reply|forward|node|json|xml)\b/iu;
+const ORAL_TIME = "(?:最近|这几天|这阵子|这段时间|以前|曾经|去年|今年|现在|目前|一直|平时|通常)";
+const ORAL_DEGREE = "(?:真的|确实|还是|更|很|超|挺|特别|比较|蛮|就|还|最|基本都|基本上都|天天|经常|总是|已经)";
+const ORAL_VERB = "(?:喜欢|偏爱|偏好|中意|爱好|习惯|常用|名叫|叫做|昵称是|外号是|别名是|从事|用的是|迷上|迷恋|爱上|戒不掉|在玩|拍|玩|用|读|看|听|喝|吃)";
+const ORAL_CLAIM = new RegExp(`^(?:(比起[^，,。！？!?；;：:]{1,24}?)[，,]?(?=我|俺|咱自己))?(${ORAL_TIME})?(我(?:本人|自己|个人)?|俺(?:自己)?|咱自己)?((?:${ORAL_TIME})?)(${ORAL_DEGREE}{0,3})(${ORAL_VERB})\\s*([^，,、。！？!?；;：:]{1,64})[。！!]?$`, "u");
+const ORAL_BLOCK = /(?:如果|假如|假设|要是|也许|可能|或许|希望|以为|梦到|万一|感觉像|难道|是不是|怎么办|怎么会|并不|从不|不再|不喜欢|不爱|不是|没那么|没有|更正|纠正|说错|改口|撤回|反话|反讽|阴阳怪气|才怪|个鬼|笑死|呵呵|装作|假装|扮演|转发|转述|据说|听说|原话|据传|所谓|其实不)/u;
+
+// Derive an exact value, not an entailment. The narrow subject-omission
+// patterns describe the speaker's own repeated activity/recent interest.
+// A bare verb, mere subject omission, or one-off activity is insufficient.
+export function recognizePublicSelfStatement(rawText) {
+  if (typeof rawText !== "string" || QUOTED.test(rawText)) return null;
+  const body = safeText(rawText);
+  if (!body || /[\[\]<>《》〈〉【】?？\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/u.test(body)
+    || QUOTED.test(body) || SECRET.test(body) || INJECTION.test(body) || JOKE.test(body) || ORAL_BLOCK.test(body)) return null;
+  const match = ORAL_CLAIM.exec(body.replace(/^哈{2,}[，,]?\s*/u, ""));
+  if (!match) return null;
+  const [, comparison = "", leadTime = "", person, time, degree, verb, rawObject] = match;
+  const object = rawObject.trim();
+  if (!object || /[吗呢嘛吧]$/u.test(object) || /(?:你|您|他们|她们|我也|我就|他说|她说|我想|我觉得|如果|就会|然后|所以|但是|不过|其实|结果|因为|除非|还是|也不|都不|不好|不行|不代表)/u.test(object)
+    || (comparison && (THIRD_PARTY.test(comparison) || SECOND_PERSON.test(comparison) || !person || !/^(?:喜欢|偏爱|偏好|中意)$/.test(verb)))) return null;
+  const temporal = leadTime + time;
+  const alias = /^(?:名叫|叫做|昵称是|外号是|别名是)$/.test(verb);
+  if (alias) return person && !comparison && !temporal && !degree && object.length <= 24
+    && !/(?:过来|出去|一下|起来|去做|[他她我]|(?:叫|是|了|吧|啊|呀|哦)$)/u.test(object)
+    ? { kind: "alias", value: object } : null;
+  const stable = /^(?:从事|用的是)$/.test(verb);
+  const activity = /^(?:在玩|拍|玩|用|读|看|听|喝|吃)$/.test(verb);
+  if (!person && (!/^(?:最近|这几天|这阵子|这段时间)$/.test(temporal)
+    || !(/^(?:迷上|迷恋|爱上)$/.test(verb) || activity && /(?:天天|经常|基本都|基本上都|总是)/.test(degree)))) return null;
+  if (activity && !/(?:天天|经常|基本都|基本上都|总是|平时|通常|一直)/.test(temporal + degree)) return null;
+  if (/^(?:吧|啊|呀|啦|了|着|过|的)$/u.test(object)) return null;
+  return { kind: stable ? "stable_fact" : "preference", value: comparison + temporal + degree + verb + object };
+}
 const SENTENCE_BREAK = /[。！？!?；;\n]/u;
 // Contrast/parallel clauses are separate assertions: a denial about something
 // else later in the same sentence must not erase this clause's assertion.
@@ -549,7 +582,7 @@ function effectiveConfidence(entry, now) {
   return Math.max(DURABLE_CONFIDENCE_FLOOR, entry.confidence / (1 + stale));
 }
 
-function reconstructedArchiveSourceCurrent(root, userId, source) {
+function canonicalSourceCurrent(root, userId, source, { exact = false } = {}) {
   // Recheck only the two exact historical keys. A canonical correction can
   // arrive after publication and must not leave a stale archive projection.
   for (const key of [source.conversationId, source.conversationId.slice(6)]) {
@@ -559,6 +592,7 @@ function reconstructedArchiveSourceCurrent(root, userId, source) {
       if (!entry || !(entry.correctedAt || entry.negative === true
         || ["deleted", "revoked", "rejected", "superseded", "suppressed"].includes(entry.status))) return false;
       const ids = entry.sourceMessageIds;
+      if (exact) return Array.isArray(ids) && ids.some(id => String(id) === source.messageId);
       return !Array.isArray(ids) || !ids.length || ids.length > PEOPLE_MEMORY_LIMITS.extractionSources
         || ids.some(id => String(id) === source.messageId);
     })) return false;
@@ -588,9 +622,12 @@ export function queryPersonMemory(root, args = {}) {
     const groupEligible = id => typeof args.sourceEligible === "function"
       && args.sourceEligible({ logicalBotId: args.logicalBotId, userId, conversationId: id }) === true;
     const archiveCurrent = archiveSelf.length > 0 && !control.suppressesLegacy && conversationId.startsWith("group:")
-      && groupEligible(conversationId) && archiveSelf.some(source => reconstructedArchiveSourceCurrent(root, userId, source)
+      && groupEligible(conversationId) && archiveSelf.some(source => canonicalSourceCurrent(root, userId, source)
         && (conversationId === source.conversationId || groupEligible(source.conversationId)));
     if (archiveSelf.length && !archiveCurrent) continue;
+    const liveSelf = entry.selfEvidence > 0 ? entry.evidence.filter(source => source.sourceType === "message") : [];
+    if (liveSelf.length && !liveSelf.some(source => canonicalSourceCurrent(root, userId, source, { exact: true })
+      && (conversationId === source.conversationId || groupEligible(conversationId) && groupEligible(source.conversationId)))) continue;
     const confidence = effectiveConfidence(entry, now), stale = entry.expiresAt <= now;
     if (entry.conversationId === conversationId) {
       // Durable traits stay readable when stale; transient episodes/edges do not.

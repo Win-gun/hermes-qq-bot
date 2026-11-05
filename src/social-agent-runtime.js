@@ -2,7 +2,16 @@
 import { validateReplyPlan } from "./reply-plan.js";
 import { validateAgencyProposal } from "./social-agency.js";
 
-const TOOL_NAMES = ["read_unread", "read_detail", "read_history", "read_memory", "web_search", "search_stickers", "schedule_followup"];
+const TOOL_DESCRIPTORS = [
+  { name: "read_unread", argumentKeys: ["limit", "afterSeq"], description: "还有未读且当前话题需要下文时翻页。" },
+  { name: "read_detail", argumentKeys: ["seq"], description: "对象或引用不清时核对已展示的序号。" },
+  { name: "read_history", argumentKeys: ["beforeSeq", "limit", "query"], description: "只查相关旧事；历史不是本轮未读。" },
+  { name: "read_memory", argumentKeys: ["query", "limit"], description: "当前话题确实依赖已知长期信息时查。" },
+  { name: "web_search", argumentKeys: ["query"], description: "需要公开事实时查，不带私人信息。" },
+  { name: "search_stickers", argumentKeys: ["query"], description: "本地候选不合适且确实需要图时，用公开情绪短语查；结果不等于发送。" },
+  { name: "schedule_followup", argumentKeys: ["delayMs", "userId"], description: "确有后续条件才安排；不因无人回应而催问。" }
+];
+const REFLECTION_TOOLS = ["read_unread", "read_detail", "read_history", "read_memory"];
 const plain = value => value !== null && typeof value === "object" && !Array.isArray(value)
   && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 const fail = code => Object.assign(new Error(code), { code });
@@ -219,11 +228,8 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
   const pending = new Map(), active = new Map(), initialized = new Set();
   let serial = 0;
   const metrics = { completed: 0, failed: 0, cancelled: 0, intents: 0 };
-  const allowed = TOOL_NAMES.filter(name => typeof tools[name] === "function");
-  const descriptors = allowed.map(name => ({ name, argumentKeys: ({
-    read_unread: ["limit", "afterSeq"], read_detail: ["seq"], read_history: ["beforeSeq", "limit", "query"], search_stickers: ["query"],
-    read_memory: ["query", "limit"], web_search: ["query"], schedule_followup: ["delayMs", "userId"]
-  })[name] }));
+  const descriptors = TOOL_DESCRIPTORS.filter(({ name }) => typeof tools[name] === "function");
+  const allowed = descriptors.map(({ name }) => name);
   const keyFor = ctx => JSON.stringify([ctx.logicalId, ctx.conversationId]);
   function policyFor(ctx) {
     const p = getPolicy(ctx);
@@ -408,9 +414,15 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
         let invoked = false, decision, trustedUsage, expressionPlan;
         try {
           const raw = await bounded(job, () => {
+            const policy = guard(job);
+            // Model-facing hints only. Validation and adapters still decide
+            // whether a proposed tool may actually run.
+            const offered = job.nativeWakeId || job.toolCalls >= Math.min(job.initialToolLimit, policy.tools) ? []
+              : job.reflectOnly || job.discoveryWakeId ? descriptors.filter(({ name }) => REFLECTION_TOOLS.includes(name))
+                : descriptors;
             invoked = true;
             return callModel({ context: job.ctx, snapshot: copy({ ...snapshot, seenSeq, toolResults }),
-              tools: copy(job.nativeWakeId ? [] : descriptors), signal });
+              tools: copy(offered), signal });
           });
           trustedUsage = plain(raw) ? usageReceipts.get(raw) : undefined;
           if (plain(raw)) usageReceipts.delete(raw);
@@ -430,7 +442,7 @@ export function createSocialAgentRuntime({ getPolicy, getSnapshot, transact, cal
           } finally { if (plain(raw)) expressionPlans.delete(raw); }
           if (job.reflectOnly || job.discoveryWakeId) {
             if (decision.interest) throw fail("SOCIAL_INTEREST_REFUSED");
-            if (decision.action === "tool" && !["read_unread", "read_detail", "read_history", "read_memory"].includes(decision.tool.name)) throw fail("SOCIAL_INVALID_TOOL");
+            if (decision.action === "tool" && !REFLECTION_TOOLS.includes(decision.tool.name)) throw fail("SOCIAL_INVALID_TOOL");
             if (["wait", "dive", ...(job.reflectOnly ? ["reply"] : [])].includes(decision.action)) {
               decision.action = "observe";
               delete decision.messages; delete decision.delayMs;

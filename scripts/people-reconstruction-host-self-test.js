@@ -15,7 +15,7 @@ import {
 } from "../src/people-reconstruction-host.js";
 import {
   classifyPeopleReconstructionRow, createPeopleReconstructionState,
-  createPeopleReconstructionRunner, summarizePeopleReconstructionSemanticsPage
+  createPeopleReconstructionRunner, summarizePeopleReconstructionSemanticsPage, peopleReconstructionEvidenceBinding
 } from "../src/people-memory-reconstruction.js";
 
 // Fixtures only. Every source/cache/runtime file lives below this new tmpdir.
@@ -52,14 +52,15 @@ function canonical(value, mid, extra = {}) {
     confidence: 0.9, source: "ai-extraction", sourceMessageIds: mid ? [mid] : [],
     evidenceKeys: mid ? [JSON.stringify([G, mid])] : [], ...extra };
 }
-function rootWith(n, { receipts = true } = {}) {
+function rootWith(n, { receipts = true, kind = "preference" } = {}) {
   const entries = [], index = {};
   for (let i = 0; i < n; i++) {
-    const mid = `m${i}`; entries.push(canonical(`喜欢项目${i}`, receipts ? mid : "", { id: `mem_${i}` }));
+    const mid = `m${i}`; entries.push(canonical(`喜欢项目${i}`, receipts ? mid : "", { id: `mem_${i}`, kind }));
     if (receipts) index[mid] = { [BOT]: receipt(mid) };
   }
   return { groups: { [G]: { users: { [U]: { canonicalMemory: { subjectUserId: U, entries } } }, peopleSourceIndex: index } } };
 }
+const analysisRoot = n => rootWith(n, { kind: "quote" });
 function harness(initial) {
   let live = structuredClone(initial), transactions = 0, failNext = false;
   const history = [];
@@ -106,7 +107,7 @@ function modelOptions(handler, budget = () => ({ remainingCalls: 5, remainingTok
 }
 const originalRecord = (mid, value, extra = {}) => ({ type: "user_message", conversationId: `group:${G}`,
   messageId: mid, senderId: U, senderName: "相同昵称", sentAt: AT, sentAtMs: Date.parse(AT), time: AT,
-  text: `我${value}`, rawText: `我${value}`, ...extra });
+  text: `我${value}`, rawText: `我${value}`, sourceTimeKnown: true, ...extra });
 
 try {
   // Execute ONLY isolated real bridge writer functions in a stubbed VM. Never
@@ -158,6 +159,7 @@ try {
   // statements from its already pinned archive, without any semantic replay.
   const evRoot = { groups: { [G]: { peopleSourceIndex: { "clock-equal": { [BOT]: receipt("clock-equal") } } } } };
   const realRecord = (mid, body, extra = {}) => ({ ...bridgeGroup.record, messageId: mid, text: body, rawText: body, ...extra });
+  const oldEvidence = { offset: 7, done: true, published: 0, skipped: 7, duplicates: 0, reasons: {} };
   const evSource = await fixtureSource(evRoot, [bridgeGroup.record,
     realRecord("clock-equal", "我常用机械键盘。", { receivedAt: AT, processedAt: AT }),
     { ...fallback.record, text: "我喜欢铜版画", rawText: "我喜欢铜版画" },
@@ -173,14 +175,17 @@ try {
     realRecord("fact-2", "我从事陶艺制作。", { sentAt: "2026-10-02T00:00:00.000Z",
       time: "2026-10-02T00:00:00.000Z", sentAtMs: Date.parse("2026-10-02T00:00:00.000Z") }),
     realRecord("duplicate", "我喜欢茶"), realRecord("duplicate", "我不喜欢茶"),
+    realRecord("oral", "比起数码我还是更喜欢胶片"),
+    realRecord("oral-sanitized-mismatch", "我现在基本都拍胶片", { text: "我一直基本都拍胶片" }),
+    ...Array.from({ length: 32 }, (_, i) => realRecord(`denied-${i}`, "最近天天在玩星露谷", { accountId: "unexpected" })),
     { ...bridgeGroup.record }]);
   const evFile = path.join(home, "archive-evidence", "memory.json");
   let evRuntime = new MemoryRuntime(new BackgroundMemoryRepository({ filePath: evFile }));
   await evRuntime.open(); await evRuntime.transact(draft => { draft.groups = evRoot.groups; });
-  const evHost = createPeopleReconstructionHost({ getState: () => evRuntime.value,
+  const newEvHost = () => createPeopleReconstructionHost({ getState: () => evRuntime.value,
     transact: build => evRuntime.transact(build), memoryHealth: healthy, source: evSource, now: () => NOW,
     eligible: tuple => eligible(tuple) && (tuple.mode !== "source" || tuple.accountId === (tuple.logicalBotId === BOT ? "alpha" : "beta")) });
-  clients.add(evHost);
+  let evHost = newEvHost(); clients.add(evHost);
   try {
     await evHost.start({ authorized: true, id: "archive-evidence", publishVerified: true });
     const evScan = await finish(evHost);
@@ -192,30 +197,45 @@ try {
     await evRuntime.transact(draft => {
       const job = draft.peopleReconstruction, from = { phase: "memory", offset: 0, file: 0, byte: 0 };
       job.status = "paused"; job.pauseReason = "model_unknown";
+      job.archiveSelfEvidence = structuredClone(oldEvidence);
       job.semanticStage = { cursor: from, maxCalls: 1, startAttempts: 0 };
       job.claim = { phase: "semantics", status: "unknown", startCursor: from, nextCursor: job.cursor, count: 1, calls: [] };
       job.revision++;
     });
     const unknownRevision = evRuntime.value.peopleReconstruction.revision;
+    const unknownClaim = structuredClone(evRuntime.value.peopleReconstruction.claim);
     await rejects(evHost.publishArchiveEvidence({ authorized: true, expectedRevision: unknownRevision }), "EVIDENCE_PUBLICATION_BLOCKED");
+    equal(evRuntime.value.peopleReconstruction.claim, unknownClaim, "3.7 evidence never overwrites a held semantic claim");
     await evHost.control({ authorized: true, expectedRevision: unknownRevision, operation: "skip_unknown" });
     const { revision: pausedRevision, budget: priorBudget, semanticStage: priorSemantic } = evHost.progress().reconstruction;
-    const result = await evHost.publishArchiveEvidence({ authorized: true, expectedRevision: pausedRevision });
-    equal([result.ready, result.done, result.published, result.skipped], [true, true, 6, 1],
+    const firstPage = await evHost.publishArchiveEvidence({ authorized: true, expectedRevision: pausedRevision });
+    equal([firstPage.version, firstPage.offset, firstPage.done], [2, 32, false], "completed V1 cannot suppress a bounded V2 rescan");
+    const preservedReceipts = structuredClone(evRuntime.value.peopleReconstruction.unknownBatches);
+    await evHost.close(); await evRuntime.close();
+    evRuntime = new MemoryRuntime(new BackgroundMemoryRepository({ filePath: evFile })); await evRuntime.open();
+    evHost = newEvHost(); clients.add(evHost);
+    let result;
+    do { result = await evHost.publishArchiveEvidence({ authorized: true, expectedRevision: evHost.progress().reconstruction.revision }); }
+    while (!result.ready || !result.done);
+    equal([result.ready, result.done, result.published, result.skipped], [true, true, 7, 33],
       "archive pass publishes only exact, time-verified, current-scope self statements");
     const afterEvidence = evHost.progress().reconstruction;
     equal([afterEvidence.status, afterEvidence.unknownBatches, afterEvidence.budget, afterEvidence.semanticStage],
       ["paused", 1, priorBudget, priorSemantic], "archive publication never resumes semantics, alters budget or loses an unknown receipt");
+    equal([afterEvidence.archiveSelfEvidence, evRuntime.value.peopleReconstruction.unknownBatches],
+      [oldEvidence, preservedReceipts], "old evidence checkpoint and unknown receipts stay byte-for-byte intact");
+    check(evHost.progress().source.archiveSelfEvidenceCoverage.recordReasons.SANITIZED_TEXT_MISMATCH === 1,
+      "coverage reports sanitized and original text disagreement without disclosing either");
     equal(await evHost.publishArchiveEvidence({ authorized: true, expectedRevision: afterEvidence.revision }), result,
       "completed evidence operation is a read-only no-op on repeat");
     equal(evRuntime.value.peopleReconstruction.stats.modelAttempts, 0, "archive publication never enters semantic/model execution");
     await evHost.close(); await evRuntime.close();
     evRuntime = new MemoryRuntime(new BackgroundMemoryRepository({ filePath: evFile })); await evRuntime.open();
-    equal(evRuntime.value.peopleReconstruction.archiveSelfEvidence.published, 6, "evidence progress survives the same durable writer transaction and reopen");
+    equal(evRuntime.value.peopleReconstruction.archiveSelfEvidenceV2.published, 7, "evidence progress survives the same durable writer transaction and reopen");
     const args = { logicalBotId: BOT, userId: U, conversationId: `group:${G2}`, now: NOW, purpose: "understanding",
       sourceEligible: ({ conversationId }) => [`group:${G}`, `group:${G2}`].includes(conversationId) };
     const entries = extra => queryPersonMemory(evRuntime.value, { ...args, ...extra }).entries;
-    equal(entries().map(e => e.value).sort(), ["从事陶艺制作", "喜欢摄影", "常用机械键盘"], "same Bot and same QQ can understand across groups");
+    equal(entries().map(e => e.value).sort(), ["从事陶艺制作", "喜欢摄影", "常用机械键盘", "比起数码还是更喜欢胶片"], "same Bot and QQ can understand exact time-qualified self reports across groups");
     check(entries().every(e => e.uncertain && e.scope === "self_reported_public" && e.firstSeenAt === Date.parse(AT) && e.confidence === 0.7),
       "retrieval keeps uncertainty, original time and self-report confidence");
     equal(entries({ purpose: "disclosure" }), [], "even two original dates cannot create cross-group disclosure authority");
@@ -228,18 +248,21 @@ try {
     equal(entries({ userId: OTHER }).map(e => e.value), ["喜欢盆栽"], "separate QQ only sees their own statement");
     await evRuntime.transact(draft => { draft.groups[G].users = { [U]: { canonicalMemory: { entries: [
       { status: "rejected", sourceMessageIds: ["bridge-group"] }] } } }; });
-    equal(entries().map(e => e.value).sort(), ["从事陶艺制作", "常用机械键盘"], "a later canonical correction fences the exact archive source");
+    equal(entries().map(e => e.value).sort(), ["从事陶艺制作", "常用机械键盘", "比起数码还是更喜欢胶片"], "a later canonical correction fences the exact archive source");
   } finally { await evHost.close(); await evRuntime.close(); }
 
   const enumeratedRoot = { groups: {
     [G]: { users: { [U]: { preferences: ["喜欢摄影"] } } },
-    [`private:${U}:alpha`]: { users: { [U]: { preferences: ["喜欢摄影"] } } },
-    [`private:${U}:group:family`]: { users: { [U]: { preferences: ["喜欢摄影"] } } }
+    [`private:${U}:alpha`]: { users: { [U]: { canonicalMemory: { subjectUserId: U, entries: [
+      canonical("喜欢摄影", "bridge-private", { sourceMessageIds: ["bridge-private", "uncovered"] })] } } } },
+    [`private:${U}:group:family`]: { users: { [U]: { canonicalMemory: { subjectUserId: U, entries: [
+      canonical("喜欢摄影", "bridge-failover")] } } } }
   } };
   const rootSource = await fixtureSource(enumeratedRoot), archiveRoot = path.join(path.dirname(rootSource.memoryFile), "archive-root");
   for (const item of [bridgeGroup, bridgePrivate, bridgeFailover]) {
     const relative = path.relative("/fixture/archive", item.file), file = path.join(archiveRoot, relative);
-    await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, JSON.stringify(item.record) + "\n");
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, JSON.stringify({ ...item.record, sourceTimeKnown: true }) + "\n");
   }
   const enumWorker = new PeopleReconstructionWorkerSource({ cacheDir: rootSource.cacheDir }); clients.add(enumWorker);
   await enumWorker.capture({ sourceId: "actual-bridge-format", memoryFile: rootSource.memoryFile, archiveRoot });
@@ -257,8 +280,8 @@ try {
 
   const duplicateRoot = { groups: { [G]: { users: { [U]: { canonicalMemory: { subjectUserId: U,
     entries: [canonical("喜欢摄影", "same-message")] } } } } } };
-  const duplicateSource = await fixtureSource(duplicateRoot, [originalRecord("same-message", "喜欢摄影"),
-    originalRecord("same-message", "不喜欢摄影")]);
+  const duplicateSource = await fixtureSource(duplicateRoot, [originalRecord("same-message", "喜欢摄影", { accountId: "alpha", logicalBotId: BOT }),
+    originalRecord("same-message", "不喜欢摄影", { accountId: "alpha", logicalBotId: BOT })]);
   const duplicateWorker = new PeopleReconstructionWorkerSource({ cacheDir: duplicateSource.cacheDir }); clients.add(duplicateWorker);
   await duplicateWorker.capture({ sourceId: "duplicate-source", memoryFile: duplicateSource.memoryFile, archives: duplicateSource.archives });
   while (duplicateWorker.status().phase !== "ready") await duplicateWorker.advance();
@@ -271,7 +294,7 @@ try {
   const original = rootWith(0);
   original.groups[G].users[U].canonicalMemory.entries = [canonical("喜欢摄影", "photo"), canonical("喜欢咖啡", "coffee"),
     canonical("喜欢茶", "no-id", { sourceMessageIds: [] }), canonical("不该借同名来源", "shared"),
-    canonical("不该猜时间", "bad-time")];
+    canonical("不该猜时间", "bad-time"), canonical("喜欢街拍", "clock-unknown"), canonical("他喜欢数码", "third-person")];
   original.groups[G].users[OTHER] = { nickname: "相同昵称", profile: ["另一个QQ"] };
   original.groups[G2] = { users: { [U]: { profile: ["同一个QQ另一群"] } } };
   const records = [originalRecord("photo", "喜欢摄影"),
@@ -280,6 +303,8 @@ try {
     originalRecord("tea-original-id", "喜欢茶"),
     originalRecord("shared", "不该借同名来源", { senderId: OTHER }),
     originalRecord("bad-time", "不该猜时间", { sentAtMs: Date.parse(AT) + 1 }),
+    originalRecord("clock-unknown", "喜欢街拍", { logicalBotId: BOT, accountId: "alpha", sourceTimeKnown: false }),
+    originalRecord("third-person", "他喜欢数码", { logicalBotId: BOT, accountId: "alpha", text: "他喜欢数码", rawText: "他喜欢数码" }),
     { type: "bot_reply", conversationId: `group:${G}`, messageId: "photo", senderId: U, text: "bot text", time: AT },
     "{invalid json}",
     originalRecord("huge", "巨大消息不应使扫描永久卡住", { media: "x".repeat(H.lineBytes + 10) })];
@@ -301,11 +326,15 @@ try {
   const page = await worker.readPage({ sourceId: "pinned-fixture", cursor: { phase: "memory", offset: 0, file: 0, byte: 0 }, limit: 32 });
   check(page.rows.length <= 32 && Buffer.byteLength(JSON.stringify(page)) < 128 * 1024, "only a fixed-size normalized batch crosses worker boundary");
   const photo = page.rows.find(r => r.value === "喜欢摄影"), coffee = page.rows.find(r => r.value === "喜欢咖啡");
-  equal(classifyPeopleReconstructionRow(original, photo, { eligible, now: NOW }).tier, "Supported", "real original group/QQ without bot stays supported");
+  equal(classifyPeopleReconstructionRow(original, photo, { eligible, now: NOW }).reasons, ["ARCHIVE_OWNER_UNKNOWN"], "original group/QQ alone does not authenticate archive ownership");
   equal(classifyPeopleReconstructionRow(original, coffee, { eligible, now: NOW }).tier, "Verified", "actual bound archive receipt can recover canonical provenance");
   equal(photo.logicalBotId, null, "missing historical bot is never replaced by current account mapping");
   const tea = page.rows.find(r => r.value === "喜欢茶");
-  equal(tea.sourceMessageIds, ["tea-original-id"], "source-less old fact gets actual archive message ID only after literal self-statement match");
+  equal(tea.sourceMessageIds, [], "matching words never create a message ID or source attribution for a legacy value");
+  equal(classifyPeopleReconstructionRow(original, page.rows.find(r => r.value === "喜欢街拍"), { eligible, now: NOW }).reasons,
+    ["ORIGINAL_TIME_UNVERIFIED"], "source time uncertainty is diagnosed rather than replaced");
+  equal(classifyPeopleReconstructionRow(original, page.rows.find(r => r.value === "他喜欢数码"), { eligible, now: NOW }).tier,
+    "Tentative", "raw equality cannot prove a publishable third-person claim");
   equal(page.rows.find(r => r.value === "不该借同名来源").sources, [], "QQ and ID selectors are intersection, not search-service OR semantics");
   check(page.rows.every(r => r.sources.every(s => !Object.hasOwn(s, "text") && !Object.hasOwn(s, "rawText"))), "archive source bodies remain inside worker; only content-binding witnesses cross");
   check(worker.status().maxReplyBytes < 128 * 1024, "no whole archive/memory root is posted to parent");
@@ -321,6 +350,33 @@ try {
   try { await corrupt.write(Buffer.from("!"), 0, 1, 0); } finally { await corrupt.close(); }
   const changedCache = new PeopleReconstructionWorkerSource({ cacheDir: source.cacheDir }); clients.add(changedCache);
   await rejects(changedCache.open("pinned-fixture"), "SNAPSHOT_CHANGED"); await changedCache.close();
+
+  // 3.6 really produced a different digest for a value-only archive join.
+  // Reproduce that exact shape without exposing a compatibility mode to callers.
+  const legacyJoinRoot = rootWith(33, { receipts: false });
+  const legacyJoinSource = await fixtureSource(legacyJoinRoot, [originalRecord("historical-m0", "喜欢项目0",
+    { logicalBotId: BOT, accountId: "alpha" })]);
+  const legacyJoinWorker = new PeopleReconstructionWorkerSource({ cacheDir: legacyJoinSource.cacheDir }); clients.add(legacyJoinWorker);
+  await legacyJoinWorker.capture({ sourceId: "legacy-value-digest", memoryFile: legacyJoinSource.memoryFile, archives: legacyJoinSource.archives });
+  while (legacyJoinWorker.status().phase !== "ready") await legacyJoinWorker.advance();
+  const legacyJoinPage = await legacyJoinWorker.readPage({ sourceId: "legacy-value-digest",
+    cursor: { phase: "memory", offset: 0, file: 0, byte: 0 }, limit: 32 });
+  const strictJoin = legacyJoinPage.rows[0];
+  equal([strictJoin.logicalBotId, strictJoin.sourceMessageIds], [null, []], "strict page never associates an old value by content alone");
+  const legacyJoinedSource = { messageId: "historical-m0", verifiedSenderId: U, conversationId: `group:${G}`,
+    archiveConversationId: `group:${G}`, time: new Date(Date.parse(AT)).toISOString(), logicalBotId: BOT, accountId: "alpha",
+    sourceTextDigest: createHash("sha256").update("我喜欢项目0").digest("hex"), via: "archive" };
+  legacyJoinedSource.boundValueDigest = peopleReconstructionEvidenceBinding(strictJoin, legacyJoinedSource);
+  const oldJoinRows = [{ ...strictJoin, logicalBotId: BOT, sourceMessageIds: ["historical-m0"],
+    sources: [legacyJoinedSource], joinIncomplete: false }, ...legacyJoinPage.rows.slice(1)];
+  check(digest(legacyJoinPage.rows) !== digest(oldJoinRows), "strict and historical digests are intentionally distinct");
+  const legacyJoinProof = await legacyJoinWorker.recoverUnknownPages({ sourceId: "legacy-value-digest", ledgerBinding: "a".repeat(64),
+    receipts: [{ receiptIndex: 0, receiptHash: "b".repeat(64), hash: digest(oldJoinRows), count: 32,
+      scanned: legacyJoinPage.scanned, nextCursor: legacyJoinPage.nextCursor }] });
+  equal(legacyJoinProof.receipts[0].status, "matched", "historical row encoding is used only to prove a legacy unknown exclusion");
+  equal(legacyJoinProof.matches[0].candidateIds[0], classifyPeopleReconstructionRow(legacyJoinRoot, oldJoinRows[0], { eligible, now: NOW }).id,
+    "recovery excludes the historically exposed ID, not a newly attributed candidate");
+  await legacyJoinWorker.close();
 
   // Legacy UNKNOWN receipts have no startCursor. Reproduce the actual bounded
   // pager on a 4,500-entry fixture at offsets 34 / 3219 / 4408, then recover
@@ -401,10 +457,10 @@ try {
   await recoveryHost.tick(); // Proven unknown page: excluded without a model.
   equal(recoveryCalls, 0, "proven original unknown page is never replayed through the model");
   await recoveryHost.tick(); // First formerly over-quarantined, actually pending page.
-  equal([recoveryCalls, recoveryHost.progress().reconstruction.semanticStage.processed], [1, 16],
-    "formerly excluded safe prefix candidates can now enter one explicitly bounded semantic batch");
-  check(Object.values(unknownH.getState().peopleReconstruction.candidates).filter(c => c.semantic)
-    .every(c => !unknownIds.has(c.id) && c.tier === "Tentative" && !c.evidence.length), "proof recovery never upgrades evidence or imports original unknown IDs");
+  equal([recoveryCalls, recoveryHost.progress().reconstruction.semanticStage.processed], [0, 0],
+    "unquarantined candidates without evidence still cost zero model calls");
+  check(Object.values(unknownH.getState().peopleReconstruction.candidates).every(c => !c.semantic),
+    "proof recovery never upgrades evidence or imports original unknown IDs");
   await recoveryHost.close();
 
   // Corrupt the last receipt's hash in a separate fixture copy. Searching every
@@ -452,7 +508,7 @@ try {
   } finally { await liveHost?.close(); await runtime.close(); }
 
   // Timer opportunity only, stateless scoped prompt, private/raw history excluded.
-  const modelRoot = rootWith(70);
+  const modelRoot = analysisRoot(70);
   modelRoot.groups[`private:${U}:alpha`] = { users: { [U]: { canonicalMemory: { subjectUserId: U,
     entries: [canonical(PRIVATE, "private", { evidenceKeys: [JSON.stringify([`private:${U}:alpha`, "private"])] })] } } },
     peopleSourceIndex: { private: { [BOT]: receipt("private", { conversationId: `private:${U}` }) } } };
@@ -479,7 +535,7 @@ try {
   check(modelResult.reconstruction.scanOnly && modelResult.reconstruction.stats.semanticSkipped > 0, "skipped semantic work is visible, not claimed complete");
   await modelHost.close();
 
-  const staleRoot = rootWith(2), staleH = harness(staleRoot), staleSource = await fixtureSource(staleRoot);
+  const staleRoot = analysisRoot(2), staleH = harness(staleRoot), staleSource = await fixtureSource(staleRoot);
   const livePin = { id: "text-only", revision: 1 }; let staleCalls = 0;
   const staleHost = makeHost(staleH, staleSource, {
     budget: () => ({ remainingCalls: 2, remainingTokens: 100000, maxTokensPerCall: 16384 }),
@@ -504,7 +560,7 @@ try {
   // Post-scan semantics, compact real callback format, and dry-run before host
   // initialization. Cache reads are isolated; no new writer or model is used
   // by preflight, including when the live writer is read-only.
-  const semanticRoot = rootWith(9, { receipts: false });
+  const semanticRoot = analysisRoot(9);
   semanticRoot.groups[G2] = { users: { [U]: { preferences: ["另一群独立偏好"] } } };
   semanticRoot.groups[G].users[OTHER] = { preferences: ["同名但另一QQ"] };
   semanticRoot.groups[`private:${U}:alpha`] = { users: { [U]: { preferences: [PRIVATE] } } };
@@ -566,18 +622,18 @@ try {
   await finish(semanticHost);
   const semanticDone = semanticHost.progress().reconstruction;
   const candidateKeys = Object.values(boundedH.getState().peopleReconstruction.candidates);
-  equal([semanticDone.semanticStage.processed, semanticDone.semanticStage.proposed], [11, 11], "all eligible group candidates get proposals, without mixing same-QQ cross-group or other senders");
-  equal(new Set(semanticSeen.flatMap(p => p.candidates.map(c => `${JSON.stringify(p.scope)}:${c.value}`))).size, 11,
+  equal([semanticDone.semanticStage.processed, semanticDone.semanticStage.proposed], [9, 9], "verified candidates get proposals; unsupported other groups and QQ do not");
+  equal(new Set(semanticSeen.flatMap(p => p.candidates.map(c => `${JSON.stringify(p.scope)}:${c.value}`))).size, 9,
     "post-scan source page revisits never repay for already attempted candidate IDs");
   equal([semanticDone.stats.scanned, semanticDone.candidates, semanticDone.stats.published],
     [boundedScan.stats.scanned, boundedScan.candidates, 0], "semantic pass neither rescans source totals nor publishes to peopleMemory");
-  check(candidateKeys.filter(c => c.semantic).every(c => c.semantic.proposalOnly && !c.experience
-    && ["Tentative", "Supported"].includes(c.tier)), "semantic proposals do not upgrade proof or historical experience");
+  check(candidateKeys.filter(c => c.semantic).every(c => c.semantic.proposalOnly && c.kind === "quote"
+    && c.tier === "Verified"), "semantic proposals never change original proof or promote quotes");
   await semanticHost.close();
 
   // Worst-case bounded source metadata makes a 16-item request too large.
   // The host splits before model invocation, not after a paid rejection.
-  const wideRoot = rootWith(17);
+  const wideRoot = analysisRoot(17);
   const wideGroup = wideRoot.groups[G]; wideGroup.peopleSourceIndex = {};
   for (let i = 0; i < 17; i++) {
     const entry = wideGroup.users[U].canonicalMemory.entries[i];
@@ -615,7 +671,7 @@ try {
   let semanticRuntime = new MemoryRuntime(new BackgroundMemoryRepository({ filePath: semanticDurableFile }));
   await semanticRuntime.open(); let durableSemanticHost, durableModelCalls = 0;
   try {
-    await semanticRuntime.transact(root => Object.assign(root, rootWith(5, { receipts: false })));
+    await semanticRuntime.transact(root => Object.assign(root, analysisRoot(5)));
     const durableSource = { cacheDir: path.join(home, "semantic-durable", "cache"), memoryFile: semanticDurableFile, archives: [] };
     const durableOptions = modelOptions(async args => {
       durableModelCalls++;
@@ -637,13 +693,13 @@ try {
     durableSemanticHost = newDurableHost(); clients.add(durableSemanticHost); await durableSemanticHost.initialize(); await durableSemanticHost.tick();
     equal([durableModelCalls, semanticRuntime.value.peopleReconstruction.semanticStage.processed], [1, 5],
       "actual journal reopen preserves semantic results and does not replay paid work");
-    check(Object.values(semanticRuntime.value.peopleReconstruction.candidates).every(c => c.semantic?.proposalOnly && c.tier === "Tentative"),
-      "durable semantic proposals remain tentative rather than becoming verified facts");
+    check(Object.values(semanticRuntime.value.peopleReconstruction.candidates).every(c => c.semantic?.proposalOnly && c.kind === "quote"),
+      "durable semantic proposals do not promote a verified quote to a publishable fact");
   } finally { await durableSemanticHost?.close(); await semanticRuntime.close(); }
 
   // Binding change after a post-scan call must pause with an unknown receipt;
   // continueScanOnUnknown applies to scanning only, never this semantic stage.
-  const bindingH = harness(rootWith(2)), bindingSource = await fixtureSource(rootWith(2));
+  const bindingH = harness(analysisRoot(2)), bindingSource = await fixtureSource(analysisRoot(2));
   let bindingVersion = 1, bindingCalls = 0;
   const bindingHost = makeHost(bindingH, bindingSource, { ...modelOptions(async args => {
     bindingCalls++; bindingVersion++;
@@ -662,8 +718,9 @@ try {
   await bindingHost.close();
 
   // Supported projection: same group, real QQ, no experience/disclosure grant.
-  const projectionRoot = { groups: { [G]: { users: { [U]: { preferences: ["喜欢摄影"] } } } } };
-  const projectionSource = await fixtureSource(projectionRoot, [originalRecord("real-evidence", "喜欢摄影")]);
+  const projectionRoot = { groups: { [G]: { users: { [U]: { canonicalMemory: { subjectUserId: U, entries: [
+    canonical("喜欢摄影", "real-evidence", { sourceMessageIds: ["real-evidence", "uncovered"] })] } } } } } };
+  const projectionSource = await fixtureSource(projectionRoot, [originalRecord("real-evidence", "喜欢摄影", { accountId: "alpha", logicalBotId: BOT })]);
   const ph = harness(projectionRoot), projectionHost = makeHost(ph, projectionSource);
   await projectionHost.start({ authorized: true, id: "projection" }); await finish(projectionHost);
   const projection = projectionHost.supportedProjection({ logicalBotId: BOT, userId: U, conversationId: `group:${G}` });
@@ -698,7 +755,7 @@ try {
   equal(cancelled.progress().reconstruction.status, "cancelled", "orphan recovery never revives cancellation"); await cancelled.close();
 
   // Unknown paid outcome stops spending but later deterministic pages advance.
-  const unknownRoot = rootWith(75), unknownSource = await fixtureSource(unknownRoot), uh = harness(unknownRoot);
+  const unknownRoot = analysisRoot(75), unknownSource = await fixtureSource(unknownRoot), uh = harness(unknownRoot);
   let unknownCalls = 0;
   const unknownHost = makeHost(uh, unknownSource, modelOptions(async () => { unknownCalls++; throw new Error("PRIVATE SECRET must not escape"); }));
   await unknownHost.start({ authorized: true, id: "unknown" });
@@ -712,7 +769,7 @@ try {
   await unknownHost.close();
 
   // Missing usage is not zero-cost and does not stop the rest of the source scan.
-  const missingRoot = rootWith(40), missingH = harness(missingRoot), missingSource = await fixtureSource(missingRoot);
+  const missingRoot = analysisRoot(40), missingH = harness(missingRoot), missingSource = await fixtureSource(missingRoot);
   let missingCalls = 0;
   const missingHost = makeHost(missingH, missingSource, modelOptions(async () => { missingCalls++; return { groups: [] }; }));
   await missingHost.start({ authorized: true, id: "missing-usage" }); const missingDone = await finish(missingHost);

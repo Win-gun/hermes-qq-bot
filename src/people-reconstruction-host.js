@@ -13,7 +13,7 @@ import {
   peopleReconstructionEvidenceBinding, summarizePeopleReconstructionSemanticsPage,
   peopleReconstructionUnknownLedgerBinding, matchPeopleReconstructionUnknownPage,
   applyPeopleReconstructionUnknownRecovery, applyPeopleArchiveSelfEvidencePage,
-  literalPeopleArchiveSelfStatement
+  literalPeopleArchiveSelfStatement, PEOPLE_ARCHIVE_SELF_EVIDENCE_VERSION, peopleReconstructionNeedsAnalysis
 } from "./people-memory-reconstruction.js";
 
 /**
@@ -256,6 +256,12 @@ function normalizeArchive(record, conversationId) {
     text: safeText(record.text, 400), sourceTextDigest: hash(typeof record.text === "string" ? record.text : ""), via: "archive" };
 }
 
+function plainArchiveSource(record) {
+  return !record.forwarded && !record.forward && !record.isForwarded && !record.isQuote
+    && (record.quotedMessage === undefined || obj(record.quotedMessage)
+      && [record.quotedMessage.ids, record.quotedMessage.contexts].every(v => v === undefined || Array.isArray(v) && !v.length));
+}
+
 function archiveOriginalTime(memory, record, source) {
   if (record.sourceTimeKnown === false) return false;
   const group = source.conversationId.slice(6);
@@ -286,6 +292,7 @@ class SourceEngine {
     this.refs = 0; this.records = 0; this.invalid = 0; this.oversized = 0; this.bytesIndexed = 0;
     this.overflow = new Set();
     this.archiveEvidence = new Map(); this.archiveEvidenceRows = []; this.archiveEvidenceOverflow = false;
+    this.archiveEvidenceReasons = {};
     this.file = 0; this.byte = 0; this.lineStart = 0; this.parts = []; this.lineSize = 0; this.dropLine = false;
     this.collectCursor = initial(); this.phase = "unprepared";
   }
@@ -294,6 +301,9 @@ class SourceEngine {
       memoryBytes: this.info?.memorySize ?? 0, archiveFiles: this.info?.archives.length ?? 0,
       archiveBytes: this.info?.archiveBytes ?? 0, bytesIndexed: this.bytesIndexed,
       archiveRecords: this.records, invalidRecords: this.invalid, oversizedRecords: this.oversized,
+      archiveSelfEvidenceCoverage: { version: PEOPLE_ARCHIVE_SELF_EVIDENCE_VERSION,
+        matchingUnique: this.archiveEvidenceRows.length, capacityExceeded: this.archiveEvidenceOverflow,
+        recordReasons: { ...this.archiveEvidenceReasons } },
       neededKeys: this.neededIds.size + this.neededValues.size, indexRefs: this.refs,
       unsupportedDirectories: this.info?.unsupportedDirectories ?? 0,
       indexOverflowKeys: this.overflow.size,
@@ -448,20 +458,25 @@ class SourceEngine {
     this.parts = []; this.lineSize = 0; this.dropLine = false; this.lineStart = end;
   }
   collectArchiveEvidence(record, s) {
-    if (this.archiveEvidenceOverflow || !s.conversationId.startsWith("group:") || !s.logicalBotId || !s.accountId) return;
+    if (this.archiveEvidenceOverflow) return;
+    const note = reason => { this.archiveEvidenceReasons[reason] = (this.archiveEvidenceReasons[reason] ?? 0) + 1; };
+    if (!s.conversationId.startsWith("group:")) { note("PRIVATE_SOURCE"); return; }
+    if (!s.logicalBotId || !s.accountId) { note("ARCHIVE_OWNER_UNKNOWN"); return; }
     const key = hash([s.conversationId, s.logicalBotId, s.messageId]);
     const prior = this.archiveEvidence.get(key);
-    const plain = record.quotedMessage === undefined || obj(record.quotedMessage)
-      && [record.quotedMessage.ids, record.quotedMessage.contexts].every(v => v === undefined || Array.isArray(v) && !v.length);
     const original = record.rawText ?? s.text;
-    const claim = plain && (!record.messageType || record.messageType === "group") && archiveOriginalTime(this.memory, record, s)
-      ? literalPeopleArchiveSelfStatement(original) : null;
-    const usable = claim && s.text && verifyPublicSelfStatement({ text: s.text, ...claim }).ok;
+    const plain = plainArchiveSource(record) && (!record.messageType || record.messageType === "group");
+    const originalTime = archiveOriginalTime(this.memory, record, s);
+    const claim = plain && originalTime ? literalPeopleArchiveSelfStatement(original) : null;
+    const sanitized = claim && literalPeopleArchiveSelfStatement(s.text);
+    const usable = sanitized && sanitized.kind === claim.kind && sanitized.value === claim.value;
+    note(!plain ? "NON_PLAIN_SOURCE" : !originalTime ? "ORIGINAL_TIME_UNVERIFIED"
+      : !claim ? "SELF_STATEMENT_UNMATCHED" : !usable ? "SANITIZED_TEXT_MISMATCH" : "MATCHED_SELF_STATEMENT");
     const stamp = hash([s.verifiedSenderId, s.accountId, s.time, s.sourceTextDigest, original, usable ? claim : null]);
     if (prior !== undefined) {
       // A conflicting duplicate is never a second confirmation, even if only
       // one variant passes the literal check. Exact copies count once.
-      if (prior?.stamp !== stamp) this.archiveEvidence.set(key, null);
+      if (prior?.stamp !== stamp) { this.archiveEvidence.set(key, null); note("CONFLICTING_DUPLICATE"); }
       return;
     }
     if (this.archiveEvidence.size >= H.indexRefs) {
@@ -476,7 +491,8 @@ class SourceEngine {
     if (this.archiveEvidenceOverflow) fail("ARCHIVE_EVIDENCE_CAPACITY");
     if (!int(offset) || offset > this.archiveEvidenceRows.length) fail("INVALID_EVIDENCE_CURSOR");
     const rows = this.archiveEvidenceRows.slice(offset, offset + L.page), nextOffset = offset + rows.length;
-    return { sourceId, offset, nextOffset, done: nextOffset === this.archiveEvidenceRows.length, rows };
+    return { version: PEOPLE_ARCHIVE_SELF_EVIDENCE_VERSION, sourceId, offset, nextOffset,
+      done: nextOffset === this.archiveEvidenceRows.length, rows };
   }
   addRef(index, key, ref) {
     if (!index.has(key)) index.set(key, []);
@@ -484,17 +500,17 @@ class SourceEngine {
     if (refs.length >= L.sources) { this.overflow.add(key); return; }
     if (++this.refs > H.indexRefs) fail("INDEX_LIMIT"); refs.push(ref);
   }
-  recordsFor(row) {
+  recordsFor(row, legacyReceipt) {
     const conv = indexScope(row.jobKey);
     let refs = [], incomplete = false;
     for (const mid of row.sourceMessageIds) {
       const key = sourceKey(conv, row.userId, mid); refs.push(...(this.idIndex.get(key) ?? [])); incomplete ||= this.overflow.has(key);
     }
-    if (!row.sourceMessageIds.length) {
+    if (legacyReceipt && !row.sourceMessageIds.length) {
       const key = valueKey(conv, row.userId, row.value); refs.push(...(this.valueIndex.get(key) ?? [])); incomplete ||= this.overflow.has(key);
     }
     const unique = new Map(refs.map(ref => [`${ref.file}:${ref.offset}`, ref]));
-    const selected = [...unique.values()].slice(0, L.sources), sources = []; let bytes = 0;
+    const selected = [...unique.values()].slice(0, L.sources), sources = []; let bytes = 0, issue = null;
     for (const ref of selected) {
       if (bytes + ref.bytes > H.lineBytes) { incomplete = true; break; }
       bytes += ref.bytes;
@@ -503,25 +519,41 @@ class SourceEngine {
         this.verify(fd, ref.file);
         const data = Buffer.alloc(ref.bytes);
         if (fs.readSync(fd, data, 0, data.length, ref.offset) !== data.length) fail("SNAPSHOT_CHANGED");
-        const s = normalizeArchive(JSON.parse(data.toString("utf8").replace(/^\uFEFF/, "")), file.conversationId);
+        const record = JSON.parse(data.toString("utf8").replace(/^\uFEFF/, ""));
+        const s = normalizeArchive(record, file.conversationId);
         if (!s || s.verifiedSenderId !== row.userId || (row.logicalBotId && s.logicalBotId !== row.logicalBotId)) continue;
         const kind = row.kind === "profile" ? "stable_fact" : row.kind;
-        const bound = s.text === row.value || verifyPublicSelfStatement({ text: s.text, value: row.value, kind }).ok;
+        let bound;
+        if (legacyReceipt) {
+          bound = s.text === row.value || verifyPublicSelfStatement({ text: s.text, value: row.value, kind }).ok;
+        } else {
+          if (row.sources.some(old => old.via === "receipt" && old.messageId === s.messageId)) continue;
+          if (!s.logicalBotId || !s.accountId) { issue = "ARCHIVE_OWNER_UNKNOWN"; continue; }
+          if (!archiveOriginalTime(this.memory, record, s)) { issue = "ORIGINAL_TIME_UNVERIFIED"; continue; }
+          if (!plainArchiveSource(record)) { issue = "NON_PLAIN_SOURCE"; continue; }
+          const original = record.rawText ?? s.text;
+          const claim = literalPeopleArchiveSelfStatement(original);
+          const sanitized = claim && literalPeopleArchiveSelfStatement(s.text);
+          bound = sanitized?.kind === kind && claim?.kind === kind && sanitized.value === row.value && claim.value === row.value
+            || kind === "quote" && typeof original === "string" && literal(original) === row.value
+              && s.text && literal(s.text) === row.value;
+        }
         const { text: _rawSourceBody, ...safe } = s;
         if (bound) safe.boundValueDigest = peopleReconstructionEvidenceBinding(row, safe);
         sources.push(safe);
       } finally { fs.closeSync(fd); }
     }
-    return { sources, incomplete: incomplete || unique.size > selected.length };
+    return { sources, issue, incomplete: incomplete || unique.size > selected.length };
   }
-  async readPage(args) {
+  async readPage(args, legacyReceipt = false) {
     if (this.phase !== "ready" || args.sourceId !== this.info.sourceId) fail("SOURCE_NOT_READY");
     const page = await this.pager.readPage({ ...args, signal: undefined });
     for (const row of page.rows) {
       if (!row.userId || row.negative || row.corrected || !safeText(row.value)) continue;
       row.value = literal(row.value);
-      const found = this.recordsFor(row);
+      const found = this.recordsFor(row, legacyReceipt);
       if (found.incomplete) { row.sourceIssue = true; row.joinIncomplete = true; continue; }
+      if (!legacyReceipt && found.issue && !row.sources.length && !found.sources.length) row.sourceIssue = found.issue;
       const sources = found.sources.filter(s => !row.sources.some(old => old.messageId === s.messageId));
       if (!sources.length) continue;
       if (row.logicalBotId) row.sources.push(...sources.filter(s => s.logicalBotId === row.logicalBotId));
@@ -530,7 +562,7 @@ class SourceEngine {
         if (bots.size !== 1) { row.sourceIssue = "ARCHIVE_OWNER_AMBIGUOUS"; continue; }
         row.logicalBotId = sources[0].logicalBotId; row.sources = sources;
       }
-      if (!row.sourceMessageIds.length) row.sourceMessageIds = row.sources.filter(s => s.boundValueDigest).map(s => s.messageId);
+      if (legacyReceipt && !row.sourceMessageIds.length) row.sourceMessageIds = row.sources.filter(s => s.boundValueDigest).map(s => s.messageId);
       row.joinIncomplete = found.incomplete;
       if (row.sources.length > L.sources) { row.sourceIssue = true; row.sources = row.sources.slice(0, L.sources); }
     }
@@ -567,10 +599,19 @@ class SourceEngine {
     for (const entry of this.unknownRecovery.entries) {
       while (remaining > 0 && entry.status === "searching") {
         const matchedCursor = { phase: "memory", offset: entry.starts[entry.attempts], file: 0, byte: 0 };
-        const page = await this.readPage({ sourceId, cursor: matchedCursor, limit: L.page });
+        const args = { sourceId, cursor: matchedCursor, limit: L.page };
+        const page = await this.readPage(args);
         entry.attempts++; remaining--;
         entry.match = matchPeopleReconstructionUnknownPage({ receipt: entry.receipt,
           receiptIndex: entry.receipt.receiptIndex, receiptHash: entry.receipt.receiptHash, page, matchedCursor });
+        if (!entry.match) {
+          // 3.6 used value-only joins and a looser textual witness. Recreate
+          // that exact digest ONLY to exclude already exposed IDs, never for
+          // publication, source attribution or renewed model eligibility.
+          const legacyPage = await this.readPage(args, true);
+          entry.match = matchPeopleReconstructionUnknownPage({ receipt: entry.receipt,
+            receiptIndex: entry.receipt.receiptIndex, receiptHash: entry.receipt.receiptHash, page: legacyPage, matchedCursor });
+        }
         if (entry.match) entry.status = "matched";
         else if (entry.attempts === entry.starts.length) entry.status = "unmatched";
       }
@@ -717,7 +758,7 @@ export function createPeopleReconstructionHost({ getState, transact, getRevision
   const model = reconstruct ? async args => {
     const candidates = args.candidates;
     const first = candidates[0], b = budgetValue(budget);
-    if (!first || !first.conversationId.startsWith("group:") || candidates.some(c => c.origin === "archive"
+    if (!first || candidates.some(c => !peopleReconstructionNeedsAnalysis(c)
       || c.conversationId !== first.conversationId || c.logicalBotId !== first.logicalBotId || c.userId !== first.userId)) fail("MODEL_SCOPE_DENIED");
     if (!healthy() || b.remainingCalls < 1 || b.remainingTokens < b.maxTokensPerCall) fail("EXISTING_BUDGET_EXHAUSTED");
     const scope = { userId: first.userId, logicalBotId: first.logicalBotId, conversationId: first.conversationId };
@@ -922,14 +963,16 @@ export function createPeopleReconstructionHost({ getState, transact, getRevision
     if (!state || state.revision !== expectedRevision) fail("REVISION_MISMATCH");
     if (!state.publishVerified || state.claim || state.cursor.phase !== "done"
       || !["paused", "completed", "completed_with_limits"].includes(state.status)) fail("EVIDENCE_PUBLICATION_BLOCKED");
-    if (state.archiveSelfEvidence?.done) return { ready: true, ...structuredClone(state.archiveSelfEvidence) };
+    const scan = state.archiveSelfEvidenceV2;
+    if (scan && (scan.version !== PEOPLE_ARCHIVE_SELF_EVIDENCE_VERSION || scan.sourceId !== state.sourceId)) fail("INVALID_EVIDENCE_CURSOR");
+    if (scan?.done) return { ready: true, ...structuredClone(scan) };
     previewing = true; // exclusive use of the pinned worker; no semantic/budget changes
     try {
       if (worker.status().phase === "unprepared") await worker.open(state.sourceId);
       if (worker.status().phase !== "ready") {
         await worker.advance(); return { ready: false };
       }
-      const page = await worker.readArchiveEvidence({ sourceId: state.sourceId, offset: state.archiveSelfEvidence?.offset ?? 0 });
+      const page = await worker.readArchiveEvidence({ sourceId: state.sourceId, offset: scan?.offset ?? 0 });
       let buildError;
       try {
         const result = await guardedTransact(root => {
