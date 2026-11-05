@@ -25,6 +25,8 @@ import { ExpressionDiagnostics } from "../src/social-expression-diagnostics.js";
 import { isQzoneAction, qzoneActionKind, isUnmanagedFavoriteWrite } from "../src/qzone-delivery.js";
 import { recordSocialEpisode } from "../src/social-episodes.js";
 import { recordOwnerInteraction } from "../src/owner-interactions.js";
+import { recordPersonEvidence } from "../src/people-memory.js";
+import { literalPeopleArchiveSelfStatement } from "../src/people-memory-reconstruction.js";
 import { ownerGuidanceAllows } from "../src/owner-guidance.js";
 
 // Read source only. Never import/start main(), open sockets, spawn a service,
@@ -103,7 +105,7 @@ const realFunctions = [
   "parsePeerPingMessage", "accountActualQq", "acceptPeerPing", "sendPeerPing", "botAccountUserIds", "probeOneBotAccount",
   "accountSendState", "recordAccountSend", "abilityItem", "abilityFresh", "accountStateLabel", "routingActionForState", "diagnoseAccount", "oneBotStatusValue", "oneBotStatusFlagIsFalse",
   "conversationIdFromEvent", "conversationLabelFromEvent", "oneBotMessageToText", "messageMentionsSelf", "stripSelfMention", "stripBotAddressing", "escapeRegExp", "hasKeyword",
-  "stableMessageFingerprint", "accountScopedInboundKey", "claimConversationMessage", "messageTiming", "extractReplyMessageIds", "recordPeopleSourceObservation",
+  "stableMessageFingerprint", "accountScopedInboundKey", "claimConversationMessage", "messageTiming", "extractReplyMessageIds", "recordPeopleSourceObservation", "livePersonStatement",
   "messageDebounceConfig", "isLikelyIncompleteInput", "shouldWaitForMoreInput", "flushDebouncedMessage", "enqueueDebouncedMessage", "pendingDebouncedContext", "orderedHistory", "mergeReplyCurrents",
   "quietUntil", "isQuiet", "repairInvalidQuietUntil", "parseDurationMs", "formatDuration", "isGroupAdmin", "handleBotCommand", "handleMemoryVerificationCommand",
   "sameLogicalAccount", "recordBotMessage", "lastBotMessageForAccount", "sendGroupMessage", "aiVoicePlanAllowed", "deliverChatExpression", "lastNonBotMessage", "lastNonBotMessagesSince", "scoreImplicitReplyAgainstBotMessage", "isMediaOnlyText",
@@ -130,6 +132,9 @@ function harness(config = fixtureConfig(), mutation = {}) {
     isQzoneAction, qzoneActionKind, isUnmanagedFavoriteWrite,
     recordSocialEpisode, socialEpisodeDeliveredProvider: async () => {},
     recordOwnerInteraction: (root, args) => recordOwnerInteraction(root, structuredClone(args)),
+    recordPersonEvidence: (root, args) => recordPersonEvidence(root, structuredClone(args)),
+    literalPeopleArchiveSelfStatement,
+    extractionCounts: { liveSelfReports: { committed: 0, duplicate: 0, rejected: 0, lastRejectionCode: "" } },
     ownerGuidanceAllows: (root, args) => ownerGuidanceAllows(structuredClone(root), structuredClone(args)),
     ownerServices: { router: { handle: async () => ({ matched: true, status: "blocked", code: "OWNER_IDENTITY_REQUIRED" }) } },
     expressionDiagnostics: new ExpressionDiagnostics(),
