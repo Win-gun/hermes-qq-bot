@@ -27,15 +27,17 @@ const PRIVATE = `private:${USER}`;
 const SELF_PREF = "喜欢研究星图", HEARSAY_PREF = "听说他会拉小提琴", PRIVATE_FACT = "最近在家里处理私事";
 const tests = [];
 const test = (name, run) => tests.push({ name, run });
+const fixtureSourceEligible = ({ logicalBotId, userId, conversationId }) => logicalBotId === BOT
+  && userId === USER && [GROUP, OTHER_GROUP].includes(conversationId);
 const record = (root, patch) => recordPersonEvidence(root, { logicalBotId: BOT, userId: USER,
   verifiedSenderId: USER, accountId: "carrier-a", conversationId: GROUP, messageId: "msg-1",
   time: (NOW - DAY) / 1000, now: NOW, kind: "preference", value: SELF_PREF, confidence: 0.9,
   sourceType: "message", privacy: "public", ...patch });
 const query = (root, patch) => queryPersonMemory(root, { logicalBotId: BOT, userId: USER,
-  conversationId: GROUP, now: NOW, ...patch });
+  conversationId: GROUP, now: NOW, sourceEligible: fixtureSourceEligible, ...patch });
 const understand = (root, patch) => query(root, { purpose: "understanding", ...patch });
 const context = (root, patch) => personMemoryContext(root, { logicalBotId: BOT, userId: USER,
-  conversationId: GROUP, now: NOW, ...patch });
+  conversationId: GROUP, now: NOW, sourceEligible: fixtureSourceEligible, ...patch });
 const control = root => personMemoryControl(root, { logicalBotId: BOT, userId: USER });
 const admin = (root, operation, patch) => administerPersonMemory(root, { logicalBotId: BOT, userId: USER,
   expectedRevision: root.peopleMemory?.revision ?? 0, operation, actorUserId: "34567890",
@@ -84,6 +86,11 @@ test("first self-reported public preference is usable in ANOTHER group as uncert
   assert.equal(understood.entries[0].scope, "self_reported_public");
   assert.equal(understood.entries[0].uncertain, true);
   assert.equal(understood.entries[0].kind, "preference");
+  for (const sourceEligible of [undefined, ({ conversationId }) => conversationId !== GROUP,
+    ({ conversationId }) => conversationId !== OTHER_GROUP]) {
+    assert.deepEqual(understand(root, { conversationId: OTHER_GROUP, sourceEligible }).entries, [],
+      "cross-group live evidence needs current host permission for both source and destination");
+  }
   // Same conversation keeps the legacy scope name.
   assert.equal(query(root).entries[0].scope, "same_conversation");
   const text = context(root, { conversationId: OTHER_GROUP, understanding: true });
