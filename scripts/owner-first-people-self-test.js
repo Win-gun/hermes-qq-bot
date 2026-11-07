@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { recordPersonEvidence, queryPersonMemory, personMemoryContext, personMemoryControl,
-  administerPersonMemory, applyPersonExtractionReceipt, PEOPLE_MEMORY_LIMITS as LIMITS } from "../src/people-memory.js";
+  administerPersonMemory, applyPersonExtractionReceipt, applyLivePersonPreferenceCorrection, PEOPLE_MEMORY_LIMITS as LIMITS } from "../src/people-memory.js";
 import { migrateLegacyCanonicalPeople, peopleMigrationStats, legacyJobScope,
   PEOPLE_MIGRATION_LIMITS as MIGRATION } from "../src/people-memory-migration.js";
 import { applyMemoryExtraction } from "../src/memory-application.js";
@@ -73,6 +73,25 @@ function legacyFixture({ jobKey = JOB, ids = ["m1", "m2"], kind = "preference", 
 }
 const permitAll = () => true;
 
+test("verified exact self-correction supersedes only its scoped live preference", () => {
+  const root = seeded({ selfReported: true, confidence: 0.7 });
+  const args = { logicalBotId: BOT, userId: USER, verifiedSenderId: USER, accountId: "carrier-a",
+    conversationId: GROUP, messageId: "deny-2", time: NOW / 1000, now: NOW, text: "我现在不喜欢研究星图了" };
+  const before = structuredClone(root);
+  for (const text of ["之前说的那个不算了，我现在已经不喜欢了", "他说我现在不喜欢研究星图了", "我现在不喜欢研究星图了吗？"]) {
+    assert.equal(applyLivePersonPreferenceCorrection(root, { ...args, text }).ok, false);
+    assert.deepEqual(root, before);
+  }
+  assert.equal(applyLivePersonPreferenceCorrection(root, { ...args, verifiedSenderId: OTHER_USER }).ok, false);
+  assert.equal(applyLivePersonPreferenceCorrection(root, args).changed, true);
+  assert.equal(query(root).entries.length, 0);
+  assert.equal(control(root).suppressesLegacy, true);
+  assert.equal(root.peopleMemory.bots[BOT].controlRevision, 1);
+  assert.equal(applyLivePersonPreferenceCorrection(root, args).reason, "DUPLICATE");
+  assert.equal(record(root, { selfReported: true, messageId: "old-rephrase", value: "最近喜欢研究星图" }).reason, "TOMBSTONED");
+  assert.equal(root.peopleMemory.bots[BOT].people[USER].archive[0].selfCorrection.messageId, "deny-2");
+});
+
 test("first self-reported public preference is usable in ANOTHER group as uncertain understanding only", () => {
   const root = { groups: {} };
   assert.equal(record(root, { selfReported: true }).ok, true);
@@ -111,6 +130,18 @@ test("understanding opt-in is required: unmarked args never widen cross-group pr
   const invalid = query(root, { purpose: "aggregate" });
   assert.equal(invalid.ok, false); assert.equal(invalid.status, "invalid"); assert.equal(invalid.suppressesLegacy, true);
   assert.deepEqual(invalid.entries, []);
+});
+
+test("automatic context uses the current topic without importing unrelated preferences", () => {
+  const root = seeded({ selfReported: true });
+  assert.equal(record(root, { value: "喜欢机械键盘", messageId: "other-topic", selfReported: true }).ok, true);
+  const topic = text => context(root, { understanding: true, conversationId: OTHER_GROUP, queryText: text });
+  assert.equal(topic("今天下午好"), "");
+  assert.equal(topic("我最近挺喜欢这个"), "");
+  const related = topic("最近在研究星图，求一个观测建议");
+  assert(related.includes(SELF_PREF)); assert(!related.includes("机械键盘"));
+  assert(related.includes("lastConfirmedDate")); assert(!related.includes(GROUP));
+  assert(topic("你还记得我喜欢什么吗").includes(SELF_PREF));
 });
 
 test("self-report is only accepted for public group stable traits from the verified sender", () => {

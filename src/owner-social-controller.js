@@ -414,7 +414,7 @@ export function createOwnerSocialController(host) {
       let result, recheckCandidate = () => sourceCurrent(proof);
       if (parsed.kind === "chat" || parsed.kind === "query" && !parsed.intent) result = unmatched();
       else if (parsed.kind === "clarify") result = { matched: true, status: "clarify", code: "OWNER_SOCIAL_INTENT_AMBIGUOUS",
-        question: "请说明想让我做什么；涉及群或已有委托时，请明确账号、群或委托编号。" };
+        clarify: "请说明想让我做什么；涉及群或已有委托时，请明确账号、群或委托编号。" };
       else if (parsed.kind === "query") {
         demand(evidenceOf(parsed.evidence, text), "OWNER_SOCIAL_INTENT_EVIDENCE");
         const intent = validateOwnerIntent(parsed.intent);
@@ -625,7 +625,7 @@ export function createOwnerSocialController(host) {
       return { matched: true, status: clarify && !dispatched ? "clarify" : dispatched || code === "OWNER_SOCIAL_DURABILITY_UNKNOWN" || !claimed ? "uncertain" : "blocked", code,
         semanticClassified,
         ...(actionTaskId ? { taskId: actionTaskId } : {}),
-        ...(clarify ? { question: code === "OWNER_SOCIAL_REGRANT_CONFIRMATION_REQUIRED"
+        ...(clarify ? { clarify: code === "OWNER_SOCIAL_REGRANT_CONFIRMATION_REQUIRED"
           ? "如需重新授权，请由你本人明确写：我确认重新授权 委托编号：本次具体新目标。仅继续、否定、假设或引用不算授权。"
           : "请明确账号和群（账号:群号）；多个委托时请给出确切委托编号。" } : {}) };
     }
@@ -645,7 +645,7 @@ export function createOwnerSocialController(host) {
     // A structured payload/code sample is data, not a human authorization event.
     // Ask for intent in their own words rather than executing pasted model JSON.
     if (/^\s*(?:\{|\[|```)/u.test(text)) return { matched: true, status: "clarify", code: "OWNER_SOCIAL_HUMAN_INTENT_REQUIRED",
-      question: "请用自己的话说明要执行的操作和目标；粘贴的 JSON 或代码不能作为授权。" };
+      clarify: "请用自己的话说明要执行的操作和目标；粘贴的 JSON 或代码不能作为授权。" };
     const a = proof.receipt.actor, commandId = hash(JSON.stringify([a.logicalBotId, a.accountId, a.conversationId, a.ownerUserId, a.messageId]));
     const prior = pending.get(commandId);
     if (prior) {

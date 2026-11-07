@@ -339,6 +339,14 @@ try {
     assert.deepEqual(h.approvals, ['无语', '表情']); assert.equal(h.visions.length, 1);
   });
 
+  await test('filtered attribution candidates are not empty results and do not trigger another search', async () => {
+    const h = harness();
+    h.fetch = async () => json([row({ license: { code: 'CC-BY', commercial_use: true, attribution_required: true }, attribution: 'artist' })]);
+    assert.deepEqual((await h.resolve()).allowedIds, []);
+    assert.deepEqual(h.approvals, ['无语']);
+    assert.equal(h.fetches.length, 1); assert.equal(h.downloads.length, 0);
+  });
+
   await test('429 cooldown never triggers generic/anonymous/hot retry', async () => {
     const h = harness(); h.fetch = async () => new Response('', { status: 429, headers: { 'retry-after': '120' } });
     await code(h.resolve(), 'MEMECUB_RATE_LIMIT'); await code(h.resolve(), 'MEMECUB_RATE_LIMIT');

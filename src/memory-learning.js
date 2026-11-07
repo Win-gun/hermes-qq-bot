@@ -283,6 +283,16 @@ function overlap(queryTerms, value) {
   return score;
 }
 
+const GENERIC_PEOPLE_TERMS = new Set(["喜欢", "偏好", "爱好", "想要", "最近", "平时", "现在", "以前", "一直",
+  "还是", "真的", "挺喜欢", "更喜欢", "是什", "什么", "是什么", "记得", "我喜", "我喜欢", "我最", "大家"]);
+
+/** Lightweight topic signal for automatic prompt injection, not evidence. */
+export function personMemoryTopicScore(query, value) {
+  const termsForQuery = terms(String(query ?? "").slice(0, 600));
+  for (const term of termsForQuery) if (term.length < 2 || GENERIC_PEOPLE_TERMS.has(term)) termsForQuery.delete(term);
+  return overlap(termsForQuery, typeof value === "string" ? value : value?.relation ?? "");
+}
+
 /** Unknown chronology remains unknown. No implicit TTL or relative-date parsing.
  * A usable entry is NOT necessarily a current assertion: render `.label` (or the
  * selector's `.displayValue`) for historical/conditional/unknown-time entries.

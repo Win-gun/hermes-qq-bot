@@ -25,7 +25,7 @@ import { ExpressionDiagnostics } from "../src/social-expression-diagnostics.js";
 import { isQzoneAction, qzoneActionKind, isUnmanagedFavoriteWrite } from "../src/qzone-delivery.js";
 import { recordSocialEpisode } from "../src/social-episodes.js";
 import { recordOwnerInteraction } from "../src/owner-interactions.js";
-import { recordPersonEvidence } from "../src/people-memory.js";
+import { recordPersonEvidence, applyLivePersonPreferenceCorrection } from "../src/people-memory.js";
 import { literalPeopleArchiveSelfStatement } from "../src/people-memory-reconstruction.js";
 import { ownerGuidanceAllows } from "../src/owner-guidance.js";
 
@@ -133,6 +133,7 @@ function harness(config = fixtureConfig(), mutation = {}) {
     recordSocialEpisode, socialEpisodeDeliveredProvider: async () => {},
     recordOwnerInteraction: (root, args) => recordOwnerInteraction(root, structuredClone(args)),
     recordPersonEvidence: (root, args) => recordPersonEvidence(root, structuredClone(args)),
+    applyLivePersonPreferenceCorrection: (root, args) => applyLivePersonPreferenceCorrection(root, structuredClone(args)),
     literalPeopleArchiveSelfStatement,
     extractionCounts: { liveSelfReports: { committed: 0, duplicate: 0, rejected: 0, lastRejectionCode: "" } },
     ownerGuidanceAllows: (root, args) => ownerGuidanceAllows(structuredClone(root), structuredClone(args)),

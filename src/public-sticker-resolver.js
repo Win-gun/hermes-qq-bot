@@ -162,7 +162,8 @@ export function createPublicStickerResolver({ library, search, guard, approveQue
           && ['meme', 'gif', 'emoji'].includes(row.kind) && row.private !== true && row.profane !== true
           && row.license?.attribution_required === false);
         check('metadata');
-        if (rows.length || !fallbackQuery || phrase === fallbackQuery || attempt === 1) break;
+        // A rejected or expired candidate is not an empty search result.
+        if (result.candidates.length || !fallbackQuery || phrase === fallbackQuery || attempt === 1) break;
         phrase = fallbackQuery;
       }
       if (!rows.length) return offer([], 'public_memecub', { reason: 'NO_REUSABLE_PUBLIC_STICKER' });

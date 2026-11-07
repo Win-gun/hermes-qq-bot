@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { formatOwnerCommandResult } from "../src/owner-services.js";
 import { test } from "node:test";
 import fs from "node:fs";
 import os from "node:os";
@@ -569,7 +570,8 @@ for (const [label, utterance, evidence] of mistakenRegrants) {
     tasks.resume = () => assert.fail("unconfirmed human intent must not resume");
     const result = await controller.handle(f.issue(text), text); await f.idle();
     assert.equal(classifiers, 1); assert.equal(result.status, "clarify");
-    assert.equal(result.code, "OWNER_SOCIAL_REGRANT_CONFIRMATION_REQUIRED"); assert(result.question.includes("我确认重新授权"));
+    assert.equal(result.code, "OWNER_SOCIAL_REGRANT_CONFIRMATION_REQUIRED");
+    assert(formatOwnerCommandResult(result).includes("我确认重新授权"));
     assert.deepEqual(task.socialDelegation, before); assert.equal(task.status, originalStatus);
     assert.equal(task.socialDelegation.recoveryReadOnly, true); assert.equal(f.state.wires.length, 0);
     assert(Object.values(f.state.root.ownerSocialController.commands).every(row => row.regrant === undefined));

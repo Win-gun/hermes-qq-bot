@@ -152,8 +152,9 @@ try {
     "real failover-private archive uses ctx base64url namespace");
   const fallback = actualBridgeRecord({ message_type: "group", group_id: G, user_id: U,
     message_id: "fallback-time", __receivedAt: NOW, __logicalBotId: BOT });
-  equal([fallback.record.sentAtMs, Object.hasOwn(fallback.record, "sourceTimeKnown")], [NOW, false],
-    "archive timestamps alone cannot prove source time because real writer has an unmarked receive-time fallback");
+  equal([fallback.record.sentAtMs, fallback.record.sourceTimeKnown], [NOW, false],
+    "receive-time fallback is explicitly untrusted in the current archive writer");
+  equal(bridgeGroup.record.sourceTimeKnown, true, "original OneBot timestamp is marked known");
 
   // A completed legacy job with zero published rows can recover public self
   // statements from its already pinned archive, without any semantic replay.

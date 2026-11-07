@@ -793,8 +793,17 @@ try {
     emit("alpha", "LIVE_MEMORY_CROSS_CONTEXT 说说行星观测", { userId, groupId: "31001", mention: true });
     await until(() => calls.slice(start).some(call => !call.extraction && call.prompt.includes("LIVE_MEMORY_CROSS_CONTEXT")
       && call.prompt.includes(phrase) && !call.prompt.includes(secret)), "real reply context contains cross-group internal understanding");
+    emit("alpha", "我喜欢观测土星。", { userId, groupId: "31002", messageId: "46093", time: Math.floor(Date.now() / 1000) - 10 });
+    await until(() => snapshot().peopleMemory.bots["account:alpha"].people[userId].entries.some(entry => entry.value === "喜欢观测土星"),
+      "second original preference committed");
+    emit("alpha", "我现在不喜欢观测土星了。", { userId, groupId: "31002", messageId: "46094" });
+    await until(() => snapshot().peopleMemory.bots["account:alpha"].people[userId].archive.some(entry => entry.selfCorrection?.messageId === "46094"),
+      "actual same-sender correction supersedes its exact original");
+    await until(async () => !(await api(peoplePath("alpha", "group:31002", userId))).body.profile.entries
+      .some(entry => entry.value === "喜欢观测土星"), "published correction is visible through actual API");
+    const current = await api(peoplePath("alpha", "group:31002", userId));
     const blocked = await api("/api/people/admin", { method: "POST", body: { expectedRevision: here.body.revision,
-      personRevision: here.body.profile.revision, accountId: "alpha", userId, operation: "delete", entryId: here.body.profile.entries[0].id } });
+      personRevision: current.body.profile.revision, accountId: "alpha", userId, operation: "delete", entryId: here.body.profile.entries[0].id } });
     assert.equal(blocked.status, 200);
     emit("alpha", `${phrase}。`, { userId, groupId: "31002", messageId: "46092" });
     await until(() => snapshot().groups["31002"]?.peopleSourceIndex?.["46092"], "fresh input observed after deletion");

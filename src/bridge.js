@@ -60,7 +60,7 @@ import { memoryVerificationConfig, collectVerificationCases, applyVerificationHi
   listVerificationCases, resolveVerificationCase, reviewVerificationCase } from "./memory-verification.js";
 import { createMemoryVerificationNotifier } from "./memory-verification-notifier.js";
 import { memoryLearningConfig, shouldExtractMemoryBatch, prepareLearningMessages,
-  memoryValidity, selectRelevantMemoryEntries, selectRelevantMemoryValues, summarizeMemoryDiscussion } from "./memory-learning.js";
+  memoryValidity, personMemoryTopicScore, selectRelevantMemoryEntries, selectRelevantMemoryValues, summarizeMemoryDiscussion } from "./memory-learning.js";
 import { AccountRuntime, logicalBotId, botConversationKey, botControlRevision } from "./account-runtime.js";
 import { replyDeliveryConfig } from "./reply-execution.js";
 import {
@@ -94,7 +94,7 @@ import { resolveModelCredential } from "./model-credentials.js";
 import { claimModelCall, settleModelCall, queryModelUsage, recordOperationalEvent, queryOperationalEvents } from "./operational-ledger.js";
 import { createOwnerCommandRouter, ownerOperationHistory, putOwnerDirective, revokeOwnerDirective, ownerDirectiveAllows, ownerAddressFor, ownerAddressAvoided, ownerGroupParticipationReduced } from "./owner-authority.js";
 import { normalizeOwnerNotifications, createOwnerNotificationCenter, getOwnerNotificationStatus } from "./owner-notifications.js";
-import { queryPersonMemory, personMemoryContext, personMemoryControl, applyPersonExtractionReceipt, recordPersonEvidence } from "./people-memory.js";
+import { queryPersonMemory, personMemoryContext, personMemoryControl, applyPersonExtractionReceipt, recordPersonEvidence, applyLivePersonPreferenceCorrection } from "./people-memory.js";
 import { migrateLegacyCanonicalPeople } from "./people-memory-migration.js";
 import { createOwnerServices, normalizeOwnerControl, ownerQueryRange, formatOwnerCommandResult } from "./owner-services.js";
 import { resolveOwnerUtterance } from "./owner-intent.js";
@@ -1694,7 +1694,8 @@ function livePersonStatement(event, config) {
   const text = typeof input === "string" ? input : Array.isArray(input) && input.length === 1
     && input[0]?.type === "text" && typeof input[0].data?.text === "string" ? input[0].data.text : "";
   if (!text || text.length > 400 || /^\s*[!/]/u.test(text) || redactSensitive(text, config, { force: true }) !== text) return null;
-  return literalPeopleArchiveSelfStatement(text);
+  return literalPeopleArchiveSelfStatement(text) || (/^我(?:本人|自己|个人)?(?:现在|目前|已经|不再|不)/u.test(text)
+    ? { correctionText: text } : null);
 }
 
 function addPendingMemoryMessage(memory, event, senderName, text, config) {
@@ -1984,18 +1985,23 @@ function compactBotSelfMemory(botSelf, config) {
   return `bot 自我记忆：\n${lines.map((line) => `- ${line}`).join("\n")}`;
 }
 
-function compactMemory(memory, groupId, config, currentSenderId = "") {
+function compactMemory(memory, groupId, config, currentSenderId = "", topic = "") {
   if (config.memory?.enabled === false) return "";
   if (config.memory?.people?.enabled === true) {
     const gm = memory.groups?.[String(groupId)], owner = logicalBotId(config, config.__activeAccountId);
+    const isGroup = !String(groupId).startsWith("private:");
     const context = currentSenderId ? personMemoryContext(memory, { logicalBotId: owner, userId: String(currentSenderId),
       conversationId: String(groupId).startsWith("private:") ? `private:${currentSenderId}` : `group:${groupId}`, now: Date.now(), understanding: true,
+      ...(isGroup ? { queryText: topic } : {}),
       sourceEligible: reconstructedPeopleSourceEligible }) : "";
     const control = currentSenderId ? personMemoryControl(memory, { logicalBotId: owner, userId: String(currentSenderId) }) : null;
     const legacy = !String(groupId).startsWith("private:") && !control?.suppressesLegacy && gm?.users?.[currentSenderId]
-      ? userMemoryBits(gm.users[currentSenderId], config, String(currentSenderId)).slice(0, 8).join("；") : "";
+      ? userMemoryBits(gm.users[currentSenderId], config, String(currentSenderId), topic)
+        .filter(value => personMemoryTopicScore(topic, value) > 0).slice(0, 3).join("；") : "";
+    const recovered = isGroup && topic && currentSenderId ? reconstructedPeoplePromptProvider(config, String(groupId), String(currentSenderId)) : "";
     return [gm ? compactBotSelfMemory(ensureBotSelfMemory(gm, config), config) : "", context,
-      reconstructedPeoplePromptProvider(config, String(groupId), String(currentSenderId)),
+      recovered.split("\n").filter(line => personMemoryTopicScore(topic, line) > 0).slice(0, 2)
+        .map(line => `未核实的本群历史线索（不作事实）：${line}`).join("\n"),
       legacy ? `当前群原有资料（仅限本群，未经跨群迁移核实）：${legacy}` : "",
       gm && !String(groupId).startsWith("private:") && !peopleLegacySuppressed(memory, config)
         ? asArray(gm.summaries).slice(-3).map(item => `${item.date || ""}: ${item.text || ""}`).join("\n") : "",
@@ -2251,7 +2257,7 @@ function socialPlannerPrompt({ history, current, lastBotMessage, implicitDecisio
     asStringId(current?.user_id),
     ...relatedUserIdsFromText(current?.text || "", gm)
   ]);
-  const memoryText = compactSelectedMemory(gm, Array.from(relatedIds), config);
+  const memoryText = compactSelectedMemory(gm, Array.from(relatedIds), config, current?.text, memory, groupId);
   const recent = orderedHistory(history).slice(-cfg.recentMessages).map(shortMessageForPrompt).join("\n");
   const lastBot = lastBotMessage
     ? `${lastBotMessage.sender || botDisplayName(config)}: ${clampText(lastBotMessage.text || "", 260)}`
@@ -2618,14 +2624,17 @@ function peopleLegacySuppressed(memory, config) {
 }
 
 function compactSelectedMemory(gm, ids, config, query = "", memory = null, conversationId = "") {
-  if (memory && config.memory?.people?.enabled === true) return ids.slice(0, Number(config.memory?.promptMaxUsers || 8)).map(userId => {
+  const isGroup = !String(conversationId).startsWith("private:");
+  if (memory && config.memory?.people?.enabled === true) return ids.slice(0, isGroup ? 2 : Number(config.memory?.promptMaxUsers || 8)).map(userId => {
     const owner = logicalBotId(config, config.__activeAccountId);
     const context = personMemoryContext(memory, { logicalBotId: owner, userId: String(userId), understanding: true,
       conversationId: String(conversationId).startsWith("private:") ? `private:${String(conversationId).split(":")[1]}` : `group:${conversationId}`, now: Date.now(),
+      ...(isGroup ? { queryText: query } : {}),
       sourceEligible: reconstructedPeopleSourceEligible });
     const legacy = !String(conversationId).startsWith("private:") && gm?.users?.[userId]
       && !personMemoryControl(memory, { logicalBotId: owner, userId: String(userId) }).suppressesLegacy
-      ? userMemoryBits(gm.users[userId], config, String(userId), query).slice(0, 8).join("；") : "";
+      ? userMemoryBits(gm.users[userId], config, String(userId), query)
+        .filter(value => personMemoryTopicScore(query, value) > 0).slice(0, 3).join("；") : "";
     return [context, legacy ? `当前群原有资料（仅限本群，未经跨群迁移核实）：${legacy}` : ""].filter(Boolean).join("\n");
   }).filter(Boolean).join("\n");
   const maxUsers = Number(config.memory?.promptMaxUsers || 8);
@@ -2651,8 +2660,10 @@ function buildContextBundle({ memory, groupId, history, current, config }) {
     .map((m) => asStringId(m.user_id))
     .filter(Boolean);
   const replyIds = asArray(current?.replyContexts).map((ctx) => asStringId(ctx?.senderId)).filter(Boolean);
-  const relatedIds = new Set([asStringId(current.user_id), ...replyIds, ...activeIds.slice(-8), ...relatedUserIdsFromText(current.text, gm)]);
-  const selectedMemory = compactSelectedMemory(gm, Array.from(relatedIds), config, current.text, memory, groupId) || compactMemory(memory, groupId, config, asStringId(current.user_id));
+  const relatedIds = new Set([asStringId(current.user_id), ...replyIds,
+    ...(config.memory?.people?.enabled === true ? [] : [...activeIds.slice(-8), ...relatedUserIdsFromText(current.text, gm)])].filter(Boolean));
+  const selectedMemory = compactSelectedMemory(gm, Array.from(relatedIds), config, current.text, memory, groupId)
+    || compactMemory(memory, groupId, config, asStringId(current.user_id), current.text);
   const legacySuppressed = memory.peopleMemory ? peopleLegacySuppressed(memory, config) : false;
   const select = values => config.memory?.learning?.enabled === true
     ? selectRelevantMemoryValues(values, { text: current.text, maxItems: 8 }) : values.slice(-8);
@@ -4506,6 +4517,7 @@ function archiveConversationEvent({ event, config, memory, text = "", rawText = 
       time: timing.sentAt,
       sentAt: timing.sentAt,
       sentAtMs: timing.sentAtMs,
+      sourceTimeKnown: timing.sourceTimeKnown,
       receivedAt: timing.receivedAt,
       processedAt: timing.processedAt,
       senderId: asStringId(event?.user_id),
@@ -6771,7 +6783,7 @@ function scheduleDelayedUnderstandingReply({
       const contextBundle = config.reply?.useContextBundle === false
         ? null
         : buildContextBundle({ memory, groupId: gid, history: historySnapshot, current: delayedCurrent, config });
-      const memoryText = compactMemory(memory, gid, config, pending.senderId);
+      const memoryText = compactMemory(memory, gid, config, pending.senderId, delayedCurrent.text);
       const archiveContext = await buildArchiveContext({
         event: pending.event,
         current: delayedCurrent,
@@ -10456,14 +10468,16 @@ async function main() {
       const selected = configForGroupAccount(accountById(config, scope.accountId), scope.internalId);
       // The social lane augments existing evidence-bound memory; it must not
       // discard the account's established relationships when first enabled.
-      snapshot = { ...snapshot, knownContext: redactSensitive(compactMemory(memory, scope.internalId, selected, scope.userId), selected, { force: true }).slice(0, 6000),
-        recentContext: (historyByGroup.get(scope.internalId) || []).slice(-12).map(item => {
+      const recentContext = (historyByGroup.get(scope.internalId) || []).slice(-12).map(item => {
           const forwardedContext = forwardContextProvider(selected, item);
           return {
           userId: String(item.user_id || ""), isBot: item.isBot === true,
           text: redactSensitive(String(item.text || ""), selected, { force: true }).slice(0, 800), at: item.sentAt || item.at || null,
           ...(forwardedContext ? { forwardedContext } : {})
-        }; }) };
+        }; });
+      const personTopic = scope.nativeWakeId ? "" : recentContext.filter(item => !item.isBot && item.userId === scope.userId).slice(-2).map(item => item.text).join(" ");
+      snapshot = { ...snapshot, recentContext, knownContext: redactSensitive(compactMemory(memory, scope.internalId, selected,
+        scope.userId, personTopic), selected, { force: true }).slice(0, 6000) };
       const query = scope.nativeWakeId ? "收到群友拍一拍 打招呼 可选择回应或沉默"
         : [scope.publicMemeQuery, ...snapshot.recentContext.filter(item => !item.isBot).slice(-3).map(item => item.text)].filter(Boolean).join(" ");
       if (scope.nativeWakeId) snapshot = { ...snapshot, nativeEvent: { kind: "poke", userId: scope.userId, sentAt: scope.pokeObservation.sentAt },
@@ -10578,10 +10592,16 @@ async function main() {
       },
       read_memory: (ctx, args, { signal }) => {
         const scope = requireSocialCurrent(ctx, signal);
+        const selected = configForGroupAccount(accountById(config, scope.accountId), scope.internalId);
         const snapshot = getSocialSnapshot(memory, { ...ctx, now: Date.now(), limit: 1 });
         const select = items => items.filter(item => item.userId === scope.userId && (!args.query || String(item.text).includes(args.query)))
           .slice(-Math.min(args.limit || 8, 20)).map(item => ({ text: String(item.text).slice(0, 240), kind: item.kind, candidate: item.candidate === true }));
-        return socialEvidenceProjection({ mood: snapshot.mood, experiences: select(snapshot.experiences), habits: select(snapshot.habits) });
+        const person = selected.memory?.enabled !== false && selected.memory?.people?.enabled === true && ctx.conversationId.startsWith("group:")
+          ? personMemoryContext(memory, { logicalBotId: ctx.logicalId, userId: scope.userId, conversationId: ctx.conversationId,
+            now: Date.now(), understanding: true, sourceEligible: reconstructedPeopleSourceEligible,
+            ...(args.query ? { queryText: args.query } : { maxEntries: Math.min(args.limit || 3, 3) }) }) : "";
+        return socialEvidenceProjection({ mood: snapshot.mood, experiences: select(snapshot.experiences), habits: select(snapshot.habits),
+          ...(person ? { person } : {}) });
       },
       web_search: async (ctx, args, { signal }) => {
         const scope = requireSocialCurrent(ctx, signal);
@@ -16695,6 +16715,10 @@ async function main() {
               return { ok: false, reason: "LIVE_SOURCE_STALE" };
             // Same durable intake as the verified source. Background model
             // extraction remains optional enrichment, not a prerequisite.
+            if (personStatement.correctionText) return applyLivePersonPreferenceCorrection(draft, {
+              text: personStatement.correctionText, logicalBotId: inboundIdentity.logicalBotId, accountId: accountState.id,
+              userId: senderId, verifiedSenderId: senderId, conversationId: `group:${event.group_id}`,
+              messageId: String(event.message_id), time: Number(event.time), now: Date.now() });
             return recordPersonEvidence(draft, { ...personStatement, logicalBotId: inboundIdentity.logicalBotId,
               accountId: accountState.id, userId: senderId, verifiedSenderId: senderId,
               conversationId: `group:${event.group_id}`, messageId: String(event.message_id),
@@ -16704,7 +16728,7 @@ async function main() {
           const stats = extractionCounts.liveSelfReports;
           if (result?.ok && result.changed) stats.committed++;
           else if (result?.reason === "DUPLICATE") stats.duplicate++;
-          else if (result) { stats.rejected++; stats.lastRejectionCode = result.reason; }
+          else if (result && result.reason !== "NOT_A_CORRECTION") { stats.rejected++; stats.lastRejectionCode = result.reason; }
         }
         if (!oneBotBindingCurrent(ws, inboundBinding) || !accountRuntimeIdentityCurrent(inboundIdentity, ws)) return;
       }
@@ -17629,7 +17653,7 @@ async function main() {
             const contextBundle = replyConfig.reply?.useContextBundle === false
               ? null
               : buildContextBundle({ memory, groupId, history: latestHistory, current: effectiveCurrent, config: replyConfig });
-            const memoryText = compactMemory(memory, groupId, replyConfig, senderId);
+            const memoryText = compactMemory(memory, groupId, replyConfig, senderId, effectiveCurrent.text);
             const archiveContext = await buildArchiveContext({ event: effectiveEvent, current: effectiveCurrent, history: latestHistory, memory, groupId, config: replyConfig, mode: effectiveWebSearch ? "web" : job.mode, signal });
             const webSearchBuilt = effectiveWebSearch ? await buildWebSearchContext(effectiveSearchDecision, replyConfig) : { text: "", result: null };
             if (signal.aborted || Number(job.contextRevision || 0) !== revision || accountExecutionRevision(generationAccountId, groupId) !== generationConfigRevision) return { retry: true };
